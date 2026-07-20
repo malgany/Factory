@@ -15,6 +15,14 @@ import {
   type NewContractDefinition,
 } from './catalog';
 import { CONTRACTS } from './contracts';
+import {
+  GRID_COLUMNS,
+  GRID_ROWS,
+  PLAY_AREA_MAX_COLUMN,
+  PLAY_AREA_MAX_ROW,
+  PLAY_AREA_MIN_COLUMN,
+  PLAY_AREA_MIN_ROW,
+} from './types';
 
 function customDefinition(): NewContractDefinition {
   const definition: NewContractDefinition = structuredClone(CONTRACTS[0]!);
@@ -121,6 +129,44 @@ describe('catálogo local de contratos', () => {
     expect(validation.valid).toBe(false);
     expect(validation.issues.map(({ code }) => code)).toEqual(
       expect.arrayContaining(['invalid-id', 'required', 'par-over-budget', 'overlap']),
+    );
+  });
+
+  it('accepts scenarios beyond the initial frame within the expanded bounds', () => {
+    const expanded = structuredClone(CONTRACTS[0]!);
+    expanded.fixedMachines[0] = {
+      ...expanded.fixedMachines[0]!,
+      gridX: PLAY_AREA_MIN_COLUMN + 1,
+      gridY: PLAY_AREA_MIN_ROW + 1,
+    };
+    expanded.fixedMachines[1] = {
+      ...expanded.fixedMachines[1]!,
+      gridX: PLAY_AREA_MAX_COLUMN - 2,
+      gridY: PLAY_AREA_MAX_ROW - 2,
+    };
+    expanded.obstacles = [
+      {
+        id: 'expanded-obstacle',
+        gridX: GRID_COLUMNS + 12,
+        gridY: GRID_ROWS + 8,
+        columns: 2,
+        rows: 2,
+      },
+    ];
+
+    expect(validateContractDefinition(expanded)).toEqual({ valid: true, issues: [] });
+
+    const outside = structuredClone(expanded);
+    outside.fixedMachines[0] = {
+      ...outside.fixedMachines[0]!,
+      gridX: PLAY_AREA_MIN_COLUMN - 1,
+    };
+    outside.obstacles[0] = {
+      ...outside.obstacles[0]!,
+      gridX: PLAY_AREA_MAX_COLUMN,
+    };
+    expect(validateContractDefinition(outside).issues.map(({ code }) => code)).toEqual(
+      expect.arrayContaining(['out-of-bounds']),
     );
   });
 });

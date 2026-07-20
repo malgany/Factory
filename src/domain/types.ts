@@ -1,6 +1,11 @@
 export const CELL_SIZE = 48;
 export const GRID_COLUMNS = 30;
 export const GRID_ROWS = 18;
+export const PLAY_AREA_MARGIN_STAGES = 4;
+export const PLAY_AREA_MIN_COLUMN = -GRID_COLUMNS * PLAY_AREA_MARGIN_STAGES;
+export const PLAY_AREA_MAX_COLUMN = GRID_COLUMNS * (PLAY_AREA_MARGIN_STAGES + 1);
+export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
+export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
 export type MachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';

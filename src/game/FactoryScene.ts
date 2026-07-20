@@ -9,6 +9,10 @@ import {
   CELL_SIZE,
   GRID_COLUMNS,
   GRID_ROWS,
+  PLAY_AREA_MAX_COLUMN,
+  PLAY_AREA_MAX_ROW,
+  PLAY_AREA_MIN_COLUMN,
+  PLAY_AREA_MIN_ROW,
   type ContractDefinition,
   type ContractId,
   type GameMode,
@@ -44,8 +48,14 @@ import {
   springVelocity,
 } from './physicsModel';
 
-const WORLD_WIDTH = GRID_COLUMNS * CELL_SIZE;
-const WORLD_HEIGHT = GRID_ROWS * CELL_SIZE;
+const STAGE_WIDTH = GRID_COLUMNS * CELL_SIZE;
+const STAGE_HEIGHT = GRID_ROWS * CELL_SIZE;
+const PLAY_AREA_MIN_X = PLAY_AREA_MIN_COLUMN * CELL_SIZE;
+const PLAY_AREA_MAX_X = PLAY_AREA_MAX_COLUMN * CELL_SIZE;
+const PLAY_AREA_MIN_Y = PLAY_AREA_MIN_ROW * CELL_SIZE;
+const PLAY_AREA_MAX_Y = PLAY_AREA_MAX_ROW * CELL_SIZE;
+const PLAY_AREA_WIDTH = PLAY_AREA_MAX_X - PLAY_AREA_MIN_X;
+const PLAY_AREA_HEIGHT = PLAY_AREA_MAX_Y - PLAY_AREA_MIN_Y;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 2;
 const GRID_ROTATION_STEP = 5;
@@ -61,11 +71,9 @@ const SPRING_SPEED = 11.5;
 const FIXED_PHYSICS_STEP_MS = FIXED_PHYSICS_STEP_SECONDS * 1000;
 
 const COLORS = {
-  background: 0xf4f5f1,
   board: 0x3475b8,
   grid: 0x78a6d0,
   gridStrong: 0xe8f3fc,
-  gridBorder: 0xd7eaf8,
   graphite: 0x293139,
   graphiteSoft: 0x5f6a72,
   blue: 0x527da5,
@@ -88,6 +96,15 @@ interface BoxRuntime {
   image: Phaser.GameObjects.Image;
   bornAtSimulationMs: number;
   springReadyAt: number;
+}
+
+interface WorldBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  width: number;
+  height: number;
 }
 
 interface Particle {
@@ -134,6 +151,7 @@ export interface FactoryDebugApi {
   getObstacles(): ObstacleDefinition[];
   getBoxes(): Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
   getCamera(): { scrollX: number; scrollY: number; zoom: number };
+  getWorldBounds(): WorldBounds;
   startMode(mode: GameMode, contractId?: ContractId): void;
   startEditor(contract: ContractDefinition): void;
   getEditorDraft(): ContractDefinition;
@@ -291,8 +309,13 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.cameras.main.setBackgroundColor(COLORS.background);
-    this.cameras.main.setBounds(-240, -180, WORLD_WIDTH + 480, WORLD_HEIGHT + 360);
+    this.cameras.main.setBackgroundColor(COLORS.board);
+    this.cameras.main.setBounds(
+      PLAY_AREA_MIN_X,
+      PLAY_AREA_MIN_Y,
+      PLAY_AREA_WIDTH,
+      PLAY_AREA_HEIGHT,
+    );
     this.matter.set60Hz();
     this.matter.world.autoUpdate = false;
 
@@ -453,7 +476,10 @@ export class FactoryScene extends Phaser.Scene {
     this.mode = 'preview';
     this.contract = cloneContract(draft);
     this.availableMachines = [...draft.availableMachines];
-    this.machines = cloneMachines(draft.fixedMachines).map((machine) => ({ ...machine, fixed: true }));
+    this.machines = cloneMachines(draft.fixedMachines).map((machine) => ({
+      ...machine,
+      fixed: true,
+    }));
     this.obstacles = cloneObstacles(draft.obstacles);
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
@@ -567,7 +593,8 @@ export class FactoryScene extends Phaser.Scene {
       return false;
     }
 
-    const snapToHalfCell = (value: number) => Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
+    const snapToHalfCell = (value: number) =>
+      Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
     const machine: MachineState = {
       id: this.createMachineId(),
       type,
@@ -793,11 +820,7 @@ export class FactoryScene extends Phaser.Scene {
 
   public setSimulationSpeed(speed: number): void {
     if (!Number.isFinite(speed)) return;
-    this.simulationSpeed = Phaser.Math.Clamp(
-      speed,
-      MIN_SIMULATION_SPEED,
-      MAX_SIMULATION_SPEED,
-    );
+    this.simulationSpeed = Phaser.Math.Clamp(speed, MIN_SIMULATION_SPEED, MAX_SIMULATION_SPEED);
     this.emitSnapshot();
   }
 
@@ -834,8 +857,8 @@ export class FactoryScene extends Phaser.Scene {
     for (const machine of prepared) {
       const candidate: MachineState = {
         ...machine,
-        gridX: Math.max(0, Math.min(GRID_COLUMNS - 1, machine.gridX)),
-        gridY: Math.max(0, Math.min(GRID_ROWS - 1, machine.gridY)),
+        gridX: Math.max(PLAY_AREA_MIN_COLUMN, Math.min(PLAY_AREA_MAX_COLUMN - 1, machine.gridX)),
+        gridY: Math.max(PLAY_AREA_MIN_ROW, Math.min(PLAY_AREA_MAX_ROW - 1, machine.gridY)),
         angle: normalizeAngle(machine.angle),
         fixed: this.isAuthoring(),
       };
@@ -1165,11 +1188,7 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    if (
-      this.drag?.kind === 'obstacle-move' &&
-      this.drag.previewObstacle &&
-      pointer.isDown
-    ) {
+    if (this.drag?.kind === 'obstacle-move' && this.drag.previewObstacle && pointer.isDown) {
       const gridX = Math.round(world.x / CELL_SIZE - (this.drag.grabOffsetX ?? 0));
       const gridY = Math.round(world.y / CELL_SIZE - (this.drag.grabOffsetY ?? 0));
       this.drag.previewObstacle = { ...this.drag.previewObstacle, gridX, gridY };
@@ -1180,19 +1199,12 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    if (
-      this.drag?.kind === 'obstacle-resize' &&
-      this.drag.previewObstacle &&
-      pointer.isDown
-    ) {
+    if (this.drag?.kind === 'obstacle-resize' && this.drag.previewObstacle && pointer.isDown) {
       const columns = Math.max(
         1,
         Math.round(world.x / CELL_SIZE - this.drag.previewObstacle.gridX),
       );
-      const rows = Math.max(
-        1,
-        Math.round(world.y / CELL_SIZE - this.drag.previewObstacle.gridY),
-      );
+      const rows = Math.max(1, Math.round(world.y / CELL_SIZE - this.drag.previewObstacle.gridY));
       this.drag.previewObstacle = { ...this.drag.previewObstacle, columns, rows };
       this.drag.valid = this.isObstaclePlacementValid(
         this.drag.previewObstacle,
@@ -1375,10 +1387,7 @@ export class FactoryScene extends Phaser.Scene {
     });
     const id = ++this.boxSequence;
     body.plugin = { ...body.plugin, factoryBoxId: id };
-    const image = this.add
-      .image(output.x, output.y, BOX_TEXTURE_KEY)
-      .setOrigin(0.5)
-      .setDepth(11);
+    const image = this.add.image(output.x, output.y, BOX_TEXTURE_KEY).setOrigin(0.5).setDepth(11);
     this.boxes.set(id, {
       id,
       body,
@@ -1478,7 +1487,12 @@ export class FactoryScene extends Phaser.Scene {
     const lost: BoxRuntime[] = [];
     for (const box of this.boxes.values()) {
       const { x, y } = box.body.position;
-      if (x < -100 || x > WORLD_WIDTH + 100 || y < -160 || y > WORLD_HEIGHT + 120) {
+      if (
+        x < PLAY_AREA_MIN_X - 100 ||
+        x > PLAY_AREA_MAX_X + 100 ||
+        y < PLAY_AREA_MIN_Y - 160 ||
+        y > PLAY_AREA_MAX_Y + 120
+      ) {
         lost.push(box);
       }
     }
@@ -1500,8 +1514,8 @@ export class FactoryScene extends Phaser.Scene {
     if (this.status === 'success') {
       for (let index = 0; index < 42; index += 1) {
         this.particles.push({
-          x: WORLD_WIDTH / 2 + Phaser.Math.Between(-180, 180),
-          y: WORLD_HEIGHT / 2 + Phaser.Math.Between(-40, 40),
+          x: STAGE_WIDTH / 2 + Phaser.Math.Between(-180, 180),
+          y: STAGE_HEIGHT / 2 + Phaser.Math.Between(-40, 40),
           velocityX: Phaser.Math.FloatBetween(-130, 130),
           velocityY: Phaser.Math.FloatBetween(-190, -60),
           life: Phaser.Math.FloatBetween(0.8, 1.5),
@@ -1571,10 +1585,7 @@ export class FactoryScene extends Phaser.Scene {
     const effects = this.effectsGraphics;
     effects.clear();
     for (const particle of this.particles) {
-      effects.fillStyle(
-        particle.color,
-        Phaser.Math.Clamp(particle.life / particle.maxLife, 0, 1),
-      );
+      effects.fillStyle(particle.color, Phaser.Math.Clamp(particle.life / particle.maxLife, 0, 1));
       effects.fillRect(particle.x, particle.y, particle.size, particle.size);
     }
 
@@ -1602,30 +1613,33 @@ export class FactoryScene extends Phaser.Scene {
     const graphics = this.gridGraphics;
     graphics.clear();
     graphics.fillStyle(COLORS.board, 1);
-    graphics.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    graphics.fillRect(PLAY_AREA_MIN_X, PLAY_AREA_MIN_Y, PLAY_AREA_WIDTH, PLAY_AREA_HEIGHT);
 
     if (this.gridEnabled) {
-      for (let column = 0; column <= GRID_COLUMNS; column += 1) {
+      for (let column = PLAY_AREA_MIN_COLUMN; column <= PLAY_AREA_MAX_COLUMN; column += 1) {
         const strong = column % 5 === 0;
         graphics.lineStyle(
           (strong ? 1.35 : 1) / zoom,
           strong ? COLORS.gridStrong : COLORS.grid,
           0.9,
         );
-        graphics.lineBetween(column * CELL_SIZE, 0, column * CELL_SIZE, WORLD_HEIGHT);
+        graphics.lineBetween(
+          column * CELL_SIZE,
+          PLAY_AREA_MIN_Y,
+          column * CELL_SIZE,
+          PLAY_AREA_MAX_Y,
+        );
       }
-      for (let row = 0; row <= GRID_ROWS; row += 1) {
+      for (let row = PLAY_AREA_MIN_ROW; row <= PLAY_AREA_MAX_ROW; row += 1) {
         const strong = row % 5 === 0;
         graphics.lineStyle(
           (strong ? 1.35 : 1) / zoom,
           strong ? COLORS.gridStrong : COLORS.grid,
           0.9,
         );
-        graphics.lineBetween(0, row * CELL_SIZE, WORLD_WIDTH, row * CELL_SIZE);
+        graphics.lineBetween(PLAY_AREA_MIN_X, row * CELL_SIZE, PLAY_AREA_MAX_X, row * CELL_SIZE);
       }
     }
-    graphics.lineStyle(2 / zoom, COLORS.gridBorder, 0.95);
-    graphics.strokeRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   }
 
   private drawObstacle(
@@ -1828,10 +1842,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private drawBox(box: BoxRuntime): void {
-    const age = Math.min(
-      1,
-      (this.simulationVisualTimeMs - box.bornAtSimulationMs) / 180,
-    );
+    const age = Math.min(1, (this.simulationVisualTimeMs - box.bornAtSimulationMs) / 180);
     const speed = Math.hypot(box.body.velocity.x, box.body.velocity.y);
     const stretch = Phaser.Math.Clamp(speed / 28, 0, 0.12);
     const width = BOX_SIZE * (0.8 + age * 0.2 + stretch);
@@ -1890,14 +1901,24 @@ export class FactoryScene extends Phaser.Scene {
     const width = obstacle.columns * CELL_SIZE;
     const height = obstacle.rows * CELL_SIZE;
     graphics.lineStyle(3 / logicalZoom, color, 1);
-    graphics.strokeRect(x - 4 / logicalZoom, y - 4 / logicalZoom, width + 8 / logicalZoom, height + 8 / logicalZoom);
+    graphics.strokeRect(
+      x - 4 / logicalZoom,
+      y - 4 / logicalZoom,
+      width + 8 / logicalZoom,
+      height + 8 / logicalZoom,
+    );
     const handle = this.obstacleResizeHandle(obstacle);
     const size = 13 / logicalZoom;
     graphics.fillStyle(COLORS.white, 1);
     graphics.fillRect(handle.x - size, handle.y - size, size * 2, size * 2);
     graphics.lineStyle(3 / logicalZoom, color, 1);
     graphics.strokeRect(handle.x - size, handle.y - size, size * 2, size * 2);
-    graphics.lineBetween(handle.x - size * 0.5, handle.y + size * 0.5, handle.x + size * 0.5, handle.y - size * 0.5);
+    graphics.lineBetween(
+      handle.x - size * 0.5,
+      handle.y + size * 0.5,
+      handle.x + size * 0.5,
+      handle.y - size * 0.5,
+    );
   }
 
   private rebuildStaticBodies(): void {
@@ -1950,7 +1971,14 @@ export class FactoryScene extends Phaser.Scene {
     machines = this.machines,
   ): boolean {
     const polygon = machinePolygon(candidate);
-    if (!polygonWithinBounds(polygon, WORLD_WIDTH, WORLD_HEIGHT)) return false;
+    if (
+      !polygonWithinBounds(polygon, PLAY_AREA_WIDTH, PLAY_AREA_HEIGHT, 3, {
+        x: PLAY_AREA_MIN_X,
+        y: PLAY_AREA_MIN_Y,
+      })
+    ) {
+      return false;
+    }
     for (const machine of machines) {
       if (machine.id === ignoredId) continue;
       if (polygonsOverlap(polygon, machinePolygon(machine))) return false;
@@ -1971,10 +1999,7 @@ export class FactoryScene extends Phaser.Scene {
     return true;
   }
 
-  private isObstaclePlacementValid(
-    candidate: ObstacleDefinition,
-    ignoredId?: string,
-  ): boolean {
+  private isObstaclePlacementValid(candidate: ObstacleDefinition, ignoredId?: string): boolean {
     if (
       !Number.isInteger(candidate.gridX) ||
       !Number.isInteger(candidate.gridY) ||
@@ -1982,10 +2007,10 @@ export class FactoryScene extends Phaser.Scene {
       !Number.isInteger(candidate.rows) ||
       candidate.columns < 1 ||
       candidate.rows < 1 ||
-      candidate.gridX < 0 ||
-      candidate.gridY < 0 ||
-      candidate.gridX + candidate.columns > GRID_COLUMNS ||
-      candidate.gridY + candidate.rows > GRID_ROWS
+      candidate.gridX < PLAY_AREA_MIN_COLUMN ||
+      candidate.gridY < PLAY_AREA_MIN_ROW ||
+      candidate.gridX + candidate.columns > PLAY_AREA_MAX_COLUMN ||
+      candidate.gridY + candidate.rows > PLAY_AREA_MAX_ROW
     ) {
       return false;
     }
@@ -2404,18 +2429,23 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private isInsideWorld(point: Point): boolean {
-    return point.x >= 0 && point.x <= WORLD_WIDTH && point.y >= 0 && point.y <= WORLD_HEIGHT;
+    return (
+      point.x >= PLAY_AREA_MIN_X &&
+      point.x <= PLAY_AREA_MAX_X &&
+      point.y >= PLAY_AREA_MIN_Y &&
+      point.y <= PLAY_AREA_MAX_Y
+    );
   }
 
   private fitCamera(): void {
     const camera = this.cameras.main;
     const fit =
       Math.min(
-        camera.width / DISPLAY_DENSITY / WORLD_WIDTH,
-        camera.height / DISPLAY_DENSITY / WORLD_HEIGHT,
+        camera.width / DISPLAY_DENSITY / STAGE_WIDTH,
+        camera.height / DISPLAY_DENSITY / STAGE_HEIGHT,
       ) * 0.92;
     camera.setZoom(toCameraZoom(Phaser.Math.Clamp(fit, MIN_ZOOM, 1.12)));
-    camera.centerOn(WORLD_WIDTH / 2, WORLD_HEIGHT / 2);
+    camera.centerOn(STAGE_WIDTH / 2, STAGE_HEIGHT / 2);
     this.drawGrid(true);
     this.emitCamera();
   }
@@ -2440,6 +2470,14 @@ export class FactoryScene extends Phaser.Scene {
         scrollX: this.cameras.main.scrollX,
         scrollY: this.cameras.main.scrollY,
         zoom: fromCameraZoom(this.cameras.main.zoom),
+      }),
+      getWorldBounds: () => ({
+        minX: PLAY_AREA_MIN_X,
+        minY: PLAY_AREA_MIN_Y,
+        maxX: PLAY_AREA_MAX_X,
+        maxY: PLAY_AREA_MAX_Y,
+        width: PLAY_AREA_WIDTH,
+        height: PLAY_AREA_HEIGHT,
       }),
       startMode: (mode, contractId) => this.startMode(mode, contractId),
       startEditor: (contract) => this.startEditor(contract),

@@ -2,6 +2,10 @@ import { BUILTIN_CONTRACT_IDS, CONTRACTS, isBuiltinContractId, orderContracts } 
 import {
   GRID_COLUMNS,
   GRID_ROWS,
+  PLAY_AREA_MAX_COLUMN,
+  PLAY_AREA_MAX_ROW,
+  PLAY_AREA_MIN_COLUMN,
+  PLAY_AREA_MIN_ROW,
   type BuiltinContractId,
   type ContractCatalogSave,
   type ContractDefinition,
@@ -671,15 +675,21 @@ function rectangleCorners(center: Point, width: number, height: number, angle: n
 }
 
 function polygonWithinBoard(polygon: readonly Point[]): boolean {
-  return polygon.every(({ x, y }) => x >= 0 && y >= 0 && x <= GRID_COLUMNS && y <= GRID_ROWS);
+  return polygon.every(
+    ({ x, y }) =>
+      x >= PLAY_AREA_MIN_COLUMN &&
+      y >= PLAY_AREA_MIN_ROW &&
+      x <= PLAY_AREA_MAX_COLUMN &&
+      y <= PLAY_AREA_MAX_ROW,
+  );
 }
 
 function obstacleWithinBoard(obstacle: ObstacleDefinition): boolean {
   return (
-    obstacle.gridX >= 0 &&
-    obstacle.gridY >= 0 &&
-    obstacle.gridX + obstacle.columns <= GRID_COLUMNS &&
-    obstacle.gridY + obstacle.rows <= GRID_ROWS
+    obstacle.gridX >= PLAY_AREA_MIN_COLUMN &&
+    obstacle.gridY >= PLAY_AREA_MIN_ROW &&
+    obstacle.gridX + obstacle.columns <= PLAY_AREA_MAX_COLUMN &&
+    obstacle.gridY + obstacle.rows <= PLAY_AREA_MAX_ROW
   );
 }
 

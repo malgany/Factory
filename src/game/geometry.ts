@@ -146,12 +146,13 @@ export function polygonWithinBounds(
   width: number,
   height: number,
   margin = 3,
+  origin: Point = { x: 0, y: 0 },
 ): boolean {
   return polygon.every(
     (point) =>
-      point.x >= margin &&
-      point.y >= margin &&
-      point.x <= width - margin &&
-      point.y <= height - margin,
+      point.x >= origin.x + margin &&
+      point.y >= origin.y + margin &&
+      point.x <= origin.x + width - margin &&
+      point.y <= origin.y + height - margin,
   );
 }

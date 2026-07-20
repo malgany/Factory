@@ -25,13 +25,28 @@ interface FactoryDebugState {
     scrollX: number;
     scrollY: number;
   };
+  worldBounds: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+    width: number;
+    height: number;
+  };
 }
 
 type DebugWindow = Window & {
   __FACTORY_DEBUG__?: {
-    getSnapshot(): Omit<FactoryDebugState, 'machines' | 'camera'>;
+    getSnapshot(): Omit<FactoryDebugState, 'machines' | 'camera' | 'worldBounds'>;
     getMachines(): MachineDebugState[];
     getCamera(): FactoryDebugState['camera'];
+    getWorldBounds(): FactoryDebugState['worldBounds'];
+    placeMachine(
+      type: MachineDebugState['type'],
+      gridX: number,
+      gridY: number,
+      angle?: number,
+    ): boolean;
     selectMachine(id: string): boolean;
     completeContract(): void;
   };
@@ -52,6 +67,7 @@ async function debugState(page: Page): Promise<FactoryDebugState> {
       ...debug.getSnapshot(),
       machines: debug.getMachines(),
       camera: debug.getCamera(),
+      worldBounds: debug.getWorldBounds(),
     };
   });
 }
@@ -209,7 +225,7 @@ test('grade alterna encaixe de posição e rotação', async ({ page }) => {
   const afterDrag = (await debugState(page)).machines.find(({ id }) => id === conveyor.id);
   if (!afterDrag) throw new Error('Dragged machine not found');
   expect(Math.abs(afterDrag.gridX - beforeDrag.gridX)).toBeGreaterThan(0.1);
-  expect(Math.abs((afterDrag.gridX % 0.5) || 0)).toBeGreaterThan(0.01);
+  expect(Math.abs(afterDrag.gridX % 0.5 || 0)).toBeGreaterThan(0.01);
 });
 
 test('seleção não abre painel informativo e protege máquinas fixas', async ({ page }) => {
@@ -249,8 +265,8 @@ test('controle central oferece sete velocidades reais de simulação', async ({ 
   await page.locator('[data-action="run"]').click();
   await page.waitForTimeout(400);
   await page.locator('[data-action="run"]').click();
-  const fastElapsed = await page.evaluate(() =>
-    (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
+  const fastElapsed = await page.evaluate(
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
   );
   expect(fastElapsed).toBeGreaterThan(0.75);
 
@@ -265,8 +281,8 @@ test('controle central oferece sete velocidades reais de simulação', async ({ 
   await page.locator('[data-action="run"]').click();
   await page.waitForTimeout(400);
   await page.locator('[data-action="run"]').click();
-  const slowElapsed = await page.evaluate(() =>
-    (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
+  const slowElapsed = await page.evaluate(
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
   );
   expect(slowElapsed).toBeLessThan(0.2);
 });
@@ -326,9 +342,7 @@ test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ pa
   await expect(page.locator('#status-label')).toHaveText('Simulando');
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
   await expect.poll(async () => (await debugState(page)).selectedMachine).toBeUndefined();
-  await expect
-    .poll(async () => (await debugState(page)).metrics.elapsedSeconds)
-    .toBeGreaterThan(0);
+  await expect.poll(async () => (await debugState(page)).metrics.elapsedSeconds).toBeGreaterThan(0);
 });
 
 test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
@@ -357,17 +371,13 @@ test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
 
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   for (let index = 0; index < 20; index += 1) await page.mouse.wheel(0, 900);
-  await expect
-    .poll(async () => (await debugState(page)).camera.zoom)
-    .toBeCloseTo(1, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, -900);
   await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(2, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, 900);
-  await expect
-    .poll(async () => (await debugState(page)).camera.zoom)
-    .toBeCloseTo(1, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1, 2);
 
   await page.setViewportSize({ width: 1920, height: 1080 });
   await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1.12, 2);
@@ -473,4 +483,59 @@ test('restaura o layout persistido do sandbox', async ({ page }) => {
     .poll(async () => (await debugState(page)).machines.find(({ id }) => id === sandboxMachine.id))
     .toMatchObject(sandboxMachine);
   await expect(page.locator('[data-action="mute"]')).toHaveAttribute('aria-label', 'Ativar som');
+});
+
+test('mundo expandido aceita e persiste construcoes fora do quadro inicial', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const initial = await debugState(page);
+  expect(initial.worldBounds).toEqual({
+    minX: -120 * 48,
+    minY: -72 * 48,
+    maxX: 150 * 48,
+    maxY: 90 * 48,
+    width: 270 * 48,
+    height: 162 * 48,
+  });
+
+  const placements = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    return {
+      negative: debug.placeMachine('source', -10, 8),
+      beyondOriginal: debug.placeMachine('receiver', 40, 8),
+      outsideLeft: debug.placeMachine('conveyor', -121, 0),
+      outsideRight: debug.placeMachine('conveyor', 150, 0),
+    };
+  });
+
+  expect(placements).toEqual({
+    negative: true,
+    beyondOriginal: true,
+    outsideLeft: false,
+    outsideRight: false,
+  });
+  await expect
+    .poll(async () => (await debugState(page)).machines)
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'source', gridX: -10, gridY: 8 }),
+        expect.objectContaining({ type: 'receiver', gridX: 40, gridY: 8 }),
+      ]),
+    );
+
+  await page.reload();
+  await expect(page.locator('#menu-title')).toBeVisible();
+  await page.waitForFunction(() => Boolean((window as DebugWindow).__FACTORY_DEBUG__));
+  await startSandbox(page);
+
+  await expect
+    .poll(async () => (await debugState(page)).machines)
+    .toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'source', gridX: -10, gridY: 8 }),
+        expect.objectContaining({ type: 'receiver', gridX: 40, gridY: 8 }),
+      ]),
+    );
 });
