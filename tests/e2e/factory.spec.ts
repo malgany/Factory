@@ -287,7 +287,7 @@ test('um clique sempre alterna entre simular e pausar', async ({ page }) => {
   }
 });
 
-test('hotbar permite arrastar uma máquina diretamente para o grid', async ({ page }) => {
+test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
@@ -317,7 +317,18 @@ test('hotbar permite arrastar uma máquina diretamente para o grid', async ({ pa
   const placed = (await debugState(page)).machines.find(
     (machine) => !before.machines.some(({ id }) => id === machine.id),
   );
-  expect(placed?.type).toBe('spring');
+  if (!placed) throw new Error('Máquina arrastada não foi encontrada');
+  expect(placed.type).toBe('spring');
+  await expect.poll(async () => (await debugState(page)).selectedMachine?.id).toBe(placed.id);
+
+  await page.locator('[data-action="run"]').click();
+
+  await expect(page.locator('#status-label')).toHaveText('Simulando');
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+  await expect.poll(async () => (await debugState(page)).selectedMachine).toBeUndefined();
+  await expect
+    .poll(async () => (await debugState(page)).metrics.elapsedSeconds)
+    .toBeGreaterThan(0);
 });
 
 test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {

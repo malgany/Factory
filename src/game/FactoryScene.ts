@@ -735,8 +735,19 @@ export class FactoryScene extends Phaser.Scene {
     this.runSimulation();
   }
 
+  private clearInteractionFocus(): void {
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.drag = undefined;
+  }
+
   public runSimulation(): void {
     if (this.status === 'paused') {
+      this.clearInteractionFocus();
       this.status = 'running';
       this.matter.world.resume();
       this.emitSnapshot();
@@ -748,10 +759,7 @@ export class FactoryScene extends Phaser.Scene {
     this.metrics = this.freshMetrics();
     this.spawnAccumulator = this.getSpawnInterval();
     this.status = 'running';
-    this.selectedTool = undefined;
-    this.selectedEditorTool = undefined;
-    this.ghostMachine = undefined;
-    this.ghostObstacle = undefined;
+    this.clearInteractionFocus();
     this.matter.world.resume();
     this.emitSnapshot();
   }
@@ -761,6 +769,7 @@ export class FactoryScene extends Phaser.Scene {
       this.status = 'paused';
       this.matter.world.pause();
     } else if (this.status === 'paused') {
+      this.clearInteractionFocus();
       this.status = 'running';
       this.matter.world.resume();
     }
