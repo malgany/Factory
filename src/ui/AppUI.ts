@@ -82,6 +82,7 @@ const STATUS_COPY: Record<GameSnapshot['status'], string> = {
 };
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
+const MINIMUM_LOADING_DURATION_MS = 360;
 
 export class AppUI {
   readonly gameContainerId = 'game-container';
@@ -101,6 +102,11 @@ export class AppUI {
   private editorPreviewActive = false;
   private resultContractId?: ContractId;
   private pendingAdminAction?: { kind: 'restore' | 'delete'; contractId: ContractId };
+  private gameReady = false;
+  private readonly loadingStartedAt = performance.now();
+  private readonly domEvents = new AbortController();
+  private snapshot?: GameSnapshot;
+  private readyTimer?: number;
   private unsubs: Unsubscribe[] = [];
   private toastTimer?: number;
 
@@ -115,6 +121,7 @@ export class AppUI {
     this.audio = new AudioService(options.progress.settings);
 
     this.renderShell();
+    this.setGameReady(false);
     this.bindDOM();
     this.bindEvents();
     this.renderMenuCards();
@@ -138,10 +145,7 @@ export class AppUI {
     this.renderMenuCards();
   }
 
-  openAdminEditor(
-    contract: ContractDefinition,
-    options: AdminEditorOpenOptions = {},
-  ): void {
+  openAdminEditor(contract: ContractDefinition, options: AdminEditorOpenOptions = {}): void {
     if (!this.adminAvailable || !this.adminEnabled) return;
     this.editorContract = structuredClone(contract);
     this.editorIsNew = options.isNew ?? false;
@@ -200,9 +204,11 @@ export class AppUI {
   }
 
   destroy(): void {
+    this.domEvents.abort();
     for (const unsubscribe of this.unsubs) unsubscribe();
     this.unsubs = [];
     if (this.toastTimer) window.clearTimeout(this.toastTimer);
+    if (this.readyTimer !== undefined) window.clearTimeout(this.readyTimer);
     this.audio.destroy();
     this.root.replaceChildren();
   }
@@ -426,39 +432,75 @@ export class AppUI {
             </div>
           </div>
         </section>
+
+        <div id="game-loading" class="game-loading" role="status" aria-live="polite">
+          <div class="loading-card">
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <strong>Preparando a fábrica</strong>
+            <span>Carregando física e cenário...</span>
+          </div>
+        </div>
       </main>`;
   }
 
   private bindDOM(): void {
-    this.root.addEventListener('pointerdown', () => void this.audio.resume(), { once: true });
-    this.element('[data-action="toggle-grid"]').addEventListener('pointerdown', (event) => {
-      event.stopPropagation();
-      void this.audio.resume();
+    this.root.addEventListener(
+      'click',
+      (event) => {
+        if (this.gameReady) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      },
+      { capture: true, signal: this.domEvents.signal },
+    );
+    this.root.addEventListener('pointerdown', () => void this.audio.resume(), {
+      once: true,
+      signal: this.domEvents.signal,
     });
-    this.root.addEventListener('pointerover', (event) => {
-      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
-      if (!button || button.disabled) return;
-      const previousTarget = event.relatedTarget;
-      if (previousTarget instanceof Node && button.contains(previousTarget)) return;
-      this.audio.play('hover');
-    });
-    this.root.addEventListener('click', (event) => {
-      const source = event.target as HTMLElement;
-      const button = source.closest<HTMLButtonElement>('button');
-      if (button && !button.disabled) this.audio.play('click');
-      const target = source.closest<HTMLElement>('[data-action]');
-      if (!target) return;
-      const action = target.dataset.action;
-      if (action) this.handleAction(action);
-    });
+    this.element('[data-action="toggle-grid"]').addEventListener(
+      'pointerdown',
+      (event) => {
+        event.stopPropagation();
+        void this.audio.resume();
+      },
+      { signal: this.domEvents.signal },
+    );
+    this.root.addEventListener(
+      'pointerover',
+      (event) => {
+        const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
+        if (!button || button.disabled) return;
+        const previousTarget = event.relatedTarget;
+        if (previousTarget instanceof Node && button.contains(previousTarget)) return;
+        this.audio.play('hover');
+      },
+      { signal: this.domEvents.signal },
+    );
+    this.root.addEventListener(
+      'click',
+      (event) => {
+        const source = event.target as HTMLElement;
+        const button = source.closest<HTMLButtonElement>('button');
+        if (button && !button.disabled) this.audio.play('click');
+        const target = source.closest<HTMLElement>('[data-action]');
+        if (!target) return;
+        const action = target.dataset.action;
+        if (action) this.handleAction(action);
+      },
+      { signal: this.domEvents.signal },
+    );
 
-    this.element('[data-start-sandbox]').addEventListener('click', () => {
-      this.hideMenu();
-      appEvents.emit('ui:start-mode', {
-        mode: 'sandbox',
-        machines: structuredClone(this.progress.sandbox.machines),
-      });
-    });
+    this.element('[data-start-sandbox]').addEventListener(
+      'click',
+      () => {
+        this.hideMenu();
+        appEvents.emit('ui:start-mode', {
+          mode: 'sandbox',
+          machines: structuredClone(this.progress.sandbox.machines),
+        });
+      },
+      { signal: this.domEvents.signal },
+    );
 
     const preventDirtyUnload = (event: BeforeUnloadEvent) => {
       if (!this.editorContract || !this.editorDirty) return;
@@ -468,29 +510,34 @@ export class AppUI {
     window.addEventListener('beforeunload', preventDirtyUnload);
     this.unsubs.push(() => window.removeEventListener('beforeunload', preventDirtyUnload));
 
-    this.root.addEventListener('input', (event) => {
-      const input = event.target as HTMLInputElement;
-      if (input.closest('#editor-contract-form')) {
-        this.handleEditorFormInput();
-        return;
-      }
-      if (input.dataset.speed !== undefined) {
-        const index = Math.max(0, Math.min(SIMULATION_SPEEDS.length - 1, Number(input.value)));
-        const speed = SIMULATION_SPEEDS[index] ?? 1;
-        this.renderSimulationSpeed(speed);
-        appEvents.emit('ui:set-simulation-speed', { speed });
-        return;
-      }
-      if (input.dataset.volume === undefined) return;
-      const volume = Number(input.value) / 100;
-      this.audio.setVolume(volume);
-      this.commitSettings({ volume, muted: volume === 0 ? true : this.audio.isMuted });
-      appEvents.emit('ui:set-volume', { volume });
-    });
+    this.root.addEventListener(
+      'input',
+      (event) => {
+        const input = event.target as HTMLInputElement;
+        if (input.closest('#editor-contract-form')) {
+          this.handleEditorFormInput();
+          return;
+        }
+        if (input.dataset.speed !== undefined) {
+          const index = Math.max(0, Math.min(SIMULATION_SPEEDS.length - 1, Number(input.value)));
+          const speed = SIMULATION_SPEEDS[index] ?? 1;
+          this.renderSimulationSpeed(speed);
+          appEvents.emit('ui:set-simulation-speed', { speed });
+          return;
+        }
+        if (input.dataset.volume === undefined) return;
+        const volume = Number(input.value) / 100;
+        this.audio.setVolume(volume);
+        this.commitSettings({ volume, muted: volume === 0 ? true : this.audio.isMuted });
+        appEvents.emit('ui:set-volume', { volume });
+      },
+      { signal: this.domEvents.signal },
+    );
   }
 
   private bindEvents(): void {
     this.unsubs.push(
+      appEvents.on('game:ready', () => this.finishGameLoading()),
       appEvents.on('game:snapshot', (snapshot) => this.renderSnapshot(snapshot)),
       appEvents.on('game:angle', (payload) => this.renderAngle(payload)),
       appEvents.on('game:camera', ({ zoom }) => {
@@ -527,6 +574,31 @@ export class AppUI {
     );
   }
 
+  private setGameReady(ready: boolean): void {
+    this.gameReady = ready;
+    const shell = this.element('.factory-app');
+    const loading = this.element('#game-loading');
+    shell.setAttribute('aria-busy', String(!ready));
+    this.element('#game-ui').toggleAttribute('inert', !ready);
+    this.element('#menu-screen').toggleAttribute('inert', !ready);
+    loading.classList.toggle('is-hidden', ready);
+    loading.setAttribute('aria-hidden', String(ready));
+  }
+
+  private finishGameLoading(): void {
+    if (this.gameReady || this.readyTimer !== undefined) return;
+    const elapsed = performance.now() - this.loadingStartedAt;
+    const remaining = Math.max(0, MINIMUM_LOADING_DURATION_MS - elapsed);
+    if (remaining === 0) {
+      this.setGameReady(true);
+      return;
+    }
+    this.readyTimer = window.setTimeout(() => {
+      this.readyTimer = undefined;
+      this.setGameReady(true);
+    }, remaining);
+  }
+
   private handleAction(action: string): void {
     switch (action) {
       case 'menu':
@@ -539,9 +611,8 @@ export class AppUI {
         this.showMenu();
         break;
       case 'run':
-        // The scene owns the authoritative simulation state. A single toggle
-        // command avoids a stale UI snapshot turning a click into a no-op.
-        appEvents.emit('ui:toggle-simulation', undefined);
+        if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+        else appEvents.emit('ui:run', undefined);
         break;
       case 'reset':
         appEvents.emit('ui:reset', undefined);
@@ -743,6 +814,7 @@ export class AppUI {
   }
 
   private renderSnapshot(snapshot: GameSnapshot): void {
+    this.snapshot = snapshot;
     this.element('[data-metric="progress"] strong').textContent = snapshot.goal
       ? `${snapshot.metrics.delivered} / ${snapshot.goal.deliveries}`
       : `${snapshot.metrics.delivered}`;
@@ -900,7 +972,12 @@ export class AppUI {
       { type: 'receiver', label: 'Entrada', hint: 'Recebe caixas', icon: 'receiver' },
       { type: 'conveyor', label: 'Esteira', hint: 'Cenário fixo', icon: 'conveyor' },
       { type: 'spring', label: 'Trampolim', hint: 'Cenário fixo', icon: 'spring' },
-      { type: 'obstacle', label: 'Bloqueador', hint: 'Arraste para redimensionar', icon: 'blocker' },
+      {
+        type: 'obstacle',
+        label: 'Bloqueador',
+        hint: 'Arraste para redimensionar',
+        icon: 'blocker',
+      },
     ];
     for (const tool of tools) {
       const button = document.createElement('button');
@@ -939,11 +1016,13 @@ export class AppUI {
   }
 
   private renderSimulationSpeed(speed: number): void {
-    const nearestIndex = SIMULATION_SPEEDS.reduce((bestIndex, candidate, index) =>
-      Math.abs(candidate - speed) < Math.abs(SIMULATION_SPEEDS[bestIndex]! - speed)
-        ? index
-        : bestIndex,
-    0);
+    const nearestIndex = SIMULATION_SPEEDS.reduce(
+      (bestIndex, candidate, index) =>
+        Math.abs(candidate - speed) < Math.abs(SIMULATION_SPEEDS[bestIndex]! - speed)
+          ? index
+          : bestIndex,
+      0,
+    );
     const normalized = SIMULATION_SPEEDS[nearestIndex]!;
     const label = `${String(normalized).replace('.', ',')}×`;
     const input = this.element<HTMLInputElement>('[data-speed]');
@@ -1108,7 +1187,8 @@ export class AppUI {
     if (contract.goal.pieceBudget < 0) errors.push('O orçamento não pode ser negativo.');
     if (contract.goal.parPieces > contract.goal.pieceBudget)
       errors.push('A referência de peças não pode superar o orçamento.');
-    if (contract.spawnIntervalSeconds <= 0) errors.push('O intervalo de geração deve ser positivo.');
+    if (contract.spawnIntervalSeconds <= 0)
+      errors.push('O intervalo de geração deve ser positivo.');
     if (contract.goal.timeLimitSeconds !== undefined && contract.goal.timeLimitSeconds <= 0)
       errors.push('O tempo limite deve ser positivo.');
     if (contract.goal.parTimeSeconds !== undefined && contract.goal.parTimeSeconds <= 0)
@@ -1267,10 +1347,7 @@ function escapeHTML(value: string): string {
   return node.innerHTML;
 }
 
-function formControl(
-  form: HTMLFormElement,
-  name: string,
-): HTMLInputElement | HTMLTextAreaElement {
+function formControl(form: HTMLFormElement, name: string): HTMLInputElement | HTMLTextAreaElement {
   const control = form.elements.namedItem(name);
   if (!(control instanceof HTMLInputElement) && !(control instanceof HTMLTextAreaElement))
     throw new Error(`Editor form control not found: ${name}`);
@@ -1279,16 +1356,11 @@ function formControl(
 
 function formCheckbox(form: HTMLFormElement, name: string): HTMLInputElement {
   const control = form.elements.namedItem(name);
-  if (!(control instanceof HTMLInputElement))
-    throw new Error(`Editor checkbox not found: ${name}`);
+  if (!(control instanceof HTMLInputElement)) throw new Error(`Editor checkbox not found: ${name}`);
   return control;
 }
 
-function setFormControlValue(
-  form: HTMLFormElement,
-  name: string,
-  value: string | number,
-): void {
+function setFormControlValue(form: HTMLFormElement, name: string, value: string | number): void {
   formControl(form, name).value = String(value);
 }
 
@@ -1336,10 +1408,8 @@ function icon(name: IconName): string {
     sound: '<path d="M4 10v4h4l5 4V6L8 10zM16 9a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/>',
     muted: '<path d="M4 10v4h4l5 4V6L8 10zM17 10l4 4m0-4-4 4"/>',
     fullscreen: '<path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/>',
-    grid:
-      '<rect x="3" y="3" width="5" height="5"/><rect x="9.5" y="3" width="5" height="5"/><rect x="16" y="3" width="5" height="5"/><rect x="3" y="9.5" width="5" height="5"/><rect x="9.5" y="9.5" width="5" height="5"/><rect x="16" y="9.5" width="5" height="5"/><rect x="3" y="16" width="5" height="5"/><rect x="9.5" y="16" width="5" height="5"/><rect x="16" y="16" width="5" height="5"/>',
-    clear:
-      '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
+    grid: '<rect x="3" y="3" width="5" height="5"/><rect x="9.5" y="3" width="5" height="5"/><rect x="16" y="3" width="5" height="5"/><rect x="3" y="9.5" width="5" height="5"/><rect x="9.5" y="9.5" width="5" height="5"/><rect x="16" y="9.5" width="5" height="5"/><rect x="3" y="16" width="5" height="5"/><rect x="9.5" y="16" width="5" height="5"/><rect x="16" y="16" width="5" height="5"/>',
+    clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4M4 20h16"/>',
@@ -1347,7 +1417,8 @@ function icon(name: IconName): string {
     settings:
       '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.3 3h-4.6l-.4 3a8 8 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.6-1a8 8 0 0 0 1.7 1l.4 3h4.6l.4-3a8 8 0 0 0 1.7-1l2.6 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
-    blocker: '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="m5 17 12-12m-8 15L21 8M3 12l8-8"/>',
+    blocker:
+      '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="m5 17 12-12m-8 15L21 8M3 12l8-8"/>',
     save: '<path d="M4 3h13l3 3v15H4z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/>',
     test: '<path d="m8 5 11 7-11 7z"/><path d="M3 3v18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',

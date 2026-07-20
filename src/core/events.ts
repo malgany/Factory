@@ -9,6 +9,7 @@ import type {
 import { EventBus } from './EventBus';
 
 export interface AppEvents {
+  'game:ready': undefined;
   'game:snapshot': GameSnapshot;
   'game:angle': { angle: number; clientX: number; clientY: number; visible: boolean };
   'game:camera': { zoom: number; scrollX: number; scrollY: number };

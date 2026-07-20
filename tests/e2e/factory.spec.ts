@@ -56,6 +56,8 @@ async function openApp(page: Page): Promise<void> {
   await page.goto('/');
   await expect(page.locator('#menu-title')).toBeVisible();
   await expect(page.locator('canvas')).toBeAttached();
+  await expect(page.locator('#game-loading')).toBeHidden();
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
   await page.waitForFunction(() => Boolean((window as DebugWindow).__FACTORY_DEBUG__));
 }
 
@@ -100,6 +102,42 @@ async function placeAtCanvasCenter(
   if (!machine) throw new Error(`No newly placed ${tool} was found`);
   return machine;
 }
+
+test('bloqueia a interface até a cena do Phaser ficar pronta', async ({ page }) => {
+  let releaseTexture = (): void => undefined;
+  const textureGate = new Promise<void>((resolve) => {
+    releaseTexture = resolve;
+  });
+
+  await page.route(/factory-box-game(?:-[^/]+)?\.png(?:\?.*)?$/, async (route) => {
+    if (new URL(route.request().url()).searchParams.has('import')) {
+      await route.continue();
+      return;
+    }
+    await textureGate;
+    await route.continue();
+  });
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+  const shell = page.locator('.factory-app');
+  const loading = page.locator('#game-loading');
+  await expect(loading).toBeVisible();
+  await expect(shell).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('#game-ui')).toHaveAttribute('inert', '');
+  await expect(page.locator('#menu-screen')).toHaveAttribute('inert', '');
+
+  releaseTexture();
+
+  await expect(loading).toBeHidden();
+  await expect(shell).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('#game-ui')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('#menu-screen')).not.toHaveAttribute('inert', '');
+
+  await page.locator('#contract-list .contract-card').first().click();
+  await page.locator('[data-action="run"]').click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+});
 
 test('menu inicial apresenta campanha progressiva e sandbox', async ({ page }) => {
   const pageErrors: Error[] = [];

@@ -333,6 +333,7 @@ export class FactoryScene extends Phaser.Scene {
 
     this.scale.on(Phaser.Scale.Events.RESIZE, this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.destroyScene, this);
+    appEvents.emit('game:ready', undefined);
   }
 
   update(_time: number, delta: number): void {
@@ -765,7 +766,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private toggleSimulation(): void {
-    if (this.status === 'running' || this.status === 'paused') {
+    if (this.status === 'running') {
       this.pauseSimulation();
       return;
     }
@@ -802,14 +803,9 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public pauseSimulation(): void {
-    if (this.status === 'running') {
-      this.status = 'paused';
-      this.matter.world.pause();
-    } else if (this.status === 'paused') {
-      this.clearInteractionFocus();
-      this.status = 'running';
-      this.matter.world.resume();
-    }
+    if (this.status !== 'running') return;
+    this.status = 'paused';
+    this.matter.world.pause();
     this.emitSnapshot();
   }
 
