@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 
+import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import { appEvents } from '../core/events';
 import { getContract, SANDBOX_DEFINITION } from '../domain/contracts';
 import { CommandHistory, createSnapshotCommand } from '../domain/history';
@@ -52,6 +53,9 @@ const GRID_POSITION_STEP = 0.5;
 const MIN_SIMULATION_SPEED = 0.1;
 const MAX_SIMULATION_SPEED = 5;
 const BOX_SIZE = 28;
+const BOX_TEXTURE_KEY = 'factory-box';
+const BOX_TEXTURE_SCALE_X = 1.2;
+const BOX_TEXTURE_SCALE_Y = 1.18;
 const CONVEYOR_SPEED = 4.2;
 const SPRING_SPEED = 11.5;
 const FIXED_PHYSICS_STEP_MS = FIXED_PHYSICS_STEP_SECONDS * 1000;
@@ -67,7 +71,6 @@ const COLORS = {
   blue: 0x527da5,
   blueLight: 0x82a5c5,
   orange: 0xff7629,
-  orangeLight: 0xffa46f,
   white: 0xffffff,
   green: 0x35a26b,
   red: 0xd95050,
@@ -82,6 +85,7 @@ interface PhysicsMachine {
 interface BoxRuntime {
   id: number;
   body: MatterJS.BodyType;
+  image: Phaser.GameObjects.Image;
   bornAtSimulationMs: number;
   springReadyAt: number;
 }
@@ -234,6 +238,7 @@ export class FactoryScene extends Phaser.Scene {
 
   private gridGraphics!: Phaser.GameObjects.Graphics;
   private worldGraphics!: Phaser.GameObjects.Graphics;
+  private effectsGraphics!: Phaser.GameObjects.Graphics;
   private overlayGraphics!: Phaser.GameObjects.Graphics;
 
   private mode: GameMode = 'campaign';
@@ -281,6 +286,10 @@ export class FactoryScene extends Phaser.Scene {
     super({ key: 'FactoryScene' });
   }
 
+  preload(): void {
+    this.load.image(BOX_TEXTURE_KEY, factoryBoxTextureUrl);
+  }
+
   create(): void {
     this.cameras.main.setBackgroundColor(COLORS.background);
     this.cameras.main.setBounds(-240, -180, WORLD_WIDTH + 480, WORLD_HEIGHT + 360);
@@ -289,6 +298,7 @@ export class FactoryScene extends Phaser.Scene {
 
     this.gridGraphics = this.add.graphics().setDepth(0);
     this.worldGraphics = this.add.graphics().setDepth(10);
+    this.effectsGraphics = this.add.graphics().setDepth(12);
     this.overlayGraphics = this.add.graphics().setDepth(20);
 
     this.drawGrid(true);
@@ -1365,9 +1375,14 @@ export class FactoryScene extends Phaser.Scene {
     });
     const id = ++this.boxSequence;
     body.plugin = { ...body.plugin, factoryBoxId: id };
+    const image = this.add
+      .image(output.x, output.y, BOX_TEXTURE_KEY)
+      .setOrigin(0.5)
+      .setDepth(11);
     this.boxes.set(id, {
       id,
       body,
+      image,
       bornAtSimulationMs: this.simulationVisualTimeMs,
       springReadyAt: 0,
     });
@@ -1551,10 +1566,16 @@ export class FactoryScene extends Phaser.Scene {
         preview ? this.drag?.valid !== false : true,
       );
     }
-    for (const box of this.boxes.values()) this.drawBox(graphics, box);
+    for (const box of this.boxes.values()) this.drawBox(box);
+
+    const effects = this.effectsGraphics;
+    effects.clear();
     for (const particle of this.particles) {
-      graphics.fillStyle(particle.color, Phaser.Math.Clamp(particle.life / particle.maxLife, 0, 1));
-      graphics.fillRect(particle.x, particle.y, particle.size, particle.size);
+      effects.fillStyle(
+        particle.color,
+        Phaser.Math.Clamp(particle.life / particle.maxLife, 0, 1),
+      );
+      effects.fillRect(particle.x, particle.y, particle.size, particle.size);
     }
 
     const overlay = this.overlayGraphics;
@@ -1806,7 +1827,7 @@ export class FactoryScene extends Phaser.Scene {
     );
   }
 
-  private drawBox(graphics: Phaser.GameObjects.Graphics, box: BoxRuntime): void {
+  private drawBox(box: BoxRuntime): void {
     const age = Math.min(
       1,
       (this.simulationVisualTimeMs - box.bornAtSimulationMs) / 180,
@@ -1815,21 +1836,10 @@ export class FactoryScene extends Phaser.Scene {
     const stretch = Phaser.Math.Clamp(speed / 28, 0, 0.12);
     const width = BOX_SIZE * (0.8 + age * 0.2 + stretch);
     const height = BOX_SIZE * (1.25 - age * 0.25 - stretch * 0.6);
-    graphics.fillStyle(COLORS.orange, 1);
-    drawPolygon(
-      graphics,
-      rectangleCorners(box.body.position, width, height, Phaser.Math.RadToDeg(box.body.angle)),
-    );
-    graphics.lineStyle(2, COLORS.orangeLight, 0.72);
-    linePolygon(
-      graphics,
-      rectangleCorners(
-        box.body.position,
-        width - 7,
-        height - 7,
-        Phaser.Math.RadToDeg(box.body.angle),
-      ),
-    );
+    box.image
+      .setPosition(box.body.position.x, box.body.position.y)
+      .setRotation(box.body.angle)
+      .setDisplaySize(width * BOX_TEXTURE_SCALE_X, height * BOX_TEXTURE_SCALE_Y);
   }
 
   private drawSelection(
@@ -2120,12 +2130,16 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private clearBoxes(): void {
-    for (const box of this.boxes.values()) this.matter.world.remove(box.body, true);
+    for (const box of this.boxes.values()) {
+      box.image.destroy();
+      this.matter.world.remove(box.body, true);
+    }
     this.boxes.clear();
     this.metrics.active = 0;
   }
 
   private removeBox(box: BoxRuntime): void {
+    box.image.destroy();
     this.matter.world.remove(box.body, true);
     this.boxes.delete(box.id);
   }
