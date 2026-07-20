@@ -1,0 +1,143 @@
+export const CELL_SIZE = 48;
+export const GRID_COLUMNS = 30;
+export const GRID_ROWS = 18;
+
+export type MachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
+export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
+export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
+export type BuiltinContractId = 'first-flow' | 'controlled-jump' | 'line-rhythm';
+export type ContractId = string;
+
+export interface GridPoint {
+  x: number;
+  y: number;
+}
+
+export interface GridSize {
+  columns: number;
+  rows: number;
+}
+
+export interface MachineState {
+  id: string;
+  type: MachineType;
+  gridX: number;
+  gridY: number;
+  angle: number;
+  reversed: boolean;
+  fixed: boolean;
+}
+
+export interface ObstacleDefinition {
+  id: string;
+  gridX: number;
+  gridY: number;
+  columns: number;
+  rows: number;
+}
+
+export interface ContractGoal {
+  deliveries: number;
+  maxLosses: number;
+  pieceBudget: number;
+  timeLimitSeconds?: number;
+  parPieces: number;
+  parTimeSeconds?: number;
+}
+
+export interface ContractDefinition {
+  id: ContractId;
+  order: number;
+  title: string;
+  subtitle: string;
+  description: string;
+  grid: GridSize;
+  availableMachines: MachineType[];
+  fixedMachines: MachineState[];
+  obstacles: ObstacleDefinition[];
+  goal: ContractGoal;
+  spawnIntervalSeconds: number;
+}
+
+export interface RunMetrics {
+  delivered: number;
+  lost: number;
+  active: number;
+  elapsedSeconds: number;
+  placedPieces: number;
+}
+
+export interface ContractResult {
+  contractId: ContractId;
+  stars: number;
+  metrics: RunMetrics;
+}
+
+export interface SandboxSave {
+  machines: MachineState[];
+  updatedAt: string;
+}
+
+export interface ProgressSave {
+  version: 2;
+  unlockedContracts: ContractId[];
+  bestResults: Partial<Record<ContractId, ContractResult>>;
+  settings: {
+    muted: boolean;
+    volume: number;
+  };
+  sandbox: SandboxSave;
+}
+
+export interface ContractCatalogSave {
+  version: 1;
+  overrides: Partial<Record<BuiltinContractId, ContractDefinition>>;
+  customContracts: ContractDefinition[];
+  updatedAt: string;
+}
+
+export interface PersistenceSuccess<T = undefined> {
+  ok: true;
+  value: T;
+}
+
+export interface PersistenceFailure<T = undefined> {
+  ok: false;
+  value: T;
+  error: string;
+}
+
+export type PersistenceResult<T = undefined> = PersistenceSuccess<T> | PersistenceFailure<T>;
+
+export interface GameSnapshot {
+  mode: GameMode;
+  contractId?: ContractId;
+  contractTitle: string;
+  contractDescription: string;
+  status: SimulationStatus;
+  metrics: RunMetrics;
+  goal?: ContractGoal;
+  selectedMachine?: MachineState;
+  selectedObstacle?: ObstacleDefinition;
+  availableMachines: MachineType[];
+  canUndo: boolean;
+  canRedo: boolean;
+  muted: boolean;
+  gridEnabled: boolean;
+  simulationSpeed: number;
+}
+
+export interface GameCommand {
+  label: string;
+  execute(): void;
+  undo(): void;
+}
+
+export interface PlatformService {
+  loadProgress(contracts?: readonly ContractDefinition[]): ProgressSave;
+  saveProgress(progress: ProgressSave): PersistenceResult;
+  loadContractCatalog(): PersistenceResult<ContractCatalogSave>;
+  saveContractCatalog(catalog: ContractCatalogSave): PersistenceResult;
+  requestFullscreen(): Promise<void>;
+  unlockAchievement(id: string): Promise<void>;
+}
