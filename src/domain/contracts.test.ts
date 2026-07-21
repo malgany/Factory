@@ -11,7 +11,7 @@ describe('contratos', () => {
     expect(
       CONTRACTS.every((contract) =>
         contract.fixedMachines.every(
-          (machine) => machine.gridX % 1 === 0.5 && machine.gridY % 1 === 0.5,
+          (machine) => machine.gridX % 1 === 0.25 && machine.gridY % 1 === 0.25,
         ),
       ),
     ).toBe(true);

@@ -4,17 +4,16 @@ import {
   appendCustomContract,
   createCustomContractId,
   createDefaultContractCatalog,
-  deleteCustomContract,
-  getContractCatalogMetadata,
+  deleteContractFromCatalog,
   mergeContractCatalog,
-  readContractCatalog,
-  restoreBuiltinContract,
+  readContractCatalogFile,
   saveContractToCatalog,
-  serializeContractCatalog,
+  serializeContractCatalogFile,
   validateContractDefinition,
   type NewContractDefinition,
 } from './catalog';
 import { CONTRACTS } from './contracts';
+import type { ContractCatalogFile } from './types';
 import {
   GRID_COLUMNS,
   GRID_ROWS,
@@ -24,6 +23,14 @@ import {
   PLAY_AREA_MIN_ROW,
 } from './types';
 
+function seededCatalog(): ContractCatalogFile {
+  return {
+    version: 1,
+    contracts: CONTRACTS.map((contract) => structuredClone(contract)),
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
 function customDefinition(): NewContractDefinition {
   const definition: NewContractDefinition = structuredClone(CONTRACTS[0]!);
   delete definition.id;
@@ -32,87 +39,81 @@ function customDefinition(): NewContractDefinition {
   return definition;
 }
 
-describe('catálogo local de contratos', () => {
-  it('combina padrões, overrides e fases personalizadas em ordem sequencial', () => {
-    let catalog = createDefaultContractCatalog();
-    catalog = saveContractToCatalog(catalog, {
+describe('catálogo JSON de contratos', () => {
+  it('edita, cria e exclui qualquer fase em ordem sequencial', () => {
+    let catalog = saveContractToCatalog(seededCatalog(), {
       ...structuredClone(CONTRACTS[0]!),
       title: 'Primeiro Fluxo editado',
     });
-    const appended = appendCustomContract(catalog, {
+    catalog = appendCustomContract(catalog, {
       ...customDefinition(),
       id: 'custom-fixture',
-    });
-    catalog = appended.catalog;
+    }).catalog;
+    catalog = deleteContractFromCatalog(catalog, 'controlled-jump');
 
     const contracts = mergeContractCatalog(catalog);
-    expect(contracts).toHaveLength(4);
-    expect(contracts.map(({ order }) => order)).toEqual([1, 2, 3, 4]);
-    expect(contracts[0]?.title).toBe('Primeiro Fluxo editado');
-    expect(contracts[3]?.id).toBe('custom-fixture');
-    expect(getContractCatalogMetadata(catalog, 'first-flow')).toEqual({
-      builtIn: true,
-      custom: false,
-      overridden: true,
-    });
+    expect(contracts.map(({ order }) => order)).toEqual([1, 2, 3]);
+    expect(contracts[0]).toMatchObject({ id: 'first-flow', title: 'Primeiro Fluxo editado' });
+    expect(contracts.at(-1)?.id).toBe('custom-fixture');
   });
 
-  it('gera IDs UUID estáveis e não permite excluir uma fase nativa', () => {
+  it('gera IDs estáveis e permite excluir até a última fase', () => {
     expect(createCustomContractId(() => '00000000-0000-4000-8000-000000000000')).toBe(
       'custom-00000000-0000-4000-8000-000000000000',
     );
-    expect(() => deleteCustomContract(createDefaultContractCatalog(), 'first-flow')).toThrow(
-      'originais',
-    );
+    const only = { ...seededCatalog(), contracts: [structuredClone(CONTRACTS[0]!)] };
+    expect(deleteContractFromCatalog(only, 'first-flow').contracts).toEqual([]);
   });
 
-  it('restaura override nativo, exclui fase personalizada e reorganiza ordens', () => {
-    let catalog = saveContractToCatalog(createDefaultContractCatalog(), {
-      ...structuredClone(CONTRACTS[0]!),
-      title: 'Editada',
-    });
-    catalog = appendCustomContract(catalog, {
-      ...customDefinition(),
-      id: 'custom-a',
-    }).catalog;
-    catalog = appendCustomContract(catalog, {
-      ...customDefinition(),
-      id: 'custom-b',
-    }).catalog;
-    catalog = restoreBuiltinContract(catalog, 'first-flow');
-    catalog = deleteCustomContract(catalog, 'custom-a');
+  it('aceita um catálogo vazio e rejeita JSON corrompido sem dados parciais', () => {
+    const empty = readContractCatalogFile(createDefaultContractCatalog());
+    expect(empty).toEqual({ ok: true, value: createDefaultContractCatalog() });
 
-    const contracts = mergeContractCatalog(catalog);
-    expect(contracts[0]?.title).toBe(CONTRACTS[0]?.title);
-    expect(contracts.at(-1)).toMatchObject({ id: 'custom-b', order: 4 });
-  });
+    expect(readContractCatalogFile('').ok).toBe(false);
+    expect(
+      readContractCatalogFile({ version: 1, updatedAt: 'data-inválida', contracts: [] }).ok,
+    ).toBe(false);
+    expect(
+      readContractCatalogFile({ version: 1, updatedAt: 'July 21, 2026', contracts: [] }).ok,
+    ).toBe(false);
 
-  it('recupera catálogo corrompido sem aproveitar dados parciais', () => {
-    const invalidJson = readContractCatalog('{quebrado');
+    const invalidJson = readContractCatalogFile('{quebrado');
     expect(invalidJson.ok).toBe(false);
-    expect(mergeContractCatalog(invalidJson.value)).toHaveLength(3);
+    expect(invalidJson.value.contracts).toEqual([]);
 
-    const malformed = readContractCatalog({
+    const malformed = readContractCatalogFile({
       version: 1,
-      overrides: {},
-      customContracts: [{ id: 'custom-incompleta' }],
+      contracts: [{ id: 'custom-incompleta' }],
     });
     expect(malformed.ok).toBe(false);
-    expect(malformed.value.customContracts).toEqual([]);
+    expect(malformed.value.contracts).toEqual([]);
   });
 
-  it('serializa e restaura um catálogo válido', () => {
-    const catalog = appendCustomContract(createDefaultContractCatalog(), {
-      ...customDefinition(),
-      id: 'custom-persistida',
-    }).catalog;
-    const restored = readContractCatalog(serializeContractCatalog(catalog));
+  it('serializa formatado, normaliza câmera e restaura o catálogo completo', () => {
+    const source = seededCatalog();
+    source.contracts[0]!.initialCamera = {
+      centerX: 720.12345,
+      centerY: 431.98765,
+      zoom: 1.234567,
+    };
+    source.contracts[0]!.spawnIntervalSeconds = 1.234567;
+    source.contracts[0]!.fixedMachines[0]!.angle = 12.345678;
+    const serialized = serializeContractCatalogFile(source);
+    const restored = readContractCatalogFile(serialized);
 
+    expect(serialized).toContain('\n  "version": 1');
+    expect(serialized.endsWith('\n')).toBe(true);
     expect(restored.ok).toBe(true);
-    expect(mergeContractCatalog(restored.value).at(-1)?.id).toBe('custom-persistida');
+    expect(restored.value.contracts[0]?.initialCamera).toEqual({
+      centerX: 720.12,
+      centerY: 431.99,
+      zoom: 1.2346,
+    });
+    expect(restored.value.contracts[0]?.spawnIntervalSeconds).toBe(1.2346);
+    expect(restored.value.contracts[0]?.fixedMachines[0]?.angle).toBe(12.3457);
   });
 
-  it('valida campos, entidades, limites, sobreposição e orçamento de referência', () => {
+  it('valida campos, câmera, entidades, limites, sobreposição e orçamento', () => {
     const valid = structuredClone(CONTRACTS[0]!);
     expect(validateContractDefinition(valid)).toEqual({ valid: true, issues: [] });
 
@@ -120,19 +121,25 @@ describe('catálogo local de contratos', () => {
     invalid.id = 'id com espaços';
     invalid.title = '';
     invalid.goal.parPieces = invalid.goal.pieceBudget + 1;
+    invalid.initialCamera.zoom = 3;
     invalid.fixedMachines[1] = {
       ...invalid.fixedMachines[0]!,
       id: 'overlapping-receiver',
       type: 'receiver',
     };
-    const validation = validateContractDefinition(invalid);
-    expect(validation.valid).toBe(false);
-    expect(validation.issues.map(({ code }) => code)).toEqual(
-      expect.arrayContaining(['invalid-id', 'required', 'par-over-budget', 'overlap']),
+    const codes = validateContractDefinition(invalid).issues.map(({ code }) => code);
+    expect(codes).toEqual(
+      expect.arrayContaining([
+        'invalid-id',
+        'required',
+        'par-over-budget',
+        'invalid-camera',
+        'overlap',
+      ]),
     );
   });
 
-  it('accepts scenarios beyond the initial frame within the expanded bounds', () => {
+  it('aceita cenários além do quadro inicial dentro dos limites expandidos', () => {
     const expanded = structuredClone(CONTRACTS[0]!);
     expanded.fixedMachines[0] = {
       ...expanded.fixedMachines[0]!,
@@ -157,14 +164,8 @@ describe('catálogo local de contratos', () => {
     expect(validateContractDefinition(expanded)).toEqual({ valid: true, issues: [] });
 
     const outside = structuredClone(expanded);
-    outside.fixedMachines[0] = {
-      ...outside.fixedMachines[0]!,
-      gridX: PLAY_AREA_MIN_COLUMN - 1,
-    };
-    outside.obstacles[0] = {
-      ...outside.obstacles[0]!,
-      gridX: PLAY_AREA_MAX_COLUMN,
-    };
+    outside.fixedMachines[0] = { ...outside.fixedMachines[0]!, gridX: PLAY_AREA_MIN_COLUMN - 1 };
+    outside.obstacles[0] = { ...outside.obstacles[0]!, gridX: PLAY_AREA_MAX_COLUMN };
     expect(validateContractDefinition(outside).issues.map(({ code }) => code)).toEqual(
       expect.arrayContaining(['out-of-bounds']),
     );

@@ -1,13 +1,13 @@
-import { BUILTIN_CONTRACT_IDS, CONTRACTS, isBuiltinContractId, orderContracts } from './contracts';
+import { orderContracts } from './contracts';
 import {
+  CELL_SIZE,
   GRID_COLUMNS,
   GRID_ROWS,
   PLAY_AREA_MAX_COLUMN,
   PLAY_AREA_MAX_ROW,
   PLAY_AREA_MIN_COLUMN,
   PLAY_AREA_MIN_ROW,
-  type BuiltinContractId,
-  type ContractCatalogSave,
+  type ContractCatalogFile,
   type ContractDefinition,
   type MachineState,
   type MachineType,
@@ -16,6 +16,8 @@ import {
 } from './types';
 
 export const CONTRACT_CATALOG_VERSION = 1 as const;
+export const MIN_CONTRACT_CAMERA_ZOOM = 1;
+export const MAX_CONTRACT_CAMERA_ZOOM = 2;
 
 const MACHINE_TYPES: readonly MachineType[] = ['source', 'conveyor', 'receiver', 'spring'];
 const CUSTOM_ID_PREFIX = 'custom-';
@@ -33,6 +35,7 @@ export type ContractValidationCode =
   | 'duplicate-id'
   | 'invalid-machine'
   | 'invalid-obstacle'
+  | 'invalid-camera'
   | 'par-over-budget';
 
 export interface ContractValidationIssue {
@@ -46,29 +49,22 @@ export interface ContractValidationResult {
   issues: ContractValidationIssue[];
 }
 
-export interface ContractCatalogMetadata {
-  builtIn: boolean;
-  custom: boolean;
-  overridden: boolean;
-}
-
 export type NewContractDefinition = Omit<ContractDefinition, 'id' | 'order'> & {
   id?: ContractDefinition['id'];
   order?: number;
 };
 
-export function createDefaultContractCatalog(): ContractCatalogSave {
+export function createDefaultContractCatalog(): ContractCatalogFile {
   return {
     version: CONTRACT_CATALOG_VERSION,
-    overrides: {},
-    customContracts: [],
+    contracts: [],
     updatedAt: EMPTY_UPDATED_AT,
   };
 }
 
-export function readContractCatalog(input: unknown): PersistenceResult<ContractCatalogSave> {
+export function readContractCatalogFile(input: unknown): PersistenceResult<ContractCatalogFile> {
   if (input === null || input === undefined || input === '') {
-    return { ok: true, value: createDefaultContractCatalog() };
+    return catalogFailure('O catálogo de fases está vazio.');
   }
 
   let candidate: unknown = input;
@@ -88,137 +84,99 @@ export function readContractCatalog(input: unknown): PersistenceResult<ContractC
     return catalogFailure('A versão do catálogo de fases não é compatível.');
   }
 
-  if (!isRecord(candidate.overrides) || !Array.isArray(candidate.customContracts)) {
+  if (!Array.isArray(candidate.contracts)) {
     return catalogFailure('O catálogo de fases salvo está incompleto.');
   }
 
-  const overrides: ContractCatalogSave['overrides'] = {};
-  for (const [id, value] of Object.entries(candidate.overrides)) {
-    if (!isBuiltinContractId(id)) {
-      return catalogFailure(`O catálogo contém um override desconhecido: ${id}.`);
-    }
-    const contract = readContractDefinition(value);
-    if (!contract || contract.id !== id) {
-      return catalogFailure(`O override da fase ${id} é inválido.`);
-    }
-    const validation = validateContractDefinition(contract);
-    if (!validation.valid) {
-      return catalogFailure(`O override da fase ${id} não passou na validação.`);
-    }
-    overrides[id] = contract;
+  if (!isIsoTimestamp(candidate.updatedAt)) {
+    return catalogFailure('A data de atualização do catálogo é inválida.');
   }
 
-  const customContracts: ContractDefinition[] = [];
-  const ids = new Set<string>(BUILTIN_CONTRACT_IDS);
-  for (const value of candidate.customContracts) {
+  const contracts: ContractDefinition[] = [];
+  const ids = new Set<string>();
+  for (const value of candidate.contracts) {
     const contract = readContractDefinition(value);
-    if (!contract || isBuiltinContractId(contract.id) || ids.has(contract.id)) {
-      return catalogFailure('O catálogo contém uma fase personalizada inválida ou duplicada.');
+    if (!contract || ids.has(contract.id)) {
+      return catalogFailure('O catálogo contém uma fase inválida ou duplicada.');
     }
     const validation = validateContractDefinition(contract);
     if (!validation.valid) {
-      return catalogFailure(`A fase personalizada ${contract.id} não passou na validação.`);
+      return catalogFailure(
+        `A fase ${contract.id} não passou na validação: ${validation.issues[0]?.message ?? 'dados inválidos'}`,
+      );
     }
     ids.add(contract.id);
-    customContracts.push(contract);
+    contracts.push(contract);
   }
 
   return {
     ok: true,
     value: normalizeContractCatalog({
       version: CONTRACT_CATALOG_VERSION,
-      overrides,
-      customContracts,
-      updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : EMPTY_UPDATED_AT,
+      contracts,
+      updatedAt: candidate.updatedAt,
     }),
   };
 }
 
-export function parseContractCatalog(input: unknown): ContractCatalogSave {
-  return readContractCatalog(input).value;
+export function parseContractCatalogFile(input: unknown): ContractCatalogFile {
+  return readContractCatalogFile(input).value;
 }
 
-export function serializeContractCatalog(catalog: ContractCatalogSave): string {
-  return JSON.stringify(normalizeContractCatalog(catalog));
+export function serializeContractCatalogFile(catalog: ContractCatalogFile): string {
+  return `${JSON.stringify(normalizeContractCatalog(catalog), null, 2)}\n`;
 }
 
-export function mergeContractCatalog(catalog: ContractCatalogSave): ContractDefinition[] {
-  const builtins = CONTRACTS.map((original, index) => {
-    const id = original.id as BuiltinContractId;
-    const override = catalog.overrides[id];
-    return cloneContract({ ...(override ?? original), id, order: index + 1 });
-  });
-  const custom = orderContracts(catalog.customContracts).map((contract, index) =>
-    cloneContract({ ...contract, order: builtins.length + index + 1 }),
+export function mergeContractCatalog(catalog: ContractCatalogFile): ContractDefinition[] {
+  return catalog.contracts.map(cloneContract);
+}
+
+export function normalizeContractCatalog(catalog: ContractCatalogFile): ContractCatalogFile {
+  const contracts = orderContracts(catalog.contracts).map((contract, index) =>
+    normalizeContract({ ...contract, order: index + 1 }),
   );
-  return [...builtins, ...custom];
-}
-
-export function normalizeContractCatalog(catalog: ContractCatalogSave): ContractCatalogSave {
-  const merged = mergeContractCatalogRaw(catalog);
-  const overrides: ContractCatalogSave['overrides'] = {};
-  for (const id of BUILTIN_CONTRACT_IDS) {
-    const override = catalog.overrides[id];
-    if (override) {
-      const original = CONTRACTS.find((contract) => contract.id === id);
-      overrides[id] = cloneContract({
-        ...override,
-        id,
-        order: original?.order ?? BUILTIN_CONTRACT_IDS.indexOf(id) + 1,
-      });
-    }
-  }
   return {
     version: CONTRACT_CATALOG_VERSION,
-    overrides,
-    customContracts: merged.customContracts,
+    contracts,
     updatedAt: catalog.updatedAt,
   };
 }
 
 export function saveContractToCatalog(
-  catalog: ContractCatalogSave,
+  catalog: ContractCatalogFile,
   contract: ContractDefinition,
   updatedAt = new Date().toISOString(),
-): ContractCatalogSave {
+): ContractCatalogFile {
   const validation = validateContractDefinition(contract);
   if (!validation.valid) {
     throw new Error(validation.issues[0]?.message ?? 'A fase é inválida.');
   }
 
   const next = normalizeContractCatalog(catalog);
-  if (isBuiltinContractId(contract.id)) {
-    const original = CONTRACTS.find((candidate) => candidate.id === contract.id);
-    next.overrides[contract.id] = cloneContract({
-      ...contract,
-      order: original?.order ?? contract.order,
-    });
+  const index = next.contracts.findIndex((candidate) => candidate.id === contract.id);
+  if (index >= 0) {
+    next.contracts[index] = cloneContract({ ...contract, order: next.contracts[index]!.order });
   } else {
-    const index = next.customContracts.findIndex((candidate) => candidate.id === contract.id);
-    if (index >= 0) {
-      next.customContracts[index] = cloneContract(contract);
-    } else {
-      next.customContracts.push(cloneContract(contract));
-    }
+    next.contracts.push(cloneContract({ ...contract, order: next.contracts.length + 1 }));
   }
   next.updatedAt = updatedAt;
   return normalizeContractCatalog(next);
 }
 
 export function appendCustomContract(
-  catalog: ContractCatalogSave,
+  catalog: ContractCatalogFile,
   definition: NewContractDefinition,
   updatedAt = new Date().toISOString(),
-): { catalog: ContractCatalogSave; contract: ContractDefinition } {
+): { catalog: ContractCatalogFile; contract: ContractDefinition } {
   const usedIds = new Set(mergeContractCatalog(catalog).map(({ id }) => id));
   let id = definition.id;
-  while (!id || usedIds.has(id) || isBuiltinContractId(id)) {
+  while (!id || usedIds.has(id)) {
     id = createCustomContractId();
   }
   const contract: ContractDefinition = {
     ...cloneContractFields(definition),
     id,
-    order: CONTRACTS.length + catalog.customContracts.length + 1,
+    order: catalog.contracts.length + 1,
   };
   return {
     catalog: saveContractToCatalog(catalog, contract, updatedAt),
@@ -226,59 +184,15 @@ export function appendCustomContract(
   };
 }
 
-export function restoreBuiltinContract(
-  catalog: ContractCatalogSave,
-  contractId: BuiltinContractId,
-  updatedAt = new Date().toISOString(),
-): ContractCatalogSave {
-  const next = normalizeContractCatalog(catalog);
-  delete next.overrides[contractId];
-  next.updatedAt = updatedAt;
-  return normalizeContractCatalog(next);
-}
-
-export function deleteCustomContract(
-  catalog: ContractCatalogSave,
+export function deleteContractFromCatalog(
+  catalog: ContractCatalogFile,
   contractId: string,
   updatedAt = new Date().toISOString(),
-): ContractCatalogSave {
-  if (isBuiltinContractId(contractId)) {
-    throw new Error('Fases originais não podem ser excluídas.');
-  }
+): ContractCatalogFile {
   const next = normalizeContractCatalog(catalog);
-  next.customContracts = next.customContracts.filter((contract) => contract.id !== contractId);
+  next.contracts = next.contracts.filter((contract) => contract.id !== contractId);
   next.updatedAt = updatedAt;
   return normalizeContractCatalog(next);
-}
-
-export function hasBuiltinOverride(
-  catalog: ContractCatalogSave,
-  contractId: BuiltinContractId,
-): boolean {
-  return catalog.overrides[contractId] !== undefined;
-}
-
-export function getContractCatalogMetadata(
-  catalog: ContractCatalogSave,
-  contractId: string,
-): ContractCatalogMetadata {
-  const builtIn = isBuiltinContractId(contractId);
-  return {
-    builtIn,
-    custom: !builtIn && catalog.customContracts.some((contract) => contract.id === contractId),
-    overridden: builtIn && catalog.overrides[contractId] !== undefined,
-  };
-}
-
-export function getContractCatalogMetadataMap(
-  catalog: ContractCatalogSave,
-): Record<string, ContractCatalogMetadata> {
-  return Object.fromEntries(
-    mergeContractCatalog(catalog).map((contract) => [
-      contract.id,
-      getContractCatalogMetadata(catalog, contract.id),
-    ]),
-  );
 }
 
 export function createCustomContractId(randomUuid: () => string = defaultRandomUuid): string {
@@ -286,7 +200,7 @@ export function createCustomContractId(randomUuid: () => string = defaultRandomU
 }
 
 export function createEmptyContractDraft(
-  catalog: ContractCatalogSave,
+  catalog: ContractCatalogFile,
   id = createCustomContractId(),
 ): ContractDefinition {
   return {
@@ -306,6 +220,11 @@ export function createEmptyContractDraft(
       parPieces: 7,
     },
     spawnIntervalSeconds: 1.25,
+    initialCamera: {
+      centerX: (GRID_COLUMNS * CELL_SIZE) / 2,
+      centerY: (GRID_ROWS * CELL_SIZE) / 2,
+      zoom: MIN_CONTRACT_CAMERA_ZOOM,
+    },
   };
 }
 
@@ -374,6 +293,25 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
   if (!Number.isFinite(contract.spawnIntervalSeconds) || contract.spawnIntervalSeconds <= 0) {
     add('invalid-number', 'spawnIntervalSeconds', 'O intervalo de geração deve ser positivo.');
   }
+  const camera = contract.initialCamera;
+  if (
+    !camera ||
+    !Number.isFinite(camera.centerX) ||
+    !Number.isFinite(camera.centerY) ||
+    !Number.isFinite(camera.zoom) ||
+    camera.zoom < MIN_CONTRACT_CAMERA_ZOOM ||
+    camera.zoom > MAX_CONTRACT_CAMERA_ZOOM ||
+    camera.centerX < PLAY_AREA_MIN_COLUMN * CELL_SIZE ||
+    camera.centerX > PLAY_AREA_MAX_COLUMN * CELL_SIZE ||
+    camera.centerY < PLAY_AREA_MIN_ROW * CELL_SIZE ||
+    camera.centerY > PLAY_AREA_MAX_ROW * CELL_SIZE
+  ) {
+    add(
+      'invalid-camera',
+      'initialCamera',
+      `A câmera inicial deve estar dentro do mundo e usar zoom entre ${MIN_CONTRACT_CAMERA_ZOOM} e ${MAX_CONTRACT_CAMERA_ZOOM}.`,
+    );
+  }
 
   if (!contract.fixedMachines.some(({ type }) => type === 'source')) {
     add('missing-source', 'fixedMachines', 'Adicione ao menos uma saída.');
@@ -392,8 +330,8 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     if (!machine.fixed) {
       add('invalid-machine', `${path}.fixed`, 'Objetos do cenário precisam ser fixos.');
     }
-    if (!isHalfGrid(machine.gridX) || !isHalfGrid(machine.gridY)) {
-      add('invalid-machine', path, 'Objetos do cenário devem respeitar a meia-grade.');
+    if (!isQuarterGrid(machine.gridX) || !isQuarterGrid(machine.gridY)) {
+      add('invalid-machine', path, 'Objetos do cenário devem respeitar os quartos da grade.');
     }
     if (!polygonWithinBoard(machinePolygon(machine))) {
       add('out-of-bounds', path, 'Há um objeto fora do tabuleiro.');
@@ -460,17 +398,45 @@ export function cloneContract(contract: ContractDefinition): ContractDefinition 
     fixedMachines: contract.fixedMachines.map((machine) => ({ ...machine })),
     obstacles: contract.obstacles.map((obstacle) => ({ ...obstacle })),
     goal: { ...contract.goal },
+    initialCamera: { ...contract.initialCamera },
   };
 }
 
-function mergeContractCatalogRaw(catalog: ContractCatalogSave): {
-  customContracts: ContractDefinition[];
-} {
-  return {
-    customContracts: orderContracts(catalog.customContracts).map((contract, index) =>
-      cloneContract({ ...contract, order: CONTRACTS.length + index + 1 }),
-    ),
+function normalizeContract(contract: ContractDefinition): ContractDefinition {
+  const normalized = cloneContract(contract);
+  normalized.fixedMachines = normalized.fixedMachines.map((machine) => ({
+    ...machine,
+    gridX: roundForCatalog(machine.gridX, 4),
+    gridY: roundForCatalog(machine.gridY, 4),
+    angle: roundForCatalog(machine.angle, 4),
+  }));
+  normalized.obstacles = normalized.obstacles.map((obstacle) => ({
+    ...obstacle,
+    gridX: roundForCatalog(obstacle.gridX, 4),
+    gridY: roundForCatalog(obstacle.gridY, 4),
+    columns: roundForCatalog(obstacle.columns, 4),
+    rows: roundForCatalog(obstacle.rows, 4),
+  }));
+  normalized.goal = {
+    ...normalized.goal,
+    deliveries: roundForCatalog(normalized.goal.deliveries, 4),
+    maxLosses: roundForCatalog(normalized.goal.maxLosses, 4),
+    pieceBudget: roundForCatalog(normalized.goal.pieceBudget, 4),
+    parPieces: roundForCatalog(normalized.goal.parPieces, 4),
+    ...(normalized.goal.timeLimitSeconds === undefined
+      ? {}
+      : { timeLimitSeconds: roundForCatalog(normalized.goal.timeLimitSeconds, 4) }),
+    ...(normalized.goal.parTimeSeconds === undefined
+      ? {}
+      : { parTimeSeconds: roundForCatalog(normalized.goal.parTimeSeconds, 4) }),
   };
+  normalized.spawnIntervalSeconds = roundForCatalog(normalized.spawnIntervalSeconds, 4);
+  normalized.initialCamera = {
+    centerX: roundForCatalog(normalized.initialCamera.centerX, 2),
+    centerY: roundForCatalog(normalized.initialCamera.centerY, 2),
+    zoom: roundForCatalog(normalized.initialCamera.zoom, 4),
+  };
+  return normalized;
 }
 
 function cloneContractFields(
@@ -483,11 +449,19 @@ function cloneContractFields(
     fixedMachines: definition.fixedMachines.map((machine) => ({ ...machine })),
     obstacles: definition.obstacles.map((obstacle) => ({ ...obstacle })),
     goal: { ...definition.goal },
+    initialCamera: { ...definition.initialCamera },
   };
 }
 
 function readContractDefinition(value: unknown): ContractDefinition | undefined {
-  if (!isRecord(value) || !isRecord(value.grid) || !isRecord(value.goal)) return undefined;
+  if (
+    !isRecord(value) ||
+    !isRecord(value.grid) ||
+    !isRecord(value.goal) ||
+    !isRecord(value.initialCamera)
+  ) {
+    return undefined;
+  }
   if (!Array.isArray(value.availableMachines) || !Array.isArray(value.fixedMachines)) {
     return undefined;
   }
@@ -500,7 +474,10 @@ function readContractDefinition(value: unknown): ContractDefinition | undefined 
     typeof value.description !== 'string' ||
     typeof value.grid.columns !== 'number' ||
     typeof value.grid.rows !== 'number' ||
-    typeof value.spawnIntervalSeconds !== 'number'
+    typeof value.spawnIntervalSeconds !== 'number' ||
+    typeof value.initialCamera.centerX !== 'number' ||
+    typeof value.initialCamera.centerY !== 'number' ||
+    typeof value.initialCamera.zoom !== 'number'
   ) {
     return undefined;
   }
@@ -538,6 +515,11 @@ function readContractDefinition(value: unknown): ContractDefinition | undefined 
       ...(goal.parTimeSeconds === undefined ? {} : { parTimeSeconds: goal.parTimeSeconds }),
     },
     spawnIntervalSeconds: value.spawnIntervalSeconds,
+    initialCamera: {
+      centerX: value.initialCamera.centerX,
+      centerY: value.initialCamera.centerY,
+      zoom: value.initialCamera.zoom,
+    },
   });
 }
 
@@ -580,12 +562,24 @@ function isOptionalNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
 function isStableContractId(value: string): boolean {
   return value.length <= 128 && /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(value);
 }
 
-function catalogFailure(error: string): PersistenceResult<ContractCatalogSave> {
+function catalogFailure(error: string): PersistenceResult<ContractCatalogFile> {
   return { ok: false, value: createDefaultContractCatalog(), error };
+}
+
+function roundForCatalog(value: number, precision: number): number {
+  const factor = 10 ** precision;
+  const rounded = Math.round(value * factor) / factor;
+  return Object.is(rounded, -0) ? 0 : rounded;
 }
 
 function defaultRandomUuid(): string {
@@ -620,8 +614,8 @@ function validateOptionalPositive(
   }
 }
 
-function isHalfGrid(value: number): boolean {
-  return Number.isFinite(value) && Math.abs(value * 2 - Math.round(value * 2)) < 0.000_001;
+function isQuarterGrid(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value * 4 - Math.round(value * 4)) < 0.000_001;
 }
 
 interface Point {

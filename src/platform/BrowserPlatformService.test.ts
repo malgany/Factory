@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  appendCustomContract,
-  createDefaultContractCatalog,
-  mergeContractCatalog,
-  type NewContractDefinition,
-} from '../domain/catalog';
 import { CONTRACTS } from '../domain/contracts';
-import { BrowserPlatformService, CONTRACT_CATALOG_STORAGE_KEY } from './BrowserPlatformService';
+import type { ContractCatalogFile } from '../domain/types';
+import {
+  BrowserPlatformService,
+  CONTRACT_CATALOG_URL,
+  CONTRACT_CATALOG_WRITE_URL,
+  PROGRESS_STORAGE_KEY,
+} from './BrowserPlatformService';
 
 function fakeStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial));
@@ -19,59 +19,94 @@ function fakeStorage(initial: Record<string, string> = {}): Storage {
     getItem: (key) => values.get(key) ?? null,
     key: (index) => [...values.keys()][index] ?? null,
     removeItem: (key) => values.delete(key),
-    setItem: (key, value) => {
-      values.set(key, value);
-    },
+    setItem: (key, value) => values.set(key, value),
   };
 }
 
-function customDefinition(): NewContractDefinition {
-  const definition: NewContractDefinition = structuredClone(CONTRACTS[0]!);
-  delete definition.id;
-  delete definition.order;
-  definition.title = 'Persistida';
-  return definition;
+function catalog(): ContractCatalogFile {
+  return {
+    version: 1,
+    updatedAt: new Date(0).toISOString(),
+    contracts: CONTRACTS.map((contract) => structuredClone(contract)),
+  };
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('BrowserPlatformService', () => {
-  it('salva e carrega o catálogo em uma chave separada', () => {
+  it('carrega o catálogo do JSON público sem consultar o localStorage', async () => {
+    const localStorage = fakeStorage({ 'factory-flow.contracts.v1': '{legado}' });
+    vi.stubGlobal('window', { localStorage });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(catalog()), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const loaded = await new BrowserPlatformService().loadContractCatalog();
+
+    expect(loaded.ok).toBe(true);
+    expect(loaded.value.contracts).toHaveLength(3);
+    expect(fetchMock).toHaveBeenCalledWith(CONTRACT_CATALOG_URL, { cache: 'no-store' });
+    expect(localStorage.getItem('factory-flow.contracts.v1')).toBe('{legado}');
+  });
+
+  it('salva no endpoint local e devolve o catálogo confirmado pelo servidor', async () => {
     const localStorage = fakeStorage();
     vi.stubGlobal('window', { localStorage });
-    const service = new BrowserPlatformService();
-    const catalog = appendCustomContract(createDefaultContractCatalog(), {
-      ...customDefinition(),
-      id: 'custom-storage',
-    }).catalog;
+    const source = catalog();
+    source.contracts[0]!.title = 'Persistida no JSON';
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, value: source }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
 
-    expect(service.saveContractCatalog(catalog).ok).toBe(true);
-    expect(localStorage.getItem(CONTRACT_CATALOG_STORAGE_KEY)).not.toBeNull();
-    const loaded = service.loadContractCatalog();
-    expect(loaded.ok).toBe(true);
-    expect(mergeContractCatalog(loaded.value).at(-1)?.id).toBe('custom-storage');
+    const saved = await new BrowserPlatformService().saveContractCatalog(source);
+
+    expect(saved.ok).toBe(true);
+    expect(saved.value.contracts[0]?.title).toBe('Persistida no JSON');
+    expect(fetchMock).toHaveBeenCalledWith(
+      CONTRACT_CATALOG_WRITE_URL,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(localStorage.length).toBe(0);
   });
 
-  it('sinaliza catálogo corrompido e recupera os padrões', () => {
-    vi.stubGlobal('window', {
-      localStorage: fakeStorage({ [CONTRACT_CATALOG_STORAGE_KEY]: '{quebrado' }),
-    });
-    const loaded = new BrowserPlatformService().loadContractCatalog();
+  it('sinaliza catálogo remoto corrompido e recupera um catálogo vazio', async () => {
+    vi.stubGlobal('window', { localStorage: fakeStorage() });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{quebrado', { status: 200 })));
+
+    const loaded = await new BrowserPlatformService().loadContractCatalog();
 
     expect(loaded.ok).toBe(false);
-    expect(mergeContractCatalog(loaded.value)).toHaveLength(3);
+    expect(loaded.value.contracts).toEqual([]);
   });
 
-  it('retorna erro de escrita e mantém a última versão válida', () => {
-    const previous = 'versão anterior';
-    const localStorage = fakeStorage({ [CONTRACT_CATALOG_STORAGE_KEY]: previous });
-    localStorage.setItem = () => {
-      throw new DOMException('Quota exceeded', 'QuotaExceededError');
-    };
+  it('mantém progresso no localStorage e reporta falha de escrita do catálogo', async () => {
+    const localStorage = fakeStorage();
     vi.stubGlobal('window', { localStorage });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ok: false, error: 'Arquivo bloqueado.' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    const service = new BrowserPlatformService();
+    const progress = service.loadProgress(CONTRACTS);
+    expect(service.saveProgress(progress).ok).toBe(true);
 
-    const saved = new BrowserPlatformService().saveContractCatalog(createDefaultContractCatalog());
+    const saved = await service.saveContractCatalog(catalog());
+
     expect(saved.ok).toBe(false);
-    expect(localStorage.getItem(CONTRACT_CATALOG_STORAGE_KEY)).toBe(previous);
+    if (!saved.ok) expect(saved.error).toContain('Arquivo bloqueado');
+    expect(localStorage.getItem(PROGRESS_STORAGE_KEY)).not.toBeNull();
   });
 });

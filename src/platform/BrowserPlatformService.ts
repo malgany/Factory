@@ -1,11 +1,11 @@
 import {
   createDefaultContractCatalog,
-  readContractCatalog,
-  serializeContractCatalog,
+  readContractCatalogFile,
+  serializeContractCatalogFile,
 } from '../domain/catalog';
 import { createDefaultProgress, parseProgress, serializeProgress } from '../domain/progress';
 import type {
-  ContractCatalogSave,
+  ContractCatalogFile,
   ContractDefinition,
   PersistenceResult,
   PlatformService,
@@ -15,7 +15,8 @@ import type {
 // Keep the original key so existing installations can be migrated in place.
 // The version inside the payload is now v2.
 const PROGRESS_STORAGE_KEY = 'factory-flow.progress.v1';
-const CONTRACT_CATALOG_STORAGE_KEY = 'factory-flow.contracts.v1';
+const CONTRACT_CATALOG_URL = `${import.meta.env.BASE_URL}data/contracts.json`;
+const CONTRACT_CATALOG_WRITE_URL = '/__factory-admin/contracts';
 
 export class BrowserPlatformService implements PlatformService {
   loadProgress(contracts?: readonly ContractDefinition[]): ProgressSave {
@@ -39,34 +40,69 @@ export class BrowserPlatformService implements PlatformService {
     }
   }
 
-  loadContractCatalog(): PersistenceResult<ContractCatalogSave> {
+  async loadContractCatalog(): Promise<PersistenceResult<ContractCatalogFile>> {
     try {
-      return readContractCatalog(window.localStorage.getItem(CONTRACT_CATALOG_STORAGE_KEY));
+      const response = await fetch(CONTRACT_CATALOG_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        return {
+          ok: false,
+          value: createDefaultContractCatalog(),
+          error: `Não foi possível carregar o catálogo de fases (${response.status}).`,
+        };
+      }
+      return readContractCatalogFile(await response.text());
     } catch (error) {
       return {
         ok: false,
         value: createDefaultContractCatalog(),
-        error: storageErrorMessage(error, 'Não foi possível carregar as fases locais.'),
+        error: storageErrorMessage(error, 'Não foi possível carregar o catálogo de fases.'),
       };
     }
   }
 
-  saveContractCatalog(catalog: ContractCatalogSave): PersistenceResult {
+  async saveContractCatalog(
+    catalog: ContractCatalogFile,
+  ): Promise<PersistenceResult<ContractCatalogFile>> {
     try {
-      const validated = readContractCatalog(catalog);
+      const validated = readContractCatalogFile(catalog);
       if (!validated.ok) {
-        return { ok: false, value: undefined, error: validated.error };
+        return validated;
       }
-      window.localStorage.setItem(
-        CONTRACT_CATALOG_STORAGE_KEY,
-        serializeContractCatalog(validated.value),
-      );
-      return { ok: true, value: undefined };
+      if (!import.meta.env.DEV) {
+        return {
+          ok: false,
+          value: validated.value,
+          error: 'A gravação de fases só está disponível no servidor local de desenvolvimento.',
+        };
+      }
+
+      const response = await fetch(CONTRACT_CATALOG_WRITE_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: serializeContractCatalogFile(validated.value),
+      });
+      const payload = (await response.json().catch(() => undefined)) as unknown;
+      if (!response.ok || !isRecord(payload) || payload.ok !== true) {
+        const message = isRecord(payload) && typeof payload.error === 'string' ? payload.error : '';
+        return {
+          ok: false,
+          value: validated.value,
+          error: message || `Não foi possível salvar o catálogo de fases (${response.status}).`,
+        };
+      }
+      const saved = readContractCatalogFile(payload.value);
+      return saved.ok
+        ? saved
+        : {
+            ok: false,
+            value: validated.value,
+            error: 'O servidor gravou o arquivo, mas devolveu um catálogo inválido.',
+          };
     } catch (error) {
       return {
         ok: false,
-        value: undefined,
-        error: storageErrorMessage(error, 'Não foi possível salvar as fases locais.'),
+        value: createDefaultContractCatalog(),
+        error: storageErrorMessage(error, 'Não foi possível salvar o catálogo de fases.'),
       };
     }
   }
@@ -85,8 +121,12 @@ export class BrowserPlatformService implements PlatformService {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function storageErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? `${fallback} ${error.message}` : fallback;
 }
 
-export { CONTRACT_CATALOG_STORAGE_KEY, PROGRESS_STORAGE_KEY };
+export { CONTRACT_CATALOG_URL, CONTRACT_CATALOG_WRITE_URL, PROGRESS_STORAGE_KEY };

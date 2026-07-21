@@ -13,6 +13,7 @@ import {
   PLAY_AREA_MAX_ROW,
   PLAY_AREA_MIN_COLUMN,
   PLAY_AREA_MIN_ROW,
+  type ContractCamera,
   type ContractDefinition,
   type ContractId,
   type GameMode,
@@ -25,6 +26,7 @@ import {
 } from '../domain/types';
 import {
   MACHINE_DIMENSIONS,
+  MACHINE_PHYSICS_DIMENSIONS,
   degreesToRadians,
   distance,
   gridToWorld,
@@ -59,7 +61,7 @@ const PLAY_AREA_HEIGHT = PLAY_AREA_MAX_Y - PLAY_AREA_MIN_Y;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 2;
 const GRID_ROTATION_STEP = 5;
-const GRID_POSITION_STEP = 0.5;
+const GRID_POSITION_STEP = 0.25;
 const MIN_SIMULATION_SPEED = 0.1;
 const MAX_SIMULATION_SPEED = 5;
 const BOX_SIZE = 28;
@@ -78,6 +80,13 @@ const COLORS = {
   graphiteSoft: 0x5f6a72,
   blue: 0x527da5,
   blueLight: 0x82a5c5,
+  machinePanel: 0x202a33,
+  machineRecess: 0x354553,
+  receiverBorder: 0x258bc4,
+  receiverBezel: 0xe4e7e9,
+  conveyor: 0x40566b,
+  springGreen: 0x43a96b,
+  wood: 0xb47a48,
   orange: 0xff7629,
   white: 0xffffff,
   green: 0x35a26b,
@@ -119,18 +128,31 @@ interface Particle {
 }
 
 interface DragState {
-  kind: 'move' | 'rotate' | 'obstacle-move' | 'obstacle-resize' | 'pan';
+  kind: 'move' | 'group-move' | 'rotate' | 'obstacle-move' | 'obstacle-resize' | 'pan' | 'marquee';
   machineId?: string;
   before?: MachineState[];
   preview?: MachineState;
+  previewMachines?: MachineState[];
   obstacleId?: string;
   beforeDocument?: EditorDocument;
   previewObstacle?: ObstacleDefinition;
+  previewObstacles?: ObstacleDefinition[];
   grabOffsetX?: number;
   grabOffsetY?: number;
+  startWorld?: Point;
+  currentWorld?: Point;
   valid?: boolean;
   lastScreenX: number;
   lastScreenY: number;
+}
+
+type MachineClipboard = Pick<MachineState, 'type' | 'angle' | 'reversed' | 'fixed'>;
+type ObstacleClipboard = Pick<ObstacleDefinition, 'columns' | 'rows'>;
+
+interface GroupClipboard {
+  machines: MachineState[];
+  obstacles: ObstacleDefinition[];
+  origin: Point;
 }
 
 interface EditorDocument {
@@ -150,7 +172,14 @@ export interface FactoryDebugApi {
   getMachines(): MachineState[];
   getObstacles(): ObstacleDefinition[];
   getBoxes(): Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
-  getCamera(): { scrollX: number; scrollY: number; zoom: number };
+  getCamera(): {
+    scrollX: number;
+    scrollY: number;
+    centerX: number;
+    centerY: number;
+    zoom: number;
+  };
+  setCamera(centerX: number, centerY: number, zoom: number): void;
   getWorldBounds(): WorldBounds;
   startMode(mode: GameMode, contractId?: ContractId): void;
   startEditor(contract: ContractDefinition): void;
@@ -159,9 +188,12 @@ export interface FactoryDebugApi {
   selectTool(type: MachineType): void;
   placeMachine(type: MachineType, gridX: number, gridY: number, angle?: number): boolean;
   selectMachine(id: string): boolean;
+  selectArea(minX: number, minY: number, maxX: number, maxY: number): number;
   rotateSelected(angle: number): boolean;
   reverseSelected(): boolean;
   deleteSelected(): boolean;
+  copySelected(): boolean;
+  cutSelected(): boolean;
   placeObstacle(gridX: number, gridY: number, columns?: number, rows?: number): boolean;
   selectObstacle(id: string): boolean;
   moveSelectedObstacle(gridX: number, gridY: number): boolean;
@@ -205,6 +237,7 @@ function cloneContract(contract: ContractDefinition): ContractDefinition {
     ...contract,
     grid: { ...contract.grid },
     goal: { ...contract.goal },
+    initialCamera: { ...contract.initialCamera },
     availableMachines: [...contract.availableMachines],
     fixedMachines: cloneMachines(contract.fixedMachines),
     obstacles: cloneObstacles(contract.obstacles),
@@ -243,6 +276,74 @@ function linePolygon(
   );
 }
 
+function roundedRectanglePoints(
+  center: Point,
+  width: number,
+  height: number,
+  radius: number,
+  angle = 0,
+  cornerSegments = 4,
+): Point[] {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  const roundedRadius = Math.max(0, Math.min(radius, halfWidth, halfHeight));
+  const corners = [
+    { x: -halfWidth + roundedRadius, y: -halfHeight + roundedRadius, start: Math.PI },
+    {
+      x: halfWidth - roundedRadius,
+      y: -halfHeight + roundedRadius,
+      start: Math.PI * 1.5,
+    },
+    { x: halfWidth - roundedRadius, y: halfHeight - roundedRadius, start: 0 },
+    {
+      x: -halfWidth + roundedRadius,
+      y: halfHeight - roundedRadius,
+      start: Math.PI * 0.5,
+    },
+  ];
+  const points: Point[] = [];
+
+  for (const corner of corners) {
+    for (let step = 0; step <= cornerSegments; step += 1) {
+      const arcAngle = corner.start + (Math.PI * 0.5 * step) / cornerSegments;
+      points.push(
+        localToWorld(
+          center,
+          angle,
+          corner.x + Math.cos(arcAngle) * roundedRadius,
+          corner.y + Math.sin(arcAngle) * roundedRadius,
+        ),
+      );
+    }
+  }
+
+  return points;
+}
+
+function drawDashedLine(
+  graphics: Phaser.GameObjects.Graphics,
+  start: Point,
+  end: Point,
+  dashLength: number,
+  gapLength: number,
+): void {
+  const distanceX = end.x - start.x;
+  const distanceY = end.y - start.y;
+  const length = Math.hypot(distanceX, distanceY);
+  if (length <= 0) return;
+  const directionX = distanceX / length;
+  const directionY = distanceY / length;
+  for (let offset = 0; offset < length; offset += dashLength + gapLength) {
+    const segmentEnd = Math.min(length, offset + dashLength);
+    graphics.lineBetween(
+      start.x + directionX * offset,
+      start.y + directionY * offset,
+      start.x + directionX * segmentEnd,
+      start.y + directionY * segmentEnd,
+    );
+  }
+}
+
 export class FactoryScene extends Phaser.Scene {
   private readonly history = new CommandHistory(120);
   private readonly editorHistory = new CommandHistory(120);
@@ -259,7 +360,7 @@ export class FactoryScene extends Phaser.Scene {
   private effectsGraphics!: Phaser.GameObjects.Graphics;
   private overlayGraphics!: Phaser.GameObjects.Graphics;
 
-  private mode: GameMode = 'campaign';
+  private mode: GameMode = 'sandbox';
   private contract?: ContractDefinition;
   private machines: MachineState[] = [];
   private obstacles: ObstacleDefinition[] = [];
@@ -275,10 +376,16 @@ export class FactoryScene extends Phaser.Scene {
 
   private selectedTool?: MachineType;
   private selectedEditorTool?: EditorTool;
-  private selectedMachineId?: string;
-  private selectedObstacleId?: string;
+  private readonly selectedMachineIds = new Set<string>();
+  private readonly selectedObstacleIds = new Set<string>();
   private ghostMachine?: MachineState;
   private ghostObstacle?: ObstacleDefinition;
+  private ghostGroupMachines: MachineState[] = [];
+  private ghostGroupObstacles: ObstacleDefinition[] = [];
+  private groupGhostAnchor?: Point;
+  private machineClipboard?: MachineClipboard;
+  private obstacleClipboard?: ObstacleClipboard;
+  private groupClipboard?: GroupClipboard;
   private ghostValid = false;
   private drag?: DragState;
   private editorActive = false;
@@ -286,6 +393,7 @@ export class FactoryScene extends Phaser.Scene {
   private editorContract?: ContractDefinition;
   private editorBaseline = '';
   private editorAuthoringState?: EditorAuthoringState;
+  private editorPersistenceLocked = false;
   private obstacleSequence = 0;
   private muted = false;
   private gridEnabled = true;
@@ -298,7 +406,26 @@ export class FactoryScene extends Phaser.Scene {
   private machineSequence = 0;
   private boxSequence = 0;
   private lastGridZoom = -1;
+  private currentCamera?: ContractCamera;
   private contextMenuHandler?: (event: MouseEvent) => void;
+
+  private get selectedMachineId(): string | undefined {
+    return this.selectedMachineIds.values().next().value;
+  }
+
+  private set selectedMachineId(id: string | undefined) {
+    this.selectedMachineIds.clear();
+    if (id) this.selectedMachineIds.add(id);
+  }
+
+  private get selectedObstacleId(): string | undefined {
+    return this.selectedObstacleIds.values().next().value;
+  }
+
+  private set selectedObstacleId(id: string | undefined) {
+    this.selectedObstacleIds.clear();
+    if (id) this.selectedObstacleIds.add(id);
+  }
 
   constructor() {
     super({ key: 'FactoryScene' });
@@ -328,8 +455,7 @@ export class FactoryScene extends Phaser.Scene {
     this.bindInput();
     this.bindApplicationEvents();
     this.installDebugApi();
-    this.startMode('campaign', 'first-flow');
-    this.fitCamera();
+    this.initializeIdleState();
 
     this.scale.on(Phaser.Scale.Events.RESIZE, this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.destroyScene, this);
@@ -377,10 +503,14 @@ export class FactoryScene extends Phaser.Scene {
     this.editorContract = undefined;
     this.editorAuthoringState = undefined;
     this.editorBaseline = '';
+    this.editorPersistenceLocked = false;
     this.mode = mode;
+    if (mode === 'campaign' && !contractDefinition && !contractId) {
+      throw new Error('Uma fase deve ser informada para iniciar o modo campanha.');
+    }
     this.contract =
       mode === 'campaign'
-        ? cloneContract(contractDefinition ?? getContract(contractId ?? 'first-flow'))
+        ? cloneContract(contractDefinition ?? getContract(contractId!))
         : undefined;
     this.availableMachines = [
       ...(this.contract?.availableMachines ?? SANDBOX_DEFINITION.availableMachines),
@@ -389,6 +519,7 @@ export class FactoryScene extends Phaser.Scene {
     const initialMachines =
       this.contract?.fixedMachines ?? restoredMachines ?? SANDBOX_DEFINITION.fixedMachines;
     this.machines = this.normalizeMachineIds(initialMachines, this.mode === 'campaign');
+    this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -400,7 +531,8 @@ export class FactoryScene extends Phaser.Scene {
     this.editorHistory.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
-    this.fitCamera();
+    if (this.contract) this.applyContractCamera(this.contract.initialCamera);
+    else this.fitCamera();
     this.emitSnapshot();
     this.emitSandboxChange();
     this.emitCamera();
@@ -414,6 +546,7 @@ export class FactoryScene extends Phaser.Scene {
     this.editorPreview = false;
     this.editorAuthoringState = undefined;
     this.editorContract = draft;
+    this.editorPersistenceLocked = false;
     this.contract = draft;
     this.availableMachines = ['source', 'receiver', 'conveyor', 'spring'];
     this.obstacles = this.normalizeObstacles(draft.obstacles);
@@ -421,6 +554,7 @@ export class FactoryScene extends Phaser.Scene {
       draft.fixedMachines.map((machine) => ({ ...machine, fixed: true })),
       true,
     );
+    this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -433,7 +567,7 @@ export class FactoryScene extends Phaser.Scene {
     this.editorHistory.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
-    this.fitCamera();
+    this.applyContractCamera(draft.initialCamera);
     this.editorBaseline = isNew
       ? '__new-contract-without-persisted-baseline__'
       : this.serializeEditorContract(this.getEditorDraft());
@@ -443,9 +577,10 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public updateEditorSettings(contract: ContractDefinition): void {
-    if (!this.isAuthoring()) return;
+    if (!this.isAuthoring() || this.editorPersistenceLocked) return;
     this.editorContract = {
       ...cloneContract(contract),
+      initialCamera: this.captureCamera(),
       fixedMachines: cloneMachines(this.machines).map((machine) => ({ ...machine, fixed: true })),
       obstacles: cloneObstacles(this.obstacles),
     };
@@ -460,6 +595,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedTool = type === 'obstacle' ? undefined : type;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.clearClipboard();
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
     this.emitSnapshot();
@@ -467,7 +603,7 @@ export class FactoryScene extends Phaser.Scene {
 
   /** Runs the current draft with the player's configured palette and a disposable solution. */
   public beginEditorPreview(): void {
-    if (!this.isAuthoring() || !this.editorContract) return;
+    if (!this.isAuthoring() || this.editorPersistenceLocked || !this.editorContract) return;
     const draft = this.getEditorDraft();
     this.editorAuthoringState = {
       contract: cloneContract(draft),
@@ -482,6 +618,7 @@ export class FactoryScene extends Phaser.Scene {
       fixed: true,
     }));
     this.obstacles = cloneObstacles(draft.obstacles);
+    this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -491,12 +628,20 @@ export class FactoryScene extends Phaser.Scene {
     this.history.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
+    this.applyContractCamera(draft.initialCamera);
     appEvents.emit('game:editor-preview', { active: true });
     this.emitSnapshot();
   }
 
   public returnToEditor(): void {
-    if (!this.editorActive || !this.editorPreview || !this.editorAuthoringState) return;
+    if (
+      this.editorPersistenceLocked ||
+      !this.editorActive ||
+      !this.editorPreview ||
+      !this.editorAuthoringState
+    ) {
+      return;
+    }
     const state = this.editorAuthoringState;
     this.editorPreview = false;
     this.mode = 'editor';
@@ -504,6 +649,7 @@ export class FactoryScene extends Phaser.Scene {
     this.contract = this.editorContract;
     this.availableMachines = ['source', 'receiver', 'conveyor', 'spring'];
     this.applyEditorDocument(state.document, false);
+    this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -511,6 +657,7 @@ export class FactoryScene extends Phaser.Scene {
     this.history.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
+    this.applyContractCamera(state.contract.initialCamera);
     this.editorAuthoringState = undefined;
     appEvents.emit('game:editor-preview', { active: false });
     this.emitEditorChanged();
@@ -525,13 +672,14 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public cancelEditor(): void {
-    if (!this.editorActive) return;
+    if (!this.editorActive || this.editorPersistenceLocked) return;
     this.mode = 'campaign';
     this.editorActive = false;
     this.editorPreview = false;
     this.editorContract = undefined;
     this.editorAuthoringState = undefined;
     this.editorBaseline = '';
+    this.editorPersistenceLocked = false;
     // A discarded draft must not remain runnable behind the menu. In
     // particular, the global Space shortcut must never turn it into a
     // campaign result after authoring has ended.
@@ -539,6 +687,7 @@ export class FactoryScene extends Phaser.Scene {
     this.machines = [];
     this.obstacles = [];
     this.availableMachines = [];
+    this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -560,6 +709,7 @@ export class FactoryScene extends Phaser.Scene {
     const base = cloneContract(source);
     return {
       ...base,
+      initialCamera: this.isAuthoring() ? this.captureCamera() : { ...base.initialCamera },
       fixedMachines: cloneMachines(this.machines).map((machine) => ({ ...machine, fixed: true })),
       obstacles: cloneObstacles(this.obstacles),
     };
@@ -579,6 +729,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = this.isAuthoring() ? type : undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.clearClipboard();
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
     this.emitSnapshot();
@@ -594,13 +745,12 @@ export class FactoryScene extends Phaser.Scene {
       return false;
     }
 
-    const snapToHalfCell = (value: number) =>
-      Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
+    const snapToGrid = (value: number, step: number) => Math.round(value / step) * step;
     const machine: MachineState = {
       id: this.createMachineId(),
       type,
-      gridX: this.isAuthoring() ? snapToHalfCell(gridX) : gridX,
-      gridY: this.isAuthoring() ? snapToHalfCell(gridY) : gridY,
+      gridX: this.isAuthoring() ? snapToGrid(gridX, GRID_POSITION_STEP) : gridX,
+      gridY: this.isAuthoring() ? snapToGrid(gridY, GRID_POSITION_STEP) : gridY,
       angle: normalizeAngle(angle),
       reversed: false,
       fixed: this.isAuthoring(),
@@ -636,7 +786,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public rotateSelectedTo(angle: number): boolean {
-    if (!this.canBuild()) return false;
+    if (!this.canBuild() || this.selectionCount() !== 1) return false;
     const selected = this.getSelectedMachine();
     if (!selected || !this.canEditMachine(selected) || !this.isRotatable(selected)) return false;
     const candidate = { ...selected, angle: this.snapRotationAngle(angle) };
@@ -651,7 +801,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public reverseSelected(): boolean {
-    if (!this.canBuild()) return false;
+    if (!this.canBuild() || this.selectionCount() !== 1) return false;
     const selected = this.getSelectedMachine();
     if (!selected || !this.canEditMachine(selected) || selected.type !== 'conveyor') {
       this.toast('Selecione uma esteira para inverter.', 'neutral');
@@ -669,6 +819,7 @@ export class FactoryScene extends Phaser.Scene {
 
   public deleteSelected(): boolean {
     if (!this.canBuild()) return false;
+    if (this.selectionCount() > 1) return this.deleteSelectedGroup();
     if (this.isAuthoring() && this.selectedObstacleId) {
       return this.deleteSelectedObstacle();
     }
@@ -680,6 +831,427 @@ export class FactoryScene extends Phaser.Scene {
     const before = cloneMachines(this.machines);
     const after = before.filter((machine) => machine.id !== selected.id);
     this.executeSnapshotCommand('Remover peça', before, after);
+    this.selectedMachineId = undefined;
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
+  public copySelected(): boolean {
+    if (!this.canBuild()) return false;
+    if (this.selectionCount() > 1) {
+      this.beginGroupPaste(this.getSelectedMachines(), this.getSelectedObstacles());
+      return true;
+    }
+    const machine = this.getSelectedMachine();
+    if (machine && this.canEditMachine(machine)) {
+      this.beginMachinePaste(machine);
+      return true;
+    }
+
+    const obstacle = this.getSelectedObstacle();
+    if (obstacle && this.isAuthoring()) {
+      this.beginObstaclePaste(obstacle);
+      return true;
+    }
+    return false;
+  }
+
+  public cutSelected(): boolean {
+    if (!this.canBuild()) return false;
+    if (this.selectionCount() > 1) return this.cutSelectedGroup();
+    const machine = this.getSelectedMachine();
+    if (machine && this.canEditMachine(machine)) {
+      const before = cloneMachines(this.machines);
+      const after = before.filter((candidate) => candidate.id !== machine.id);
+      this.executeSnapshotCommand('Recortar peça', before, after);
+      this.beginMachinePaste(machine);
+      this.audio('place');
+      this.emitEditorChanged();
+      return true;
+    }
+
+    const obstacle = this.getSelectedObstacle();
+    if (obstacle && this.isAuthoring()) {
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.obstacles = after.obstacles.filter((candidate) => candidate.id !== obstacle.id);
+      this.executeEditorSnapshotCommand('Recortar bloqueador', before, after);
+      this.beginObstaclePaste(obstacle);
+      this.audio('place');
+      this.emitEditorChanged();
+      return true;
+    }
+    return false;
+  }
+
+  private deleteSelectedGroup(): boolean {
+    const selectedMachines = this.getSelectedMachines().filter((machine) =>
+      this.canEditMachine(machine),
+    );
+    const selectedObstacles = this.isAuthoring() ? this.getSelectedObstacles() : [];
+    if (selectedMachines.length + selectedObstacles.length < 2) return false;
+    const machineIds = new Set(selectedMachines.map((machine) => machine.id));
+    const obstacleIds = new Set(selectedObstacles.map((obstacle) => obstacle.id));
+
+    if (this.isAuthoring()) {
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.machines = after.machines.filter((machine) => !machineIds.has(machine.id));
+      after.obstacles = after.obstacles.filter((obstacle) => !obstacleIds.has(obstacle.id));
+      this.executeEditorSnapshotCommand('Remover seleção', before, after);
+    } else {
+      const before = cloneMachines(this.machines);
+      const after = before.filter((machine) => !machineIds.has(machine.id));
+      this.executeSnapshotCommand('Remover seleção', before, after);
+    }
+
+    this.clearSelection();
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
+  private cutSelectedGroup(): boolean {
+    const selectedMachines = this.getSelectedMachines().filter((machine) =>
+      this.canEditMachine(machine),
+    );
+    const selectedObstacles = this.isAuthoring() ? this.getSelectedObstacles() : [];
+    if (selectedMachines.length + selectedObstacles.length < 2) return false;
+    const machineIds = new Set(selectedMachines.map((machine) => machine.id));
+    const obstacleIds = new Set(selectedObstacles.map((obstacle) => obstacle.id));
+
+    if (this.isAuthoring()) {
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.machines = after.machines.filter((machine) => !machineIds.has(machine.id));
+      after.obstacles = after.obstacles.filter((obstacle) => !obstacleIds.has(obstacle.id));
+      this.executeEditorSnapshotCommand('Recortar seleção', before, after);
+    } else {
+      const before = cloneMachines(this.machines);
+      const after = before.filter((machine) => !machineIds.has(machine.id));
+      this.executeSnapshotCommand('Recortar seleção', before, after);
+    }
+
+    this.beginGroupPaste(selectedMachines, selectedObstacles);
+    this.audio('place');
+    this.emitEditorChanged();
+    return true;
+  }
+
+  private beginMachinePaste(machine: MachineState): void {
+    const clipboard: MachineClipboard = {
+      type: machine.type,
+      angle: machine.angle,
+      reversed: machine.reversed,
+      fixed: machine.fixed,
+    };
+    this.machineClipboard = clipboard;
+    this.obstacleClipboard = undefined;
+    this.groupClipboard = undefined;
+    this.ghostGroupMachines = [];
+    this.ghostGroupObstacles = [];
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.ghostObstacle = undefined;
+    this.ghostMachine = {
+      id: 'ghost',
+      ...clipboard,
+      gridX: machine.gridX,
+      gridY: machine.gridY,
+    };
+    this.ghostValid =
+      (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+      this.isMachinePlacementValid(this.ghostMachine);
+    this.emitSnapshot();
+  }
+
+  private beginObstaclePaste(obstacle: ObstacleDefinition): void {
+    const clipboard: ObstacleClipboard = { columns: obstacle.columns, rows: obstacle.rows };
+    this.obstacleClipboard = clipboard;
+    this.machineClipboard = undefined;
+    this.groupClipboard = undefined;
+    this.ghostGroupMachines = [];
+    this.ghostGroupObstacles = [];
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = {
+      id: 'ghost-obstacle',
+      ...clipboard,
+      gridX: obstacle.gridX,
+      gridY: obstacle.gridY,
+    };
+    this.ghostValid = this.isObstaclePlacementValid(this.ghostObstacle);
+    this.emitSnapshot();
+  }
+
+  private beginGroupPaste(
+    machines: readonly MachineState[],
+    obstacles: readonly ObstacleDefinition[],
+  ): void {
+    if (machines.length + obstacles.length === 0) return;
+    const points = [
+      ...machines.flatMap((machine) => machinePolygon(machine)),
+      ...obstacles.flatMap((obstacle) => this.obstaclePolygon(obstacle)),
+    ];
+    const minX = Math.min(...points.map((point) => point.x));
+    const maxX = Math.max(...points.map((point) => point.x));
+    const minY = Math.min(...points.map((point) => point.y));
+    const maxY = Math.max(...points.map((point) => point.y));
+    const origin = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+
+    this.machineClipboard = undefined;
+    this.obstacleClipboard = undefined;
+    this.groupClipboard = {
+      machines: cloneMachines(machines),
+      obstacles: cloneObstacles(obstacles),
+      origin,
+    };
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.clearSelection();
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.updateGroupGhostAt(origin);
+    this.emitSnapshot();
+  }
+
+  private updateGroupGhostAt(anchor: Point): void {
+    const clipboard = this.groupClipboard;
+    if (!clipboard) return;
+    this.groupGhostAnchor = { ...anchor };
+    const rawDeltaX = (anchor.x - clipboard.origin.x) / CELL_SIZE;
+    const rawDeltaY = (anchor.y - clipboard.origin.y) / CELL_SIZE;
+    const step = clipboard.obstacles.length > 0 ? 1 : this.gridEnabled ? GRID_POSITION_STEP : 0.001;
+    const deltaX = Math.round(rawDeltaX / step) * step;
+    const deltaY = Math.round(rawDeltaY / step) * step;
+
+    this.ghostGroupMachines = clipboard.machines.map((machine, index) => ({
+      ...machine,
+      id: `ghost-group-machine-${index}`,
+      gridX: machine.gridX + deltaX,
+      gridY: machine.gridY + deltaY,
+    }));
+    this.ghostGroupObstacles = clipboard.obstacles.map((obstacle, index) => ({
+      ...obstacle,
+      id: `ghost-group-obstacle-${index}`,
+      gridX: obstacle.gridX + deltaX,
+      gridY: obstacle.gridY + deltaY,
+    }));
+    this.ghostValid =
+      this.canPlaceMachineGroup(this.ghostGroupMachines.length) &&
+      this.isGroupPlacementValid(this.ghostGroupMachines, this.ghostGroupObstacles);
+  }
+
+  private placeGroupFromClipboardAt(world: Point): boolean {
+    if (!this.canBuild() || !this.groupClipboard) return false;
+    this.updateGroupGhostAt(world);
+    if (!this.canPlaceMachineGroup(this.ghostGroupMachines.length)) {
+      this.toast('Orçamento de peças esgotado.', 'danger');
+      this.audio('error');
+      return false;
+    }
+    if (!this.ghostValid) {
+      this.toast('Posicione todo o grupo em uma área livre.', 'danger');
+      this.audio('error');
+      return false;
+    }
+
+    const machines = this.ghostGroupMachines.map((machine) => ({
+      ...machine,
+      id: this.createMachineId(),
+    }));
+    const obstacles = this.ghostGroupObstacles.map((obstacle) => ({
+      ...obstacle,
+      id: this.createObstacleId(),
+    }));
+
+    if (this.isAuthoring()) {
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.machines.push(...machines);
+      after.obstacles.push(...obstacles);
+      this.executeEditorSnapshotCommand('Colar seleção', before, after);
+    } else {
+      if (obstacles.length > 0) return false;
+      const before = cloneMachines(this.machines);
+      this.executeSnapshotCommand('Colar seleção', before, [...before, ...machines]);
+    }
+
+    this.clearClipboard();
+    this.clearSelection();
+    for (const machine of machines) this.selectedMachineIds.add(machine.id);
+    for (const obstacle of obstacles) this.selectedObstacleIds.add(obstacle.id);
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
+  private beginGroupMove(world: Point): boolean {
+    const machines = this.getSelectedMachines();
+    const obstacles = this.getSelectedObstacles();
+    if (machines.length + obstacles.length < 2) return false;
+    this.drag = {
+      kind: 'group-move',
+      ...(this.isAuthoring()
+        ? { beforeDocument: this.captureEditorDocument() }
+        : { before: cloneMachines(this.machines) }),
+      previewMachines: cloneMachines(machines),
+      previewObstacles: cloneObstacles(obstacles),
+      startWorld: { ...world },
+      currentWorld: { ...world },
+      valid: true,
+      lastScreenX: 0,
+      lastScreenY: 0,
+    };
+    return true;
+  }
+
+  private updateGroupMovePreview(drag: DragState, world: Point): void {
+    if (drag.kind !== 'group-move' || !drag.startWorld) return;
+    const sourceMachines = (drag.beforeDocument?.machines ?? drag.before ?? []).filter((machine) =>
+      this.selectedMachineIds.has(machine.id),
+    );
+    const sourceObstacles = (drag.beforeDocument?.obstacles ?? []).filter((obstacle) =>
+      this.selectedObstacleIds.has(obstacle.id),
+    );
+    const rawDeltaX = (world.x - drag.startWorld.x) / CELL_SIZE;
+    const rawDeltaY = (world.y - drag.startWorld.y) / CELL_SIZE;
+    const step = sourceObstacles.length > 0 ? 1 : this.gridEnabled ? GRID_POSITION_STEP : 0.001;
+    const deltaX = Math.round(rawDeltaX / step) * step;
+    const deltaY = Math.round(rawDeltaY / step) * step;
+
+    drag.currentWorld = { ...world };
+    drag.previewMachines = sourceMachines.map((machine) => ({
+      ...machine,
+      gridX: machine.gridX + deltaX,
+      gridY: machine.gridY + deltaY,
+    }));
+    drag.previewObstacles = sourceObstacles.map((obstacle) => ({
+      ...obstacle,
+      gridX: obstacle.gridX + deltaX,
+      gridY: obstacle.gridY + deltaY,
+    }));
+    drag.valid = this.isGroupPlacementValid(
+      drag.previewMachines,
+      drag.previewObstacles,
+      this.selectedMachineIds,
+      this.selectedObstacleIds,
+    );
+  }
+
+  private commitGroupMove(drag: DragState): void {
+    const previewMachines = drag.previewMachines ?? [];
+    const previewObstacles = drag.previewObstacles ?? [];
+    if (!drag.valid) {
+      this.toast('Solte o grupo em uma área livre.', 'danger');
+      this.audio('error');
+      return;
+    }
+
+    const machineById = new Map(previewMachines.map((machine) => [machine.id, machine]));
+    const obstacleById = new Map(previewObstacles.map((obstacle) => [obstacle.id, obstacle]));
+    if (this.isAuthoring()) {
+      const before = drag.beforeDocument;
+      if (!before) return;
+      const changed =
+        previewMachines.some((machine) => {
+          const original = before.machines.find((candidate) => candidate.id === machine.id);
+          return !original || !sameMachineState(original, machine);
+        }) ||
+        previewObstacles.some((obstacle) => {
+          const original = before.obstacles.find((candidate) => candidate.id === obstacle.id);
+          return !original || !this.sameObstacleState(original, obstacle);
+        });
+      if (!changed) return;
+      const after = cloneEditorDocument(before);
+      after.machines = after.machines.map((machine) => ({
+        ...(machineById.get(machine.id) ?? machine),
+      }));
+      after.obstacles = after.obstacles.map((obstacle) => ({
+        ...(obstacleById.get(obstacle.id) ?? obstacle),
+      }));
+      this.executeEditorSnapshotCommand('Mover seleção', before, after);
+    } else {
+      const before = drag.before;
+      if (!before) return;
+      const changed = previewMachines.some((machine) => {
+        const original = before.find((candidate) => candidate.id === machine.id);
+        return !original || !sameMachineState(original, machine);
+      });
+      if (!changed) return;
+      const after = before.map((machine) => ({
+        ...(machineById.get(machine.id) ?? machine),
+      }));
+      this.executeSnapshotCommand('Mover seleção', before, after);
+    }
+
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+  }
+
+  private placeMachineFromClipboardAt(gridX: number, gridY: number): boolean {
+    if (!this.canBuild() || !this.machineClipboard) return false;
+    if (!this.isAuthoring() && !this.canPlaceAnotherPiece()) {
+      this.toast('Orçamento de peças esgotado.', 'danger');
+      this.audio('error');
+      return false;
+    }
+
+    const machine: MachineState = {
+      id: this.createMachineId(),
+      ...this.machineClipboard,
+      gridX,
+      gridY,
+    };
+    if (!this.isMachinePlacementValid(machine)) {
+      this.toast('Essa posição está ocupada.', 'danger');
+      this.audio('error');
+      return false;
+    }
+
+    const before = cloneMachines(this.machines);
+    this.executeSnapshotCommand('Colar peça', before, [...before, machine]);
+    this.clearClipboard();
+    this.ghostMachine = undefined;
+    this.selectedMachineId = machine.id;
+    this.selectedObstacleId = undefined;
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
+  private placeObstacleFromClipboardAt(gridX: number, gridY: number): boolean {
+    if (!this.isAuthoring() || !this.canBuild() || !this.obstacleClipboard) return false;
+    const obstacle: ObstacleDefinition = {
+      id: this.createObstacleId(),
+      ...this.obstacleClipboard,
+      gridX,
+      gridY,
+    };
+    if (!this.isObstaclePlacementValid(obstacle)) {
+      this.toast('Essa área está ocupada ou fora do tabuleiro.', 'danger');
+      this.audio('error');
+      return false;
+    }
+
+    const before = this.captureEditorDocument();
+    const after = cloneEditorDocument(before);
+    after.obstacles.push(obstacle);
+    this.executeEditorSnapshotCommand('Colar bloqueador', before, after);
+    this.clearClipboard();
+    this.ghostObstacle = undefined;
+    this.selectedObstacleId = obstacle.id;
     this.selectedMachineId = undefined;
     this.audio('place');
     this.emitSnapshot();
@@ -780,10 +1352,24 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedObstacleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.clearClipboard();
     this.drag = undefined;
   }
 
+  private clearClipboard(): void {
+    this.machineClipboard = undefined;
+    this.obstacleClipboard = undefined;
+    this.groupClipboard = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.ghostGroupMachines = [];
+    this.ghostGroupObstacles = [];
+    this.groupGhostAnchor = undefined;
+  }
+
   public runSimulation(): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return;
+
     if (this.status === 'paused') {
       this.clearInteractionFocus();
       this.status = 'running';
@@ -843,6 +1429,8 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public replaceMachines(machines: readonly MachineState[]): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return;
+
     const fixed = this.contract?.fixedMachines ?? [];
     const prepared = this.normalizeMachineIds(
       machines.filter((machine) => this.mode === 'sandbox' || !machine.fixed),
@@ -882,8 +1470,10 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public getSnapshot(): GameSnapshot {
-    const selected = this.getSelectedMachine();
-    const selectedObstacle = this.getSelectedObstacle();
+    const selectedMachines = this.getSelectedMachines();
+    const selectedObstacles = this.getSelectedObstacles();
+    const selected = selectedMachines[0];
+    const selectedObstacle = selectedObstacles[0];
     return {
       mode: this.mode,
       ...(this.contract ? { contractId: this.contract.id } : {}),
@@ -894,6 +1484,11 @@ export class FactoryScene extends Phaser.Scene {
       ...(this.contract ? { goal: { ...this.contract.goal } } : {}),
       ...(selected ? { selectedMachine: { ...selected } } : {}),
       ...(selectedObstacle ? { selectedObstacle: { ...selectedObstacle } } : {}),
+      selection: {
+        machineIds: selectedMachines.map((machine) => machine.id),
+        obstacleIds: selectedObstacles.map((obstacle) => obstacle.id),
+        count: selectedMachines.length + selectedObstacles.length,
+      },
       availableMachines: [...this.availableMachines],
       canUndo: this.activeHistory().canUndo,
       canRedo: this.activeHistory().canRedo,
@@ -915,6 +1510,9 @@ export class FactoryScene extends Phaser.Scene {
       ),
       appEvents.on('ui:editor-test', () => this.beginEditorPreview()),
       appEvents.on('ui:editor-return', () => this.returnToEditor()),
+      appEvents.on('ui:editor-persistence', ({ saving }) =>
+        this.setEditorPersistenceLocked(saving),
+      ),
       appEvents.on('ui:editor-mark-saved', ({ contract }) => this.markEditorSaved(contract)),
       appEvents.on('ui:editor-cancel', () => this.cancelEditor()),
       appEvents.on('ui:tool', ({ type }) => this.selectTool(type)),
@@ -927,6 +1525,8 @@ export class FactoryScene extends Phaser.Scene {
       appEvents.on('ui:undo', () => this.undo()),
       appEvents.on('ui:redo', () => this.redo()),
       appEvents.on('ui:delete-selected', () => this.deleteSelected()),
+      appEvents.on('ui:copy-selected', () => this.copySelected()),
+      appEvents.on('ui:cut-selected', () => this.cutSelected()),
       appEvents.on('ui:reverse-selected', () => this.reverseSelected()),
       appEvents.on('ui:toggle-grid', () => this.toggleGrid()),
       appEvents.on('ui:set-simulation-speed', ({ speed }) => {
@@ -962,6 +1562,16 @@ export class FactoryScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-Q', () => this.rotateSelectedBy(-this.rotationStep()));
     this.input.keyboard?.on('keydown-E', () => this.rotateSelectedBy(this.rotationStep()));
     this.input.keyboard?.on('keydown-R', () => this.reverseSelected());
+    this.input.keyboard?.on('keydown-C', (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      this.copySelected();
+    });
+    this.input.keyboard?.on('keydown-X', (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      this.cutSelected();
+    });
     this.input.keyboard?.on('keydown-Z', (event: KeyboardEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
@@ -1036,13 +1646,25 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private handlePointerDown(pointer: Phaser.Input.Pointer): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return;
+
     if (pointer.rightButtonDown()) {
+      if (!this.canBuild()) return;
+      const world = this.pointerWorld(pointer);
+      if (!this.isInsideWorld(world)) return;
+      this.clearClipboard();
       this.selectedTool = undefined;
       this.selectedEditorTool = undefined;
-      this.selectedMachineId = undefined;
-      this.selectedObstacleId = undefined;
+      this.clearSelection();
       this.ghostMachine = undefined;
       this.ghostObstacle = undefined;
+      this.drag = {
+        kind: 'marquee',
+        startWorld: { ...world },
+        currentWorld: { ...world },
+        lastScreenX: pointer.x,
+        lastScreenY: pointer.y,
+      };
       this.emitSnapshot();
       return;
     }
@@ -1051,8 +1673,27 @@ export class FactoryScene extends Phaser.Scene {
     const world = this.pointerWorld(pointer);
     if (!this.isInsideWorld(world)) return;
 
+    if (this.groupClipboard) {
+      this.placeGroupFromClipboardAt(world);
+      return;
+    }
+
     if (this.isAuthoring() && this.selectedEditorTool === 'obstacle') {
       this.placeObstacleAt(Math.floor(world.x / CELL_SIZE), Math.floor(world.y / CELL_SIZE));
+      return;
+    }
+
+    if (this.obstacleClipboard && this.isAuthoring()) {
+      this.placeObstacleFromClipboardAt(
+        Math.floor(world.x / CELL_SIZE),
+        Math.floor(world.y / CELL_SIZE),
+      );
+      return;
+    }
+
+    if (this.machineClipboard) {
+      const grid = this.machinePositionFromWorld(world);
+      this.placeMachineFromClipboardAt(grid.x, grid.y);
       return;
     }
 
@@ -1062,8 +1703,35 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
+    const selectedHit = [...this.getSelectedMachines()]
+      .reverse()
+      .find((machine) => pointInsideMachine(world, machine, 7));
+    const selectedObstacleHit = this.isAuthoring()
+      ? [...this.getSelectedObstacles()].reverse().find((obstacle) => {
+          const x = obstacle.gridX * CELL_SIZE;
+          const y = obstacle.gridY * CELL_SIZE;
+          return (
+            world.x >= x &&
+            world.x <= x + obstacle.columns * CELL_SIZE &&
+            world.y >= y &&
+            world.y <= y + obstacle.rows * CELL_SIZE
+          );
+        })
+      : undefined;
+    if (
+      this.selectionCount() > 1 &&
+      (selectedHit || selectedObstacleHit) &&
+      this.beginGroupMove(world)
+    ) {
+      return;
+    }
+
+    const hit = this.findMachineAt(world);
+    const hitObstacle = this.isAuthoring() ? this.findObstacleAt(world) : undefined;
+
     const selected = this.getSelectedMachine();
     if (
+      this.selectionCount() === 1 &&
       selected &&
       this.canEditMachine(selected) &&
       this.isRotatable(selected) &&
@@ -1084,6 +1752,7 @@ export class FactoryScene extends Phaser.Scene {
 
     const selectedObstacle = this.getSelectedObstacle();
     if (
+      this.selectionCount() === 1 &&
       selectedObstacle &&
       this.isAuthoring() &&
       distance(world, this.obstacleResizeHandle(selectedObstacle)) <=
@@ -1101,8 +1770,13 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    const hit = this.findMachineAt(world);
     if (hit) {
+      if (!this.canEditMachine(hit)) {
+        this.selectedMachineId = undefined;
+        this.selectedObstacleId = undefined;
+        this.emitSnapshot();
+        return;
+      }
       this.selectedMachineId = hit.id;
       this.selectedObstacleId = undefined;
       this.selectedTool = undefined;
@@ -1122,7 +1796,6 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    const hitObstacle = this.isAuthoring() ? this.findObstacleAt(world) : undefined;
     if (hitObstacle) {
       this.selectedObstacleId = hitObstacle.id;
       this.selectedMachineId = undefined;
@@ -1154,7 +1827,14 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private handlePointerMove(pointer: Phaser.Input.Pointer): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return;
+
     const world = this.pointerWorld(pointer);
+
+    if (this.drag?.kind === 'marquee' && pointer.isDown) {
+      this.drag.currentWorld = { ...world };
+      return;
+    }
 
     if (this.drag?.kind === 'pan' && pointer.isDown) {
       const camera = this.cameras.main;
@@ -1163,6 +1843,12 @@ export class FactoryScene extends Phaser.Scene {
       this.drag.lastScreenX = pointer.x;
       this.drag.lastScreenY = pointer.y;
       this.emitCamera();
+      this.syncEditorCamera();
+      return;
+    }
+
+    if (this.drag?.kind === 'group-move' && pointer.isDown) {
+      this.updateGroupMovePreview(this.drag, world);
       return;
     }
 
@@ -1209,6 +1895,45 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
+    if (this.groupClipboard) {
+      if (this.isInsideWorld(world)) this.updateGroupGhostAt(world);
+      else {
+        this.ghostGroupMachines = [];
+        this.ghostGroupObstacles = [];
+        this.groupGhostAnchor = undefined;
+      }
+      this.ghostMachine = undefined;
+      this.ghostObstacle = undefined;
+      return;
+    }
+
+    if (this.obstacleClipboard && this.isAuthoring() && this.isInsideWorld(world)) {
+      this.ghostObstacle = {
+        id: 'ghost-obstacle',
+        ...this.obstacleClipboard,
+        gridX: Math.floor(world.x / CELL_SIZE),
+        gridY: Math.floor(world.y / CELL_SIZE),
+      };
+      this.ghostValid = this.isObstaclePlacementValid(this.ghostObstacle);
+      this.ghostMachine = undefined;
+      return;
+    }
+
+    if (this.machineClipboard && this.isInsideWorld(world)) {
+      const grid = this.machinePositionFromWorld(world);
+      this.ghostMachine = {
+        id: 'ghost',
+        ...this.machineClipboard,
+        gridX: grid.x,
+        gridY: grid.y,
+      };
+      this.ghostValid =
+        (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+        this.isMachinePlacementValid(this.ghostMachine);
+      this.ghostObstacle = undefined;
+      return;
+    }
+
     if (this.isAuthoring() && this.selectedEditorTool === 'obstacle' && this.isInsideWorld(world)) {
       const gridX = Math.floor(world.x / CELL_SIZE);
       const gridY = Math.floor(world.y / CELL_SIZE);
@@ -1248,9 +1973,27 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private handlePointerUp(pointer: Phaser.Input.Pointer): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) {
+      this.drag = undefined;
+      return;
+    }
+
     const drag = this.drag;
     this.drag = undefined;
     if (!drag) return;
+
+    if (drag.kind === 'marquee' && drag.startWorld && drag.currentWorld) {
+      const moved = Math.hypot(pointer.x - drag.lastScreenX, pointer.y - drag.lastScreenY);
+      if (moved >= 5) this.selectItemsInsideMarquee(drag.startWorld, drag.currentWorld);
+      else this.clearSelection();
+      this.emitSnapshot();
+      return;
+    }
+
+    if (drag.kind === 'group-move') {
+      this.commitGroupMove(drag);
+      return;
+    }
 
     if ((drag.kind === 'move' || drag.kind === 'rotate') && drag.preview && drag.before) {
       appEvents.emit('game:angle', {
@@ -1327,6 +2070,8 @@ export class FactoryScene extends Phaser.Scene {
     _deltaX: number,
     deltaY: number,
   ): void {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return;
+
     const camera = this.cameras.main;
     const before = camera.getWorldPoint(pointer.x, pointer.y);
     const nextZoom = Phaser.Math.Clamp(
@@ -1340,6 +2085,7 @@ export class FactoryScene extends Phaser.Scene {
     camera.scrollY += before.y - after.y;
     this.drawGrid();
     this.emitCamera();
+    this.syncEditorCamera();
   }
 
   private updateSources(): void {
@@ -1366,7 +2112,12 @@ export class FactoryScene extends Phaser.Scene {
 
   private spawnBox(source: MachineState): void {
     const center = machineCenter(source);
-    const output = localToWorld(center, source.angle, 0, MACHINE_DIMENSIONS.source.height / 2 + 22);
+    const output = localToWorld(
+      center,
+      source.angle,
+      0,
+      MACHINE_PHYSICS_DIMENSIONS.source.height / 2 + 22,
+    );
     const body = this.matter.add.rectangle(output.x, output.y, BOX_SIZE, BOX_SIZE, {
       label: 'factory-box',
       restitution: 0.08,
@@ -1400,7 +2151,7 @@ export class FactoryScene extends Phaser.Scene {
       for (const conveyor of conveyors) {
         const center = machineCenter(conveyor);
         const local = worldToLocal(center, conveyor.angle, box.body.position);
-        const dimensions = MACHINE_DIMENSIONS.conveyor;
+        const dimensions = MACHINE_PHYSICS_DIMENSIONS.conveyor;
         if (
           Math.abs(local.x) > dimensions.width / 2 + BOX_SIZE / 2 ||
           local.y < -BOX_SIZE - dimensions.height / 2 ||
@@ -1454,7 +2205,7 @@ export class FactoryScene extends Phaser.Scene {
     const delivered: BoxRuntime[] = [];
     for (const box of this.boxes.values()) {
       for (const receiver of receivers) {
-        const dimensions = MACHINE_DIMENSIONS.receiver;
+        const dimensions = MACHINE_PHYSICS_DIMENSIONS.receiver;
         if (
           pointInsideOrientedSensor(
             box.body.position,
@@ -1562,12 +2313,22 @@ export class FactoryScene extends Phaser.Scene {
   private renderWorld(): void {
     const graphics = this.worldGraphics;
     graphics.clear();
+    const groupDrag = this.drag?.kind === 'group-move' ? this.drag : undefined;
+    const groupMachineIds = new Set(groupDrag?.previewMachines?.map((machine) => machine.id) ?? []);
+    const groupObstacleIds = new Set(
+      groupDrag?.previewObstacles?.map((obstacle) => obstacle.id) ?? [],
+    );
 
     for (const obstacle of this.obstacles) {
+      if (groupObstacleIds.has(obstacle.id)) continue;
       const preview = this.drag?.obstacleId === obstacle.id ? this.drag.previewObstacle : undefined;
       if (!preview) this.drawObstacle(graphics, obstacle);
     }
+    for (const obstacle of groupDrag?.previewObstacles ?? []) {
+      this.drawObstacle(graphics, obstacle, 1, groupDrag?.valid !== false);
+    }
     for (const machine of this.machines) {
+      if (groupMachineIds.has(machine.id)) continue;
       const preview = this.drag?.machineId === machine.id ? this.drag.preview : undefined;
       this.drawMachine(
         graphics,
@@ -1575,6 +2336,9 @@ export class FactoryScene extends Phaser.Scene {
         1,
         preview ? this.drag?.valid !== false : true,
       );
+    }
+    for (const machine of groupDrag?.previewMachines ?? []) {
+      this.drawMachine(graphics, machine, 1, groupDrag?.valid !== false);
     }
     for (const box of this.boxes.values()) this.drawBox(box);
 
@@ -1588,17 +2352,50 @@ export class FactoryScene extends Phaser.Scene {
     const overlay = this.overlayGraphics;
     overlay.clear();
     if (this.ghostMachine) this.drawMachine(overlay, this.ghostMachine, 0.42, this.ghostValid);
+    for (const ghost of this.ghostGroupMachines) {
+      this.drawMachine(overlay, ghost, 0.42, this.ghostValid);
+    }
     if (this.ghostObstacle) {
       this.drawObstacle(overlay, this.ghostObstacle, 0.42, this.ghostValid);
+    }
+    for (const ghost of this.ghostGroupObstacles) {
+      this.drawObstacle(overlay, ghost, 0.42, this.ghostValid);
     }
     if (this.drag?.previewObstacle) {
       this.drawObstacle(overlay, this.drag.previewObstacle, 0.72, this.drag.valid !== false);
     }
-    const selected = this.drag?.preview ?? this.getSelectedMachine();
-    if (selected) this.drawSelection(overlay, selected, this.drag?.valid !== false);
-    const selectedObstacle = this.drag?.previewObstacle ?? this.getSelectedObstacle();
-    if (selectedObstacle) {
-      this.drawObstacleSelection(overlay, selectedObstacle, this.drag?.valid !== false);
+    const selectedMachines = this.getSelectedMachines();
+    const selectedObstacles = this.getSelectedObstacles();
+    const selectionCount = selectedMachines.length + selectedObstacles.length;
+    if (groupDrag) {
+      for (const preview of groupDrag.previewMachines ?? []) {
+        this.drawSelection(overlay, preview, groupDrag.valid !== false, false);
+      }
+    } else if (this.drag?.preview) {
+      this.drawSelection(overlay, this.drag.preview, this.drag.valid !== false, true);
+    } else {
+      for (const selected of selectedMachines) {
+        this.drawSelection(overlay, selected, true, selectionCount === 1);
+      }
+    }
+    if (groupDrag) {
+      for (const preview of groupDrag.previewObstacles ?? []) {
+        this.drawObstacleSelection(overlay, preview, groupDrag.valid !== false, false);
+      }
+    } else if (this.drag?.previewObstacle) {
+      this.drawObstacleSelection(
+        overlay,
+        this.drag.previewObstacle,
+        this.drag.valid !== false,
+        true,
+      );
+    } else {
+      for (const selectedObstacle of selectedObstacles) {
+        this.drawObstacleSelection(overlay, selectedObstacle, true, selectionCount === 1);
+      }
+    }
+    if (this.drag?.kind === 'marquee' && this.drag.startWorld && this.drag.currentWorld) {
+      this.drawMarquee(overlay, this.drag.startWorld, this.drag.currentWorld);
     }
   }
 
@@ -1693,29 +2490,62 @@ export class FactoryScene extends Phaser.Scene {
     valid: boolean,
   ): void {
     const dimensions = MACHINE_DIMENSIONS.source;
-    graphics.fillStyle(valid ? COLORS.graphite : COLORS.red, alpha);
+    const bodyColor = valid ? COLORS.machinePanel : COLORS.red;
+
+    graphics.fillStyle(COLORS.graphite, alpha * 0.22);
     drawPolygon(
       graphics,
-      rectangleCorners(center, dimensions.width, dimensions.height, machine.angle),
-    );
-    graphics.fillStyle(COLORS.orange, alpha);
-    drawPolygon(
-      graphics,
-      rectangleCorners(
-        localToWorld(center, machine.angle, 0, dimensions.height / 2 - 8),
-        30,
-        16,
+      roundedRectanglePoints(
+        localToWorld(center, machine.angle, 1.5, 2),
+        dimensions.width,
+        dimensions.height,
+        5,
         machine.angle,
       ),
     );
-    const arrowTop = localToWorld(center, machine.angle, 0, -16);
-    const arrowBottom = localToWorld(center, machine.angle, 0, 13);
-    const arrowLeft = localToWorld(center, machine.angle, -9, 3);
-    const arrowRight = localToWorld(center, machine.angle, 9, 3);
-    graphics.lineStyle(5, COLORS.white, alpha);
-    graphics.lineBetween(arrowTop.x, arrowTop.y, arrowBottom.x, arrowBottom.y);
-    graphics.lineBetween(arrowBottom.x, arrowBottom.y, arrowLeft.x, arrowLeft.y);
-    graphics.lineBetween(arrowBottom.x, arrowBottom.y, arrowRight.x, arrowRight.y);
+
+    graphics.fillStyle(bodyColor, alpha);
+    drawPolygon(
+      graphics,
+      roundedRectanglePoints(center, dimensions.width, dimensions.height, 5, machine.angle),
+    );
+    graphics.lineStyle(2, COLORS.graphiteSoft, alpha * 0.9);
+    linePolygon(
+      graphics,
+      roundedRectanglePoints(center, dimensions.width, dimensions.height, 5, machine.angle),
+    );
+
+    const panelCenter = localToWorld(center, machine.angle, 0, -7);
+    graphics.fillStyle(COLORS.white, alpha);
+    drawPolygon(
+      graphics,
+      [
+        [-3.5, -17],
+        [3.5, -17],
+        [3.5, 1],
+        [9, -4.5],
+        [14, 0.5],
+        [0, 15],
+        [-14, 0.5],
+        [-9, -4.5],
+        [-3.5, 1],
+      ].map(([x, y]) => localToWorld(panelCenter, machine.angle, x!, y!)),
+    );
+
+    const slotCenter = localToWorld(center, machine.angle, 0, dimensions.height / 2 - 6.5);
+    graphics.fillStyle(COLORS.machineRecess, alpha);
+    drawPolygon(graphics, roundedRectanglePoints(slotCenter, 40, 17, 5, machine.angle));
+    graphics.fillStyle(COLORS.orange, alpha);
+    drawPolygon(
+      graphics,
+      roundedRectanglePoints(
+        localToWorld(center, machine.angle, 0, dimensions.height / 2 - 5.5),
+        30,
+        11,
+        3,
+        machine.angle,
+      ),
+    );
   }
 
   private drawReceiver(
@@ -1731,29 +2561,168 @@ export class FactoryScene extends Phaser.Scene {
       graphics.lineStyle(5, COLORS.orange, pulse * alpha);
       linePolygon(
         graphics,
-        rectangleCorners(
+        roundedRectanglePoints(
           center,
           dimensions.width + pulse * 28,
           dimensions.height + pulse * 28,
+          8 + pulse * 5,
           machine.angle,
         ),
       );
     }
-    graphics.fillStyle(valid ? COLORS.blue : COLORS.red, alpha);
+
+    graphics.fillStyle(COLORS.graphite, alpha * 0.22);
     drawPolygon(
       graphics,
-      rectangleCorners(center, dimensions.width, dimensions.height, machine.angle),
+      roundedRectanglePoints(
+        localToWorld(center, machine.angle, 1.5, 2),
+        dimensions.width,
+        dimensions.height,
+        8,
+        machine.angle,
+      ),
     );
-    graphics.fillStyle(COLORS.white, alpha * 0.96);
+
+    graphics.fillStyle(valid ? COLORS.white : COLORS.red, alpha);
     drawPolygon(
       graphics,
-      rectangleCorners(center, dimensions.width - 24, dimensions.height - 24, machine.angle),
+      roundedRectanglePoints(center, dimensions.width, dimensions.height, 6, machine.angle),
     );
+    graphics.lineStyle(2, valid ? COLORS.receiverBorder : COLORS.red, alpha * 0.95);
+    linePolygon(
+      graphics,
+      roundedRectanglePoints(center, dimensions.width, dimensions.height, 6, machine.angle),
+    );
+
     graphics.fillStyle(COLORS.orange, alpha);
-    const tip = localToWorld(center, machine.angle, 0, 13);
-    const left = localToWorld(center, machine.angle, -11, -4);
-    const right = localToWorld(center, machine.angle, 11, -4);
-    drawPolygon(graphics, [tip, left, right]);
+    const cornerTriangles: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
+      [
+        [-28, -28],
+        [-15, -28],
+        [-28, -15],
+      ],
+      [
+        [28, -28],
+        [15, -28],
+        [28, -15],
+      ],
+      [
+        [-28, 28],
+        [-15, 28],
+        [-28, 15],
+      ],
+      [
+        [28, 28],
+        [15, 28],
+        [28, 15],
+      ],
+    ];
+    for (const triangle of cornerTriangles) {
+      drawPolygon(
+        graphics,
+        triangle.map(([x, y]) => localToWorld(center, machine.angle, x, y)),
+      );
+    }
+
+    this.drawReceiverReadout(graphics, machine, center, alpha);
+  }
+
+  private drawReceiverReadout(
+    graphics: Phaser.GameObjects.Graphics,
+    machine: MachineState,
+    center: Point,
+    alpha: number,
+  ): void {
+    const displayOffsetY = 0;
+    const displayCenter = localToWorld(center, machine.angle, 0, displayOffsetY);
+    graphics.fillStyle(COLORS.receiverBezel, alpha * 0.96);
+    drawPolygon(graphics, roundedRectanglePoints(displayCenter, 58, 32, 6, machine.angle));
+    graphics.fillStyle(COLORS.machinePanel, alpha * 0.97);
+    drawPolygon(graphics, roundedRectanglePoints(displayCenter, 52, 26, 4, machine.angle));
+    graphics.lineStyle(1, COLORS.graphiteSoft, alpha * 0.8);
+    linePolygon(graphics, roundedRectanglePoints(displayCenter, 52, 26, 4, machine.angle));
+
+    const delivered = Math.max(0, Math.floor(this.metrics.delivered));
+    const goal = this.contract?.goal.deliveries;
+    const readout = goal === undefined ? String(delivered) : `${delivered}/${goal}`;
+    const characters = readout;
+    const widths = [...characters].map((character) => (character === '/' ? 5 : 8));
+    const gap = 2;
+    const totalWidth =
+      widths.reduce((total, width) => total + width, 0) + Math.max(0, characters.length - 1) * gap;
+    const scale = Math.min(1, 44 / totalWidth);
+    let offsetX = -(totalWidth * scale) / 2;
+
+    for (let index = 0; index < characters.length; index += 1) {
+      const character = characters[index]!;
+      const width = widths[index]!;
+      if (character === '/') {
+        const start = localToWorld(center, machine.angle, offsetX, displayOffsetY - 5 * scale);
+        const end = localToWorld(
+          center,
+          machine.angle,
+          offsetX + width * scale,
+          displayOffsetY + 5 * scale,
+        );
+        graphics.lineStyle(1.8 * scale, COLORS.red, alpha * 0.92);
+        graphics.lineBetween(start.x, start.y, end.x, end.y);
+      } else {
+        this.drawLedDigit(
+          graphics,
+          center,
+          machine.angle,
+          offsetX + (width * scale) / 2,
+          displayOffsetY,
+          character,
+          scale,
+          alpha,
+        );
+      }
+      offsetX += (width + gap) * scale;
+    }
+  }
+
+  private drawLedDigit(
+    graphics: Phaser.GameObjects.Graphics,
+    center: Point,
+    angle: number,
+    offsetX: number,
+    offsetY: number,
+    digit: string,
+    scale: number,
+    alpha: number,
+  ): void {
+    const segments: Record<string, readonly number[]> = {
+      '0': [0, 1, 2, 3, 4, 5],
+      '1': [1, 2],
+      '2': [0, 1, 6, 4, 3],
+      '3': [0, 1, 6, 2, 3],
+      '4': [5, 6, 1, 2],
+      '5': [0, 5, 6, 2, 3],
+      '6': [0, 5, 6, 4, 2, 3],
+      '7': [0, 1, 2],
+      '8': [0, 1, 2, 3, 4, 5, 6],
+      '9': [0, 1, 2, 3, 5, 6],
+    };
+    const segmentPoints: ReadonlyArray<readonly [number, number, number, number]> = [
+      [-3, -6, 3, -6],
+      [3, -6, 3, 0],
+      [3, 0, 3, 6],
+      [-3, 6, 3, 6],
+      [-3, 0, -3, 6],
+      [-3, -6, -3, 0],
+      [-3, 0, 3, 0],
+    ];
+
+    for (const segment of segments[digit] ?? []) {
+      const [startX, startY, endX, endY] = segmentPoints[segment]!;
+      const start = localToWorld(center, angle, offsetX + startX * scale, offsetY + startY * scale);
+      const end = localToWorld(center, angle, offsetX + endX * scale, offsetY + endY * scale);
+      graphics.lineStyle(3.6 * scale, COLORS.red, alpha * 0.18);
+      graphics.lineBetween(start.x, start.y, end.x, end.y);
+      graphics.lineStyle(1.8 * scale, COLORS.red, alpha * 0.98);
+      graphics.lineBetween(start.x, start.y, end.x, end.y);
+    }
   }
 
   private drawConveyor(
@@ -1764,7 +2733,8 @@ export class FactoryScene extends Phaser.Scene {
     color: number,
   ): void {
     const dimensions = MACHINE_DIMENSIONS.conveyor;
-    graphics.fillStyle(color, alpha);
+    const background = color === COLORS.blue ? COLORS.conveyor : color;
+    graphics.fillStyle(background, alpha);
     drawPolygon(
       graphics,
       rectangleCorners(center, dimensions.width, dimensions.height, machine.angle),
@@ -1776,15 +2746,14 @@ export class FactoryScene extends Phaser.Scene {
     );
 
     const direction = machine.reversed ? -1 : 1;
-    const phase = (((this.simulationVisualTimeMs * 0.07 * direction) % 28) + 28) % 28;
-    graphics.lineStyle(3, COLORS.white, alpha * 0.9);
-    for (let offset = -42 + phase; offset <= 42; offset += 28) {
-      const x = machine.reversed ? -offset : offset;
-      const tip = localToWorld(center, machine.angle, x + 6 * direction, 0);
-      const upper = localToWorld(center, machine.angle, x - 3 * direction, -6);
-      const lower = localToWorld(center, machine.angle, x - 3 * direction, 6);
-      graphics.lineBetween(upper.x, upper.y, tip.x, tip.y);
-      graphics.lineBetween(tip.x, tip.y, lower.x, lower.y);
+    const phase = (((this.simulationVisualTimeMs * 0.055 * direction) % 24) + 24) % 24;
+    graphics.fillStyle(COLORS.white, alpha * 0.94);
+    for (let offset = -60 + phase; offset <= 60; offset += 24) {
+      if (Math.abs(offset) > dimensions.width / 2 - 7) continue;
+      const tip = localToWorld(center, machine.angle, offset + 6 * direction, 0);
+      const upper = localToWorld(center, machine.angle, offset - 5 * direction, -7);
+      const lower = localToWorld(center, machine.angle, offset - 5 * direction, 7);
+      drawPolygon(graphics, [tip, upper, lower]);
     }
   }
 
@@ -1797,12 +2766,14 @@ export class FactoryScene extends Phaser.Scene {
   ): void {
     const compression = this.springCompression.get(machine.id) ?? 0;
     const dimensions = MACHINE_DIMENSIONS.spring;
+    const baseColor = color === COLORS.red ? COLORS.red : COLORS.wood;
+    const springColor = color === COLORS.red ? COLORS.red : COLORS.springGreen;
     const plateHeight = 8;
     const baseY = dimensions.height / 2 - plateHeight / 2;
     const topY = -dimensions.height / 2 + plateHeight / 2 + compression * 7;
     const lowerSpringY = dimensions.height / 2 - plateHeight;
     const upperSpringY = topY + plateHeight / 2;
-    graphics.fillStyle(COLORS.graphite, alpha);
+    graphics.fillStyle(baseColor, alpha);
     drawPolygon(
       graphics,
       rectangleCorners(
@@ -1812,7 +2783,7 @@ export class FactoryScene extends Phaser.Scene {
         machine.angle,
       ),
     );
-    graphics.lineStyle(4, color, alpha);
+    graphics.lineStyle(4, springColor, alpha);
     const zigzag: Point[] = [];
     for (let index = 0; index <= 6; index += 1) {
       zigzag.push(
@@ -1825,7 +2796,7 @@ export class FactoryScene extends Phaser.Scene {
       );
     }
     linePolygon(graphics, zigzag, false);
-    graphics.fillStyle(color, alpha);
+    graphics.fillStyle(baseColor, alpha);
     drawPolygon(
       graphics,
       rectangleCorners(
@@ -1853,6 +2824,7 @@ export class FactoryScene extends Phaser.Scene {
     graphics: Phaser.GameObjects.Graphics,
     machine: MachineState,
     valid: boolean,
+    showHandle = true,
   ): void {
     const dimensions = MACHINE_DIMENSIONS[machine.type];
     const color = valid ? COLORS.orange : COLORS.red;
@@ -1867,7 +2839,7 @@ export class FactoryScene extends Phaser.Scene {
         machine.angle,
       ),
     );
-    if (!this.canEditMachine(machine) || !this.isRotatable(machine)) return;
+    if (!showHandle || !this.canEditMachine(machine) || !this.isRotatable(machine)) return;
     const center = machineCenter(machine);
     const handle = rotationHandle(machine);
     const edge = localToWorld(center, machine.angle, 0, -dimensions.height / 2 - 7);
@@ -1888,6 +2860,7 @@ export class FactoryScene extends Phaser.Scene {
     graphics: Phaser.GameObjects.Graphics,
     obstacle: ObstacleDefinition,
     valid: boolean,
+    showHandle = true,
   ): void {
     if (!this.isAuthoring()) return;
     const logicalZoom = fromCameraZoom(this.cameras.main.zoom);
@@ -1903,6 +2876,7 @@ export class FactoryScene extends Phaser.Scene {
       width + 8 / logicalZoom,
       height + 8 / logicalZoom,
     );
+    if (!showHandle) return;
     const handle = this.obstacleResizeHandle(obstacle);
     const size = 13 / logicalZoom;
     graphics.fillStyle(COLORS.white, 1);
@@ -1915,6 +2889,23 @@ export class FactoryScene extends Phaser.Scene {
       handle.x + size * 0.5,
       handle.y - size * 0.5,
     );
+  }
+
+  private drawMarquee(graphics: Phaser.GameObjects.Graphics, start: Point, end: Point): void {
+    const logicalZoom = fromCameraZoom(this.cameras.main.zoom);
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxY = Math.max(start.y, end.y);
+    graphics.fillStyle(COLORS.white, 0.08);
+    graphics.fillRect(minX, minY, maxX - minX, maxY - minY);
+    graphics.lineStyle(2 / logicalZoom, COLORS.orange, 0.96);
+    const dashLength = 9 / logicalZoom;
+    const gapLength = 6 / logicalZoom;
+    drawDashedLine(graphics, { x: minX, y: minY }, { x: maxX, y: minY }, dashLength, gapLength);
+    drawDashedLine(graphics, { x: maxX, y: minY }, { x: maxX, y: maxY }, dashLength, gapLength);
+    drawDashedLine(graphics, { x: maxX, y: maxY }, { x: minX, y: maxY }, dashLength, gapLength);
+    drawDashedLine(graphics, { x: minX, y: maxY }, { x: minX, y: minY }, dashLength, gapLength);
   }
 
   private rebuildStaticBodies(): void {
@@ -1938,7 +2929,7 @@ export class FactoryScene extends Phaser.Scene {
 
     for (const machine of this.machines) {
       const center = machineCenter(machine);
-      const dimensions = MACHINE_DIMENSIONS[machine.type];
+      const dimensions = MACHINE_PHYSICS_DIMENSIONS[machine.type];
       const body = this.matter.add.rectangle(
         center.x,
         center.y,
@@ -1965,6 +2956,7 @@ export class FactoryScene extends Phaser.Scene {
     candidate: MachineState,
     ignoredId?: string,
     machines = this.machines,
+    obstacles = this.obstacles,
   ): boolean {
     const polygon = machinePolygon(candidate);
     if (
@@ -1979,7 +2971,7 @@ export class FactoryScene extends Phaser.Scene {
       if (machine.id === ignoredId) continue;
       if (polygonsOverlap(polygon, machinePolygon(machine))) return false;
     }
-    for (const obstacle of this.obstacles) {
+    for (const obstacle of obstacles) {
       const width = obstacle.columns * CELL_SIZE;
       const height = obstacle.rows * CELL_SIZE;
       const obstaclePolygon = rectangleCorners(
@@ -1995,7 +2987,12 @@ export class FactoryScene extends Phaser.Scene {
     return true;
   }
 
-  private isObstaclePlacementValid(candidate: ObstacleDefinition, ignoredId?: string): boolean {
+  private isObstaclePlacementValid(
+    candidate: ObstacleDefinition,
+    ignoredId?: string,
+    obstacles = this.obstacles,
+    machines = this.machines,
+  ): boolean {
     if (
       !Number.isInteger(candidate.gridX) ||
       !Number.isInteger(candidate.gridY) ||
@@ -2012,12 +3009,42 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     const polygon = this.obstaclePolygon(candidate);
-    for (const obstacle of this.obstacles) {
+    for (const obstacle of obstacles) {
       if (obstacle.id === ignoredId) continue;
       if (polygonsOverlap(polygon, this.obstaclePolygon(obstacle))) return false;
     }
-    for (const machine of this.machines) {
+    for (const machine of machines) {
       if (polygonsOverlap(polygon, machinePolygon(machine))) return false;
+    }
+    return true;
+  }
+
+  private isGroupPlacementValid(
+    machines: readonly MachineState[],
+    obstacles: readonly ObstacleDefinition[],
+    ignoredMachineIds: ReadonlySet<string> = new Set(),
+    ignoredObstacleIds: ReadonlySet<string> = new Set(),
+  ): boolean {
+    const currentMachines = this.machines.filter((machine) => !ignoredMachineIds.has(machine.id));
+    const currentObstacles = this.obstacles.filter(
+      (obstacle) => !ignoredObstacleIds.has(obstacle.id),
+    );
+    const stagedMachines = cloneMachines(currentMachines);
+    const allObstacles = [...cloneObstacles(currentObstacles), ...cloneObstacles(obstacles)];
+    for (const machine of machines) {
+      if (!this.isMachinePlacementValid(machine, undefined, stagedMachines, allObstacles)) {
+        return false;
+      }
+      stagedMachines.push({ ...machine });
+    }
+
+    const stagedObstacles = cloneObstacles(currentObstacles);
+    const allMachines = [...cloneMachines(currentMachines), ...cloneMachines(machines)];
+    for (const obstacle of obstacles) {
+      if (!this.isObstaclePlacementValid(obstacle, undefined, stagedObstacles, allMachines)) {
+        return false;
+      }
+      stagedObstacles.push({ ...obstacle });
     }
     return true;
   }
@@ -2173,6 +3200,49 @@ export class FactoryScene extends Phaser.Scene {
     return this.obstacles.find((obstacle) => obstacle.id === this.selectedObstacleId);
   }
 
+  private getSelectedMachines(): MachineState[] {
+    return this.machines.filter((machine) => this.selectedMachineIds.has(machine.id));
+  }
+
+  private getSelectedObstacles(): ObstacleDefinition[] {
+    return this.obstacles.filter((obstacle) => this.selectedObstacleIds.has(obstacle.id));
+  }
+
+  private selectionCount(): number {
+    return this.getSelectedMachines().length + this.getSelectedObstacles().length;
+  }
+
+  private clearSelection(): void {
+    this.selectedMachineIds.clear();
+    this.selectedObstacleIds.clear();
+  }
+
+  private selectItemsInsideMarquee(start: Point, end: Point): void {
+    this.clearSelection();
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const minY = Math.min(start.y, end.y);
+    const maxY = Math.max(start.y, end.y);
+    const contains = (point: Point) =>
+      point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+
+    for (const machine of this.machines) {
+      if (this.canEditMachine(machine) && contains(machineCenter(machine))) {
+        this.selectedMachineIds.add(machine.id);
+      }
+    }
+
+    if (this.isAuthoring()) {
+      for (const obstacle of this.obstacles) {
+        const center = {
+          x: (obstacle.gridX + obstacle.columns / 2) * CELL_SIZE,
+          y: (obstacle.gridY + obstacle.rows / 2) * CELL_SIZE,
+        };
+        if (contains(center)) this.selectedObstacleIds.add(obstacle.id);
+      }
+    }
+  }
+
   private findMachineAt(point: Point): MachineState | undefined {
     return [...this.machines].reverse().find((machine) => pointInsideMachine(point, machine, 7));
   }
@@ -2219,6 +3289,7 @@ export class FactoryScene extends Phaser.Scene {
     }
     this.gridEnabled = !this.gridEnabled;
     this.ghostMachine = undefined;
+    if (this.groupGhostAnchor) this.updateGroupGhostAt(this.groupGhostAnchor);
     this.drawGrid(true);
     this.emitSnapshot();
   }
@@ -2234,11 +3305,11 @@ export class FactoryScene extends Phaser.Scene {
 
   private machinePositionFromWorld(point: Point): { x: number; y: number } {
     if (this.gridEnabled) {
-      const snap = (coordinate: number) =>
-        Math.round((coordinate / CELL_SIZE - 0.5) / GRID_POSITION_STEP) * GRID_POSITION_STEP;
+      const snap = (coordinate: number, step: number) =>
+        Math.round((coordinate / CELL_SIZE - 0.5) / step) * step;
       return {
-        x: snap(point.x),
-        y: snap(point.y),
+        x: snap(point.x, GRID_POSITION_STEP),
+        y: snap(point.y, GRID_POSITION_STEP),
       };
     }
     return {
@@ -2263,17 +3334,38 @@ export class FactoryScene extends Phaser.Scene {
     return this.editorActive && !this.editorPreview;
   }
 
+  private setEditorPersistenceLocked(locked: boolean): void {
+    this.editorPersistenceLocked = locked && this.isAuthoring();
+    if (this.editorPersistenceLocked) {
+      this.drag = undefined;
+      this.selectedTool = undefined;
+      this.selectedEditorTool = undefined;
+      this.ghostMachine = undefined;
+      this.ghostObstacle = undefined;
+      this.ghostGroupMachines = [];
+      this.ghostGroupObstacles = [];
+      this.groupGhostAnchor = undefined;
+    }
+    this.emitSnapshot();
+  }
+
   private activeHistory(): CommandHistory {
     return this.isAuthoring() ? this.editorHistory : this.history;
   }
 
   private canBuild(): boolean {
+    if (this.editorPersistenceLocked && this.isAuthoring()) return false;
     return this.status === 'build' || this.status === 'paused';
   }
 
   private canPlaceAnotherPiece(): boolean {
     if (!this.contract) return true;
     return isWithinPieceBudget(this.metrics.placedPieces, this.contract.goal);
+  }
+
+  private canPlaceMachineGroup(count: number): boolean {
+    if (this.isAuthoring() || !this.contract) return true;
+    return this.metrics.placedPieces + count <= this.contract.goal.pieceBudget;
   }
 
   private updatePlacedPieces(): void {
@@ -2373,11 +3465,29 @@ export class FactoryScene extends Phaser.Scene {
 
   private emitCamera(): void {
     const camera = this.cameras.main;
+    const current = this.captureCamera();
+    this.currentCamera = current;
     appEvents.emit('game:camera', {
-      zoom: fromCameraZoom(camera.zoom),
+      zoom: current.zoom,
       scrollX: camera.scrollX,
       scrollY: camera.scrollY,
     });
+  }
+
+  private syncEditorCamera(): void {
+    if (!this.isAuthoring() || this.editorPersistenceLocked || !this.editorContract) return;
+    const initialCamera = this.captureCamera();
+    const previous = this.editorContract.initialCamera;
+    if (
+      previous.centerX === initialCamera.centerX &&
+      previous.centerY === initialCamera.centerY &&
+      previous.zoom === initialCamera.zoom
+    ) {
+      return;
+    }
+    this.editorContract = { ...this.editorContract, initialCamera };
+    this.contract = this.editorContract;
+    this.emitEditorChanged();
   }
 
   private emitSandboxChange(): void {
@@ -2433,6 +3543,59 @@ export class FactoryScene extends Phaser.Scene {
     );
   }
 
+  private normalizeContractCamera(camera: ContractCamera): ContractCamera {
+    const round = (value: number, precision: number): number => {
+      const multiplier = 10 ** precision;
+      const rounded = Math.round(value * multiplier) / multiplier;
+      return Object.is(rounded, -0) ? 0 : rounded;
+    };
+    return {
+      centerX: round(Number.isFinite(camera.centerX) ? camera.centerX : STAGE_WIDTH / 2, 2),
+      centerY: round(Number.isFinite(camera.centerY) ? camera.centerY : STAGE_HEIGHT / 2, 2),
+      zoom: round(
+        Phaser.Math.Clamp(
+          Number.isFinite(camera.zoom) ? camera.zoom : MIN_ZOOM,
+          MIN_ZOOM,
+          MAX_ZOOM,
+        ),
+        4,
+      ),
+    };
+  }
+
+  private captureCamera(): ContractCamera {
+    const camera = this.cameras.main;
+    const center = camera.getWorldPoint(camera.width / 2, camera.height / 2);
+    return this.normalizeContractCamera({
+      centerX: center.x,
+      centerY: center.y,
+      zoom: fromCameraZoom(camera.zoom),
+    });
+  }
+
+  private applyContractCamera(initialCamera: ContractCamera): void {
+    const camera = this.cameras.main;
+    const normalized = this.normalizeContractCamera(initialCamera);
+    camera.setZoom(toCameraZoom(normalized.zoom));
+    camera.centerOn(normalized.centerX, normalized.centerY);
+    this.drawGrid(true);
+    this.emitCamera();
+  }
+
+  private initializeIdleState(): void {
+    this.mode = 'sandbox';
+    this.contract = undefined;
+    this.availableMachines = [...SANDBOX_DEFINITION.availableMachines];
+    this.machines = [];
+    this.obstacles = [];
+    this.history.clear();
+    this.editorHistory.clear();
+    this.resetSimulation('build');
+    this.rebuildStaticBodies();
+    this.fitCamera();
+    this.emitSnapshot();
+  }
+
   private fitCamera(): void {
     const camera = this.cameras.main;
     const fit =
@@ -2447,7 +3610,8 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private handleResize(): void {
-    this.fitCamera();
+    if (this.currentCamera) this.applyContractCamera(this.currentCamera);
+    else this.fitCamera();
   }
 
   private installDebugApi(): void {
@@ -2462,11 +3626,21 @@ export class FactoryScene extends Phaser.Scene {
           velocityX: body.velocity.x,
           velocityY: body.velocity.y,
         })),
-      getCamera: () => ({
-        scrollX: this.cameras.main.scrollX,
-        scrollY: this.cameras.main.scrollY,
-        zoom: fromCameraZoom(this.cameras.main.zoom),
-      }),
+      getCamera: () => {
+        const current = this.captureCamera();
+        return {
+          scrollX: this.cameras.main.scrollX,
+          scrollY: this.cameras.main.scrollY,
+          centerX: current.centerX,
+          centerY: current.centerY,
+          zoom: current.zoom,
+        };
+      },
+      setCamera: (centerX, centerY, zoom) => {
+        if (this.editorPersistenceLocked && this.isAuthoring()) return;
+        this.applyContractCamera({ centerX, centerY, zoom });
+        this.syncEditorCamera();
+      },
       getWorldBounds: () => ({
         minX: PLAY_AREA_MIN_X,
         minY: PLAY_AREA_MIN_Y,
@@ -2482,9 +3656,16 @@ export class FactoryScene extends Phaser.Scene {
       selectTool: (type) => this.selectTool(type),
       placeMachine: (type, gridX, gridY, angle) => this.placeMachineAt(type, gridX, gridY, angle),
       selectMachine: (id) => this.selectMachine(id),
+      selectArea: (minX, minY, maxX, maxY) => {
+        this.selectItemsInsideMarquee({ x: minX, y: minY }, { x: maxX, y: maxY });
+        this.emitSnapshot();
+        return this.selectionCount();
+      },
       rotateSelected: (angle) => this.rotateSelectedTo(angle),
       reverseSelected: () => this.reverseSelected(),
       deleteSelected: () => this.deleteSelected(),
+      copySelected: () => this.copySelected(),
+      cutSelected: () => this.cutSelected(),
       placeObstacle: (gridX, gridY, columns, rows) =>
         this.placeObstacleAt(gridX, gridY, columns, rows),
       selectObstacle: (id) => this.selectObstacle(id),

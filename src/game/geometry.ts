@@ -11,10 +11,21 @@ export interface MachineDimensions {
 }
 
 export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
+  source: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
+  conveyor: { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
+  receiver: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
+  spring: { width: CELL_SIZE, height: CELL_SIZE / 2 },
+};
+
+/**
+ * Static bodies keep a small invisible clearance so adjoining conveyor surfaces do not overlap
+ * in Matter while their visible footprints meet exactly on the grid.
+ */
+export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   source: { width: 68, height: 68 },
-  conveyor: { width: 92, height: 22 },
+  conveyor: { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
   receiver: { width: 76, height: 76 },
-  spring: { width: CELL_SIZE * 2, height: CELL_SIZE },
+  spring: MACHINE_DIMENSIONS.spring,
 };
 
 export function gridToWorld(point: GridPoint): Point {

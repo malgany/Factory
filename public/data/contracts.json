@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "updatedAt": "1970-01-01T00:00:00.000Z",
+  "contracts": [
+    {
+      "id": "first-flow",
+      "order": 1,
+      "title": "Primeiro Fluxo",
+      "subtitle": "Faça a linha funcionar.",
+      "description": "Ligue a saída acima e à esquerda à entrada abaixo e à direita usando somente esteiras.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": ["conveyor"],
+      "fixedMachines": [
+        {
+          "id": "first-flow-source",
+          "type": "source",
+          "gridX": 4.25,
+          "gridY": 4.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "first-flow-receiver",
+          "type": "receiver",
+          "gridX": 15.25,
+          "gridY": 12.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [],
+      "goal": {
+        "deliveries": 10,
+        "maxLosses": 3,
+        "pieceBudget": 8,
+        "parPieces": 7,
+        "parTimeSeconds": 32
+      },
+      "spawnIntervalSeconds": 1.25,
+      "initialCamera": {
+        "centerX": 720,
+        "centerY": 432,
+        "zoom": 1
+      }
+    },
+    {
+      "id": "controlled-jump",
+      "order": 2,
+      "title": "Salto Controlado",
+      "subtitle": "Atravesse a barreira.",
+      "description": "Combine esteiras e trampolins para lançar as caixas por cima da barreira central.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": ["conveyor", "spring"],
+      "fixedMachines": [
+        {
+          "id": "controlled-jump-source",
+          "type": "source",
+          "gridX": 4.25,
+          "gridY": 4.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "controlled-jump-receiver",
+          "type": "receiver",
+          "gridX": 19.25,
+          "gridY": 13.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "controlled-jump-barrier",
+          "gridX": 11,
+          "gridY": 9,
+          "columns": 3,
+          "rows": 6
+        }
+      ],
+      "goal": {
+        "deliveries": 12,
+        "maxLosses": 3,
+        "pieceBudget": 8,
+        "parPieces": 7,
+        "parTimeSeconds": 38
+      },
+      "spawnIntervalSeconds": 1.1,
+      "initialCamera": {
+        "centerX": 720,
+        "centerY": 432,
+        "zoom": 1
+      }
+    },
+    {
+      "id": "line-rhythm",
+      "order": 3,
+      "title": "Linha de Ritmo",
+      "subtitle": "Sincronize dois fluxos.",
+      "description": "Conduza duas saídas por entre os obstáculos e alimente uma única entrada antes do tempo acabar.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": ["conveyor", "spring"],
+      "fixedMachines": [
+        {
+          "id": "line-rhythm-source-a",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 3.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "line-rhythm-source-b",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 11.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "line-rhythm-receiver",
+          "type": "receiver",
+          "gridX": 24.25,
+          "gridY": 14.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "line-rhythm-obstacle-a",
+          "gridX": 10,
+          "gridY": 5,
+          "columns": 3,
+          "rows": 4
+        },
+        {
+          "id": "line-rhythm-obstacle-b",
+          "gridX": 17,
+          "gridY": 10,
+          "columns": 4,
+          "rows": 3
+        }
+      ],
+      "goal": {
+        "deliveries": 25,
+        "maxLosses": 2,
+        "pieceBudget": 12,
+        "timeLimitSeconds": 45,
+        "parPieces": 10,
+        "parTimeSeconds": 40
+      },
+      "spawnIntervalSeconds": 0.72,
+      "initialCamera": {
+        "centerX": 720,
+        "centerY": 432,
+        "zoom": 1
+      }
+    }
+  ]
+}

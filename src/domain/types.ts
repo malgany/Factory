@@ -10,7 +10,6 @@ export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 export type MachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
-export type BuiltinContractId = 'first-flow' | 'controlled-jump' | 'line-rhythm';
 export type ContractId = string;
 
 export interface GridPoint {
@@ -50,6 +49,12 @@ export interface ContractGoal {
   parTimeSeconds?: number;
 }
 
+export interface ContractCamera {
+  centerX: number;
+  centerY: number;
+  zoom: number;
+}
+
 export interface ContractDefinition {
   id: ContractId;
   order: number;
@@ -62,6 +67,7 @@ export interface ContractDefinition {
   obstacles: ObstacleDefinition[];
   goal: ContractGoal;
   spawnIntervalSeconds: number;
+  initialCamera: ContractCamera;
 }
 
 export interface RunMetrics {
@@ -94,10 +100,9 @@ export interface ProgressSave {
   sandbox: SandboxSave;
 }
 
-export interface ContractCatalogSave {
+export interface ContractCatalogFile {
   version: 1;
-  overrides: Partial<Record<BuiltinContractId, ContractDefinition>>;
-  customContracts: ContractDefinition[];
+  contracts: ContractDefinition[];
   updatedAt: string;
 }
 
@@ -124,6 +129,11 @@ export interface GameSnapshot {
   goal?: ContractGoal;
   selectedMachine?: MachineState;
   selectedObstacle?: ObstacleDefinition;
+  selection: {
+    machineIds: string[];
+    obstacleIds: string[];
+    count: number;
+  };
   availableMachines: MachineType[];
   canUndo: boolean;
   canRedo: boolean;
@@ -141,8 +151,10 @@ export interface GameCommand {
 export interface PlatformService {
   loadProgress(contracts?: readonly ContractDefinition[]): ProgressSave;
   saveProgress(progress: ProgressSave): PersistenceResult;
-  loadContractCatalog(): PersistenceResult<ContractCatalogSave>;
-  saveContractCatalog(catalog: ContractCatalogSave): PersistenceResult;
+  loadContractCatalog(): Promise<PersistenceResult<ContractCatalogFile>>;
+  saveContractCatalog(
+    catalog: ContractCatalogFile,
+  ): Promise<PersistenceResult<ContractCatalogFile>>;
   requestFullscreen(): Promise<void>;
   unlockAchievement(id: string): Promise<void>;
 }

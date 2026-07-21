@@ -126,18 +126,18 @@ test('Salto Controlado possui uma solução com trampolim dentro do orçamento',
 
 test('Linha de Ritmo possui uma solução física dentro de 45 segundos', async ({ page }) => {
   const layout = [
-    conveyor('solution-1', 3.5, 5.5, 0),
-    conveyor('solution-2', 5.5, 5.5, 0),
-    spring('solution-3', 8, 5.5, 45),
+    conveyor('solution-1', 3.25, 5.25, 0),
+    conveyor('solution-2', 5.25, 5.25, 0),
+    spring('solution-3', 7, 5.5, 65),
     conveyor('solution-4', 3.5, 13.5, 0),
     conveyor('solution-5', 5.5, 13.5, 0),
-    spring('solution-6', 8.25, 13.5, 35),
-    conveyor('solution-7', 15.5, 14.5, 0),
-    conveyor('solution-8', 17.5, 14.5, 0),
-    conveyor('solution-9', 19.5, 14.5, 0),
-    spring('solution-10', 21, 15.5, 90),
-    conveyor('solution-11', 21.5, 9, 0),
-    conveyor('solution-12', 18.5, 9, 0),
+    spring('solution-6', 7.25, 14.25, 50),
+    conveyor('solution-7', 15.25, 14.25, 0),
+    conveyor('solution-8', 17.25, 14.25, 0),
+    conveyor('solution-9', 19.25, 14.25, 0),
+    spring('solution-10', 20.5, 14.25, 85),
+    conveyor('solution-11', 21.25, 8.75, 0),
+    conveyor('solution-12', 18.25, 8.75, 0),
   ];
 
   const result = await runSolution(page, 'line-rhythm', layout, 45);

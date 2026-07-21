@@ -1,4 +1,5 @@
 import { appEvents } from '../core/events';
+import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import type {
   ContractDefinition,
   ContractId,
@@ -8,6 +9,7 @@ import type {
   ObstacleDefinition,
   ProgressSave,
 } from '../domain/types';
+import { createMenuDemo, type MenuDemoController } from '../game/MenuDemoScene';
 import { isLocalAdminHost } from '../platform/localAdmin';
 import { AudioService } from './AudioService';
 
@@ -15,15 +17,9 @@ export interface AppUIOptions {
   root: HTMLElement;
   contracts: readonly ContractDefinition[];
   progress: ProgressSave;
-  contractMetadata?: Readonly<Record<string, AdminContractMetadata>>;
   adminAvailable?: boolean;
   onProgressChange?: (progress: ProgressSave) => void;
   onRequestFullscreen?: () => void | Promise<void>;
-}
-
-export interface AdminContractMetadata {
-  kind: 'builtin' | 'custom';
-  overridden?: boolean;
 }
 
 export interface AdminEditorOpenOptions {
@@ -38,13 +34,16 @@ export interface AdminEditorMessage {
 }
 
 type Unsubscribe = () => void;
+type MenuView = 'home' | 'play' | 'options';
 type IconName =
   | MachineType
   | 'play'
-  | 'pause'
+  | 'stop'
   | 'reset'
   | 'undo'
   | 'redo'
+  | 'copy'
+  | 'cut'
   | 'trash'
   | 'reverse'
   | 'menu'
@@ -56,7 +55,6 @@ type IconName =
   | 'lock'
   | 'star'
   | 'edit'
-  | 'restore'
   | 'settings'
   | 'close'
   | 'blocker'
@@ -65,20 +63,13 @@ type IconName =
   | 'plus';
 
 type AdminTool = MachineType | 'obstacle';
+export type CatalogSavingContext = 'editor' | 'operation';
 
 const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
   source: { name: 'Saída', hint: 'Gera caixas' },
   conveyor: { name: 'Esteira', hint: 'Conduz o fluxo' },
   receiver: { name: 'Entrada', hint: 'Recebe caixas' },
   spring: { name: 'Trampolim', hint: 'Projeta caixas' },
-};
-
-const STATUS_COPY: Record<GameSnapshot['status'], string> = {
-  build: 'Construção',
-  running: 'Simulando',
-  paused: 'Pausado',
-  success: 'Concluído',
-  failure: 'Encerrado',
 };
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
@@ -89,7 +80,6 @@ export class AppUI {
 
   private readonly root: HTMLElement;
   private contracts: ContractDefinition[];
-  private contractMetadata: Readonly<Record<string, AdminContractMetadata>>;
   private readonly adminAvailable: boolean;
   private readonly onProgressChange?: (progress: ProgressSave) => void;
   private readonly onRequestFullscreen?: () => void | Promise<void>;
@@ -100,8 +90,10 @@ export class AppUI {
   private editorIsNew = false;
   private editorDirty = false;
   private editorPreviewActive = false;
+  private catalogSaving = false;
+  private catalogSavingContext?: CatalogSavingContext;
   private resultContractId?: ContractId;
-  private pendingAdminAction?: { kind: 'restore' | 'delete'; contractId: ContractId };
+  private pendingAdminAction?: { contractId: ContractId };
   private gameReady = false;
   private readonly loadingStartedAt = performance.now();
   private readonly domEvents = new AbortController();
@@ -109,18 +101,21 @@ export class AppUI {
   private readyTimer?: number;
   private unsubs: Unsubscribe[] = [];
   private toastTimer?: number;
+  private menuDemo?: MenuDemoController;
 
   constructor(options: AppUIOptions) {
     this.root = options.root;
     this.contracts = [...options.contracts].sort((a, b) => a.order - b.order);
-    this.contractMetadata = options.contractMetadata ?? {};
-    this.adminAvailable = options.adminAvailable ?? isLocalAdminHost(window.location.hostname);
+    this.adminAvailable =
+      options.adminAvailable ?? (import.meta.env.DEV && isLocalAdminHost(window.location.hostname));
     this.progress = options.progress;
     this.onProgressChange = options.onProgressChange;
     this.onRequestFullscreen = options.onRequestFullscreen;
     this.audio = new AudioService(options.progress.settings);
 
     this.renderShell();
+    this.menuDemo = createMenuDemo(this.element('.menu-motion-demo'));
+    this.menuDemo.setActive(true);
     this.setGameReady(false);
     this.bindDOM();
     this.bindEvents();
@@ -136,12 +131,8 @@ export class AppUI {
     this.updateSoundControls();
   }
 
-  updateContracts(
-    contracts: readonly ContractDefinition[],
-    metadata: Readonly<Record<string, AdminContractMetadata>> = this.contractMetadata,
-  ): void {
+  updateContracts(contracts: readonly ContractDefinition[]): void {
     this.contracts = [...contracts].sort((a, b) => a.order - b.order);
-    this.contractMetadata = metadata;
     this.renderMenuCards();
   }
 
@@ -167,7 +158,7 @@ export class AppUI {
     this.element('#editor-config-panel').classList.add('is-hidden');
     this.element('#editor-confirm-modal').classList.add('is-hidden');
     this.clearEditorMessage();
-    this.showMenu();
+    this.showMenu('play');
   }
 
   setEditorMessage(state?: AdminEditorMessage): void {
@@ -183,27 +174,89 @@ export class AppUI {
     container.classList.remove('is-hidden');
   }
 
+  setCatalogSaving(
+    saving: boolean,
+    context: CatalogSavingContext = this.editorContract ? 'editor' : 'operation',
+  ): void {
+    this.catalogSaving = saving;
+    this.catalogSavingContext = saving ? context : undefined;
+    if (context === 'editor') appEvents.emit('ui:editor-persistence', { saving });
+    if (this.editorContract) this.renderEditorState();
+    this.renderCatalogSavingState();
+    if (saving && context === 'editor' && this.editorContract) {
+      this.setEditorMessage({ tone: 'neutral', message: 'Salvando no JSON…' });
+    }
+  }
+
   markEditorSaved(contract: ContractDefinition): void {
     if (!this.editorContract || this.editorContract.id !== contract.id) return;
+    this.catalogSaving = false;
+    this.catalogSavingContext = undefined;
     this.editorContract = structuredClone(contract);
     this.editorIsNew = false;
     this.editorDirty = false;
     this.renderEditorState();
-    this.setEditorMessage({ tone: 'success', message: 'Fase salva neste navegador.' });
+    this.renderCatalogSavingState();
+    this.setEditorMessage({ tone: 'success', message: 'Fase salva no JSON local.' });
   }
 
-  showMenu(): void {
+  showMenu(view: MenuView = 'home'): void {
     this.element('#menu-screen').classList.remove('is-hidden');
     this.element('#result-modal').classList.add('is-hidden');
+    this.closePauseMenu();
+    this.setMenuView(view);
     this.root.classList.add('is-menu-open');
   }
 
   hideMenu(): void {
+    this.menuDemo?.setActive(false);
     this.element('#menu-screen').classList.add('is-hidden');
     this.root.classList.remove('is-menu-open');
   }
 
+  private setMenuView(view: MenuView): void {
+    const menu = this.element('#menu-screen');
+    menu.dataset.menuView = view;
+    this.menuDemo?.setActive(view === 'home' && !menu.classList.contains('is-hidden'));
+    menu.querySelectorAll<HTMLElement>('[data-menu-panel]').forEach((panel) => {
+      const hidden = panel.dataset.menuPanel !== view;
+      panel.classList.toggle('is-hidden', hidden);
+      panel.setAttribute('aria-hidden', String(hidden));
+    });
+
+    window.requestAnimationFrame(() => {
+      if (view === 'play' && !this.adminEnabled) {
+        const dots = [...this.root.querySelectorAll<HTMLButtonElement>('[data-contract-dot]')];
+        const selectedIndex = Math.max(
+          0,
+          dots.findIndex((dot) => dot.getAttribute('aria-current') === 'true'),
+        );
+        this.selectMenuContract(selectedIndex, true, 'auto');
+        const currentCard = this.root.querySelector<HTMLButtonElement>(
+          '#contract-list .stage-contract-card.is-current',
+        );
+        const focusTarget =
+          currentCard && !currentCard.disabled
+            ? currentCard
+            : (dots[selectedIndex] ??
+              this.root.querySelector<HTMLButtonElement>('.campaign-back-button'));
+        focusTarget?.focus({ preventScroll: true });
+        return;
+      }
+
+      const focusTarget =
+        view === 'home'
+          ? this.root.querySelector<HTMLButtonElement>('[data-action="menu-play"]')
+          : this.root.querySelector<HTMLButtonElement>(
+              `[data-menu-panel="${view}"] [data-action="menu-home"]`,
+            );
+      focusTarget?.focus({ preventScroll: true });
+    });
+  }
+
   destroy(): void {
+    this.menuDemo?.destroy();
+    this.menuDemo = undefined;
     this.domEvents.abort();
     for (const unsubscribe of this.unsubs) unsubscribe();
     this.unsubs = [];
@@ -219,40 +272,27 @@ export class AppUI {
         <div id="${this.gameContainerId}" class="game-container" aria-label="Área de construção"></div>
 
         <section id="game-ui" class="game-ui" aria-label="Interface do contrato">
-          <header class="top-rail glass-panel">
+        <header class="top-rail">
             <div class="top-left-controls">
-              <button class="icon-button menu-button" data-action="menu" aria-label="Voltar ao menu" title="Menu">
+              <button class="icon-button menu-button" data-action="pause-menu" aria-label="Abrir menu de pausa" title="Menu de pausa">
                 ${icon('menu')}
               </button>
-              <span id="zoom-readout" class="zoom-readout" title="Zoom da área · use o scroll">100%</span>
-            </div>
-
-            <div class="simulation-controls" aria-label="Controles da simulação">
-              <button class="simulation-play" data-action="run" aria-label="Iniciar simulação" title="Iniciar · Espaço">
-                <span data-run-icon>${icon('play')}</span>
-              </button>
-              <label class="speed-control" title="Velocidade da simulação">
-                <span class="speed-readout" data-speed-label>1×</span>
-                <input data-speed type="range" min="0" max="6" step="1" value="3" aria-label="Velocidade da simulação" aria-valuetext="1×" />
-              </label>
             </div>
 
             <div class="top-right-controls">
               <div class="metric-strip" role="status" aria-live="polite">
-                ${metric('Progresso', '0 / 0', 'progress', 'progress')}
                 ${metric('Tempo', '00:00', 'time', 'time')}
                 ${metric('Perdas', '0 / 0', 'losses', 'losses')}
-                ${metric('Ativas', '0', 'active', 'active')}
               </div>
-              <div class="status-pill" data-status="build">
-                <span class="status-dot"></span><span id="status-label">Construção</span>
+              <div class="simulation-controls" aria-label="Controles da simulação">
+                <label class="speed-control" title="Velocidade da simulação">
+                  <span class="speed-readout" data-speed-label>1×</span>
+                  <input data-speed type="range" min="0" max="6" step="1" value="3" aria-label="Velocidade da simulação" aria-valuetext="1×" />
+                </label>
+                <button class="simulation-play" data-action="run" type="button" aria-label="Iniciar simulação" title="Iniciar · Espaço">
+                  <span data-run-icon data-icon="play">${icon('play')}</span>
+                </button>
               </div>
-              <button class="icon-button" data-action="fullscreen" aria-label="Tela cheia" title="Tela cheia">
-                ${icon('fullscreen')}
-              </button>
-              <button class="icon-button sound-button" data-action="mute" aria-label="Silenciar" title="Som">
-                <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
-              </button>
             </div>
           </header>
 
@@ -284,19 +324,9 @@ export class AppUI {
             <button class="rail-button is-active" data-action="toggle-grid" type="button" aria-pressed="true" aria-label="Desligar grade" title="Grade ligada">
               ${icon('grid')}
             </button>
-            <button class="rail-button" data-action="reverse" aria-label="Inverter esteira" title="Inverter esteira · R" disabled>
-              ${icon('reverse')}
-            </button>
             <span class="rail-divider" aria-hidden="true"></span>
             <button class="rail-button" data-action="undo" aria-label="Desfazer" title="Desfazer · Ctrl+Z">${icon('undo')}</button>
             <button class="rail-button" data-action="redo" aria-label="Refazer" title="Refazer · Ctrl+Y">${icon('redo')}</button>
-            <button class="rail-button" data-action="reset" aria-label="Reiniciar simulação" title="Reiniciar simulação">
-              ${icon('reset')}
-            </button>
-            <span class="rail-divider" aria-hidden="true"></span>
-            <button class="rail-button rail-danger" data-action="delete" aria-label="Excluir seleção" title="Excluir seleção · Delete" disabled>
-              ${icon('trash')}
-            </button>
             <button class="rail-button rail-danger is-hidden" data-action="clear" aria-label="Limpar todas as máquinas" title="Limpar tudo">
               ${icon('clear')}
             </button>
@@ -304,6 +334,17 @@ export class AppUI {
 
           <section class="build-dock glass-panel" aria-label="Ferramentas de construção">
             <div id="hotbar" class="hotbar" role="toolbar" aria-label="Máquinas"></div>
+          </section>
+          <section id="selection-dock" class="selection-dock glass-panel is-hidden" aria-label="Ações da seleção">
+            <button class="selection-action" data-action="copy" type="button" aria-label="Copiar item" title="Copiar · Ctrl+C">
+              ${icon('copy')}
+            </button>
+            <button class="selection-action" data-action="cut" type="button" aria-label="Recortar item" title="Recortar · Ctrl+X">
+              ${icon('cut')}
+            </button>
+            <button class="selection-action selection-action-danger" data-action="delete" type="button" aria-label="Excluir item" title="Excluir · Delete">
+              ${icon('trash')}
+            </button>
           </section>
           <div id="editor-preview-bar" class="editor-preview-bar glass-panel is-hidden" role="status">
             <span><strong>PRÉVIA DO JOGADOR</strong> · alterações temporárias não serão salvas</span>
@@ -342,40 +383,77 @@ export class AppUI {
           </aside>
         </section>
 
-        <section id="menu-screen" class="menu-screen" aria-labelledby="menu-title">
+        <section id="menu-screen" class="menu-screen" data-menu-view="home" aria-labelledby="menu-title">
           <div class="menu-backdrop"></div>
           <div class="menu-content">
-            <div class="menu-intro">
-              <span class="eyebrow accent">SISTEMAS EM MOVIMENTO</span>
-              <h1 id="menu-title">Factory</h1>
-              <p>Transforme gravidade em fluxo. Construa linhas compactas, observe a física e refine cada movimento.</p>
-              <div class="menu-tip"><span>${icon('reverse')}</span><span>Gire livremente. Inverta o fluxo. Encontre uma solução elegante.</span></div>
-            </div>
-            <div class="contract-browser">
-              <div class="section-heading">
-                <div><span class="eyebrow">CAMPANHA</span><h2>Contratos</h2></div>
+            <header class="menu-intro">
+              <h1 id="menu-title">Factory<span aria-hidden="true">.</span></h1>
+            </header>
+
+            <section class="menu-view menu-home-view" data-menu-panel="home" aria-label="Menu principal">
+              <nav class="main-menu-nav" aria-label="Opções principais">
+                <button class="main-menu-action" data-action="menu-play" type="button">Jogar</button>
+                <button class="main-menu-action" data-action="menu-options" type="button">Opções</button>
+                <button class="main-menu-action" data-action="menu-exit" type="button">Sair</button>
+              </nav>
+            </section>
+
+            <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-labelledby="play-menu-title" aria-hidden="true">
+              <button class="menu-back-button campaign-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal"><span aria-hidden="true">←</span><span>Voltar</span></button>
+              <header class="campaign-heading">
+                <span class="eyebrow">JOGAR</span>
+                <h2 id="play-menu-title">Escolha uma fase</h2>
                 <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
+              </header>
+              <div class="contract-browser campaign-browser">
+                <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
+                <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
+                <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
+                <div class="campaign-actions">
+                  <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
+                    <span class="create-contract-mark">${icon('plus')}</span>
+                    <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
+                    <span class="card-arrow" aria-hidden="true">→</span>
+                  </button>
+                  <button class="sandbox-card" data-start-sandbox>
+                    <span class="sandbox-mark">∞</span>
+                    <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
+                    <span class="card-arrow" aria-hidden="true">→</span>
+                  </button>
+                </div>
               </div>
-              <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden">ADMIN LOCAL</span>
-              <div id="contract-list" class="contract-list"></div>
-              <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
-                <span class="create-contract-mark">${icon('plus')}</span>
-                <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
-                <span class="card-arrow" aria-hidden="true">→</span>
-              </button>
-              <button class="sandbox-card" data-start-sandbox>
-                <span class="sandbox-mark">∞</span>
-                <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
-                <span class="card-arrow" aria-hidden="true">→</span>
-              </button>
-            </div>
+            </section>
+
+            <section class="menu-view menu-options-view is-hidden" data-menu-panel="options" aria-labelledby="options-menu-title" aria-hidden="true">
+              <div class="options-panel menu-subpanel">
+                <div class="menu-view-heading">
+                  <button class="menu-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal">← <span>Voltar</span></button>
+                  <div class="section-heading">
+                    <div><span class="eyebrow">CONFIGURAÇÕES</span><h2 id="options-menu-title">Opções</h2></div>
+                  </div>
+                </div>
+                <div class="menu-options-list">
+                  <div class="menu-option-row">
+                    <div><strong>Som</strong><span>Ativar efeitos sonoros</span></div>
+                    <button class="menu-sound-toggle" data-action="mute" type="button" aria-label="Silenciar" aria-pressed="false">
+                      <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
+                    </button>
+                  </div>
+                  <label class="menu-option-row menu-volume-option">
+                    <div><strong>Volume</strong><span>Intensidade dos efeitos</span></div>
+                    <span class="menu-volume-control">
+                      <input data-volume type="range" min="0" max="100" value="${Math.round(this.progress.settings.volume * 100)}" aria-label="Volume dos efeitos" />
+                      <output data-volume-output>${Math.round(this.progress.settings.volume * 100)}%</output>
+                    </span>
+                  </label>
+                </div>
+                <p class="options-placeholder">Novas opções serão adicionadas aqui.</p>
+              </div>
+            </section>
+
+            <div id="menu-motion-demo" class="menu-motion-demo" aria-hidden="true"></div>
           </div>
           <footer class="menu-footer">
-            <span>Desktop prototype</span><span>•</span><span>Vite + Phaser + Matter</span>
-            <label class="volume-control">
-              <span>Volume</span>
-              <input data-volume type="range" min="0" max="100" value="${Math.round(this.progress.settings.volume * 100)}" aria-label="Volume dos efeitos" />
-            </label>
             <button id="admin-toggle" class="admin-toggle${this.adminAvailable ? '' : ' is-hidden'}" data-action="toggle-admin" type="button" aria-pressed="false">
               ${icon('settings')} <span>Ativar admin</span>
             </button>
@@ -386,6 +464,34 @@ export class AppUI {
           <span class="angle-ring"></span><strong>0°</strong>
         </div>
         <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+        <section id="pause-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+          <div class="modal-scrim"></div>
+          <div class="pause-card">
+            <header class="pause-card-heading">
+              <div><span class="eyebrow accent">MENU DA SIMULAÇÃO</span><h2 id="pause-title">Pausado</h2></div>
+              <button class="icon-button" data-action="close-pause-menu" type="button" aria-label="Fechar menu de pausa" title="Fechar">
+                ${icon('close')}
+              </button>
+            </header>
+            <button class="primary-action pause-save" data-action="save-progress" type="button">
+              ${icon('save')} <span>Salvar</span>
+            </button>
+            <div class="pause-setting">
+              <div><strong>Som</strong><span>Ativar efeitos sonoros</span></div>
+              <button class="icon-button sound-button" data-action="mute" type="button" aria-label="Silenciar" title="Som" aria-pressed="false">
+                <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
+              </button>
+            </div>
+            <div class="pause-setting">
+              <div><strong>Tela cheia</strong><span>Alternar visualização</span></div>
+              <button class="icon-button" data-action="fullscreen" type="button" aria-label="Alternar tela cheia" title="Tela cheia">
+                ${icon('fullscreen')}
+              </button>
+            </div>
+            <button class="soft-button pause-main-menu" data-action="menu" type="button">Menu principal</button>
+          </div>
+        </section>
 
         <section id="result-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
           <div class="modal-scrim"></div>
@@ -528,8 +634,12 @@ export class AppUI {
         if (input.dataset.volume === undefined) return;
         const volume = Number(input.value) / 100;
         this.audio.setVolume(volume);
-        this.commitSettings({ volume, muted: volume === 0 ? true : this.audio.isMuted });
+        const muted = volume === 0 ? true : this.audio.isMuted;
+        if (muted !== this.audio.isMuted) this.audio.setMuted(muted);
+        this.commitSettings({ volume, muted });
         appEvents.emit('ui:set-volume', { volume });
+        if (volume === 0) appEvents.emit('ui:set-muted', { muted: true });
+        this.updateSoundControls();
       },
       { signal: this.domEvents.signal },
     );
@@ -540,9 +650,6 @@ export class AppUI {
       appEvents.on('game:ready', () => this.finishGameLoading()),
       appEvents.on('game:snapshot', (snapshot) => this.renderSnapshot(snapshot)),
       appEvents.on('game:angle', (payload) => this.renderAngle(payload)),
-      appEvents.on('game:camera', ({ zoom }) => {
-        this.element('#zoom-readout').textContent = `${Math.round(zoom * 100)}%`;
-      }),
       appEvents.on('game:toast', ({ message, tone }) => this.showToast(message, tone)),
       appEvents.on('game:audio', ({ kind }) => this.audio.play(kind)),
       appEvents.on('game:result', (result) => this.renderResult(result)),
@@ -600,7 +707,26 @@ export class AppUI {
   }
 
   private handleAction(action: string): void {
+    if (this.catalogSaving && this.catalogSavingContext === 'editor') return;
+
     switch (action) {
+      case 'menu-play':
+        this.setMenuView('play');
+        break;
+      case 'menu-options':
+        this.setMenuView('options');
+        break;
+      case 'menu-home':
+        this.setMenuView('home');
+        break;
+      case 'menu-exit':
+        break;
+      case 'pause-menu':
+        this.openPauseMenu();
+        break;
+      case 'close-pause-menu':
+        this.closePauseMenu();
+        break;
       case 'menu':
       case 'result-menu':
         if (this.editorContract) {
@@ -611,11 +737,8 @@ export class AppUI {
         this.showMenu();
         break;
       case 'run':
-        if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+        if (this.snapshot?.status === 'running') appEvents.emit('ui:reset', undefined);
         else appEvents.emit('ui:run', undefined);
-        break;
-      case 'reset':
-        appEvents.emit('ui:reset', undefined);
         break;
       case 'clear':
         appEvents.emit('ui:clear', undefined);
@@ -628,6 +751,12 @@ export class AppUI {
         break;
       case 'delete':
         appEvents.emit('ui:delete-selected', undefined);
+        break;
+      case 'copy':
+        appEvents.emit('ui:copy-selected', undefined);
+        break;
+      case 'cut':
+        appEvents.emit('ui:cut-selected', undefined);
         break;
       case 'reverse':
         appEvents.emit('ui:reverse-selected', undefined);
@@ -644,9 +773,11 @@ export class AppUI {
         this.startNextContract();
         break;
       case 'toggle-admin':
+        if (this.catalogSaving) break;
         this.setAdminEnabled(!this.adminEnabled);
         break;
       case 'admin-create':
+        if (this.catalogSaving) break;
         appEvents.emit('ui:admin-create-contract', undefined);
         break;
       case 'editor-configure':
@@ -661,8 +792,9 @@ export class AppUI {
         appEvents.emit('ui:editor-return', undefined);
         break;
       case 'editor-save':
+        if (this.catalogSaving) break;
         if (this.editorContract && this.validateEditorSettings()) {
-          this.setEditorMessage({ tone: 'neutral', message: 'Salvando fase…' });
+          this.setEditorMessage({ tone: 'neutral', message: 'Salvando no JSON…' });
           appEvents.emit('ui:editor-save', { contract: structuredClone(this.editorContract) });
         }
         break;
@@ -682,7 +814,12 @@ export class AppUI {
         this.element('#admin-confirm-modal').classList.add('is-hidden');
         break;
       case 'admin-confirm-accept':
+        if (this.catalogSaving) break;
         this.confirmAdminAction();
+        break;
+      case 'save-progress':
+        this.onProgressChange?.(this.progress);
+        this.showToast('Jogo salvo.', 'success');
         break;
       case 'mute': {
         const muted = this.audio.toggleMuted();
@@ -698,11 +835,39 @@ export class AppUI {
     }
   }
 
+  private openPauseMenu(): void {
+    if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+    this.element('#pause-modal').classList.remove('is-hidden');
+  }
+
+  private closePauseMenu(): void {
+    this.element('#pause-modal').classList.add('is-hidden');
+  }
+
   private renderMenuCards(): void {
     const list = this.element('#contract-list');
+    const pagination = this.element('#contract-pagination');
     list.innerHTML = '';
+    pagination.innerHTML = '';
+    pagination.classList.remove('is-hidden');
+    if (this.contracts.length === 0) {
+      this.element('#campaign-progress').textContent = 'Nenhuma fase publicada';
+      list.innerHTML = `
+        <div class="contract-empty-state" role="status">
+          <strong>Nenhuma fase publicada</strong>
+          <span>${
+            this.adminEnabled
+              ? 'Crie a primeira fase para iniciar o catálogo.'
+              : 'O catálogo ainda não tem fases. O Modo livre continua disponível.'
+          }</span>
+        </div>`;
+      pagination.classList.add('is-hidden');
+      this.renderCatalogSavingState();
+      return;
+    }
     if (this.adminEnabled) {
       this.renderAdminMenuCards(list);
+      this.renderCatalogSavingState();
       return;
     }
     const completed = this.contracts.filter(
@@ -711,28 +876,43 @@ export class AppUI {
     this.element('#campaign-progress').textContent =
       `${completed} de ${this.contracts.length} concluídos`;
 
-    for (const contract of this.contracts) {
+    const furthestUnlockedIndex = Math.max(
+      0,
+      ...this.contracts.map((contract, index) =>
+        this.progress.unlockedContracts.includes(contract.id) ? index : -1,
+      ),
+    );
+
+    this.contracts.forEach((contract, index) => {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
       const best = this.progress.bestResults[contract.id];
       const button = document.createElement('button');
-      button.className = `contract-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
+      button.className = `contract-card stage-contract-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
       button.disabled = !unlocked;
+      button.dataset.contractIndex = String(index);
       button.setAttribute(
         'aria-label',
         unlocked ? `Abrir ${contract.title}` : `${contract.title}, bloqueado`,
       );
       button.innerHTML = `
-        <span class="contract-index">${String(contract.order).padStart(2, '0')}</span>
-        <span class="contract-copy">
+        <span class="stage-card-preview" aria-hidden="true">
+          ${contractStagePreview(contract)}
+          ${unlocked ? '' : `<span class="stage-card-lock">${icon('lock')}</span>`}
+        </span>
+        <span class="stage-card-details">
+          <span class="stage-card-kicker">FASE ${String(contract.order).padStart(2, '0')}</span>
           <span class="contract-title-row"><strong>${escapeHTML(contract.title)}</strong>${best ? stars(best.stars, true) : ''}</span>
-          <small>${escapeHTML(contract.subtitle)}</small>
+          <small class="stage-card-subtitle">${escapeHTML(contract.subtitle)}</small>
+          <span class="stage-card-description">${escapeHTML(contract.description)}</span>
           <span class="contract-tags">
             <i>${contract.goal.deliveries} caixas</i>
             <i>${contract.goal.pieceBudget} peças</i>
             ${contract.goal.timeLimitSeconds ? `<i>${formatTime(contract.goal.timeLimitSeconds)}</i>` : ''}
           </span>
+          <span class="stage-card-cta">${unlocked ? `Jogar ${icon('play')}` : `Bloqueada ${icon('lock')}`}</span>
         </span>
-        <span class="card-arrow" aria-hidden="true">${unlocked ? '→' : icon('lock')}</span>`;
+      `;
+      button.addEventListener('focus', () => this.selectMenuContract(index, false));
       if (unlocked) {
         button.addEventListener('click', () => {
           this.hideMenu();
@@ -744,7 +924,52 @@ export class AppUI {
         });
       }
       list.append(button);
+
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.className = `contract-dot${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
+      dot.dataset.contractDot = contract.id;
+      dot.setAttribute(
+        'aria-label',
+        unlocked
+          ? `Ver fase ${contract.order}: ${contract.title}`
+          : `Ver fase ${contract.order}: ${contract.title}, bloqueada`,
+      );
+      dot.innerHTML = unlocked
+        ? `<span>${String(contract.order).padStart(2, '0')}</span>`
+        : icon('lock');
+      dot.addEventListener('click', () => this.selectMenuContract(index, true));
+      pagination.append(dot);
+    });
+
+    this.selectMenuContract(furthestUnlockedIndex, false);
+    const menu = this.element('#menu-screen');
+    if (menu.dataset.menuView === 'play' && !menu.classList.contains('is-hidden')) {
+      window.requestAnimationFrame(() =>
+        this.selectMenuContract(furthestUnlockedIndex, true, 'auto'),
+      );
     }
+    this.renderCatalogSavingState();
+  }
+
+  private selectMenuContract(
+    index: number,
+    scroll: boolean,
+    behavior: ScrollBehavior = 'smooth',
+  ): void {
+    const cards = [
+      ...this.root.querySelectorAll<HTMLButtonElement>('#contract-list .stage-contract-card'),
+    ];
+    const dots = [...this.root.querySelectorAll<HTMLButtonElement>('[data-contract-dot]')];
+    const safeIndex = Math.min(Math.max(index, 0), Math.max(cards.length - 1, 0));
+    cards.forEach((card, cardIndex) =>
+      card.classList.toggle('is-current', cardIndex === safeIndex),
+    );
+    dots.forEach((dot, dotIndex) => {
+      if (dotIndex === safeIndex) dot.setAttribute('aria-current', 'true');
+      else dot.removeAttribute('aria-current');
+    });
+    if (scroll) cards[safeIndex]?.scrollIntoView({ behavior, block: 'nearest', inline: 'center' });
   }
 
   private renderAdminMenuCards(list: HTMLElement): void {
@@ -757,7 +982,6 @@ export class AppUI {
     for (const contract of this.contracts) {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
       const best = this.progress.bestResults[contract.id];
-      const metadata = this.contractMetadata[contract.id] ?? { kind: 'builtin' as const };
       const entry = document.createElement('article');
       entry.className = 'contract-entry';
       const button = document.createElement('button');
@@ -768,7 +992,6 @@ export class AppUI {
         <span class="contract-copy">
           <span class="contract-title-row">
             <strong>${escapeHTML(contract.title)}</strong>
-            <em class="contract-origin">${metadata.kind === 'custom' ? 'Personalizada' : metadata.overridden ? 'Alterada' : 'Original'}</em>
           </span>
           <small>${escapeHTML(contract.subtitle)}</small>
           <span class="contract-tags">
@@ -784,64 +1007,47 @@ export class AppUI {
       });
       entry.append(button);
 
-      if (metadata.kind === 'custom' || metadata.overridden) {
-        const actions = document.createElement('div');
-        actions.className = 'contract-admin-actions';
-        if (metadata.kind === 'builtin' && metadata.overridden) {
-          const restore = document.createElement('button');
-          restore.className = 'text-button';
-          restore.type = 'button';
-          restore.innerHTML = `${icon('restore')} Restaurar original`;
-          restore.addEventListener('click', () =>
-            this.openAdminConfirmation('restore', contract.id, contract.title),
-          );
-          actions.append(restore);
-        }
-        if (metadata.kind === 'custom') {
-          const remove = document.createElement('button');
-          remove.className = 'text-button danger';
-          remove.type = 'button';
-          remove.innerHTML = `${icon('trash')} Excluir`;
-          remove.addEventListener('click', () =>
-            this.openAdminConfirmation('delete', contract.id, contract.title),
-          );
-          actions.append(remove);
-        }
-        entry.append(actions);
-      }
+      const actions = document.createElement('div');
+      actions.className = 'contract-admin-actions';
+      const remove = document.createElement('button');
+      remove.className = 'text-button danger';
+      remove.type = 'button';
+      remove.innerHTML = `${icon('trash')} Excluir`;
+      remove.addEventListener('click', () =>
+        this.openAdminConfirmation(contract.id, contract.title),
+      );
+      actions.append(remove);
+      entry.append(actions);
       list.append(entry);
     }
   }
 
   private renderSnapshot(snapshot: GameSnapshot): void {
     this.snapshot = snapshot;
-    this.element('[data-metric="progress"] strong').textContent = snapshot.goal
-      ? `${snapshot.metrics.delivered} / ${snapshot.goal.deliveries}`
-      : `${snapshot.metrics.delivered}`;
     this.element('[data-metric="time"] strong').textContent = formatTime(
       snapshot.metrics.elapsedSeconds,
     );
     this.element('[data-metric="losses"] strong').textContent = snapshot.goal
       ? `${snapshot.metrics.lost} / ${snapshot.goal.maxLosses}`
       : `${snapshot.metrics.lost}`;
-    this.element('[data-metric="active"] strong').textContent = String(snapshot.metrics.active);
-
-    const status = this.element('.status-pill');
-    status.dataset.status = snapshot.status;
-    this.element('#status-label').textContent = STATUS_COPY[snapshot.status];
-
     const runIcon = this.element('[data-run-icon]');
     const runButton = this.element<HTMLButtonElement>('[data-action="run"]');
     const running = snapshot.status === 'running';
-    runIcon.innerHTML = icon(running ? 'pause' : 'play');
+    const runIconName = running ? 'stop' : 'play';
+    if (runIcon.dataset.icon !== runIconName) {
+      runIcon.innerHTML = icon(runIconName);
+      runIcon.dataset.icon = runIconName;
+    }
+    runButton.classList.toggle('is-stop', running);
     const runAction = running
-      ? 'Pausar simulação'
+      ? 'Reiniciar simulação'
       : snapshot.status === 'paused'
         ? 'Continuar simulação'
         : 'Iniciar simulação';
     runButton.setAttribute('aria-label', runAction);
     runButton.title = `${runAction} · Espaço`;
-    runButton.disabled = snapshot.status === 'success' || snapshot.status === 'failure';
+    // Terminal states are restartable through runSimulation, just like the Space shortcut.
+    runButton.disabled = false;
     this.renderSimulationSpeed(snapshot.simulationSpeed);
 
     this.element<HTMLButtonElement>('[data-action="undo"]').disabled = !snapshot.canUndo;
@@ -859,12 +1065,16 @@ export class AppUI {
     );
     if (this.editorContract && !this.editorPreviewActive) this.renderEditorPalette();
     else this.renderHotbar(snapshot.availableMachines);
-    if (snapshot.selectedMachine) {
+    if (snapshot.selection.count > 0) {
       this.element('#hotbar')
         .querySelectorAll('.tool-button')
         .forEach((node) => node.classList.remove('is-active'));
     }
-    this.renderSelection(snapshot.selectedMachine, snapshot.selectedObstacle);
+    this.renderSelection(
+      snapshot.selectedMachine,
+      snapshot.selectedObstacle,
+      snapshot.selection.count,
+    );
   }
 
   private renderHotbar(machines: MachineType[]): void {
@@ -885,7 +1095,7 @@ export class AppUI {
       button.setAttribute('aria-label', `${copy.name}: ${copy.hint}`);
       button.title = copy.name;
       button.innerHTML = `
-        <span class="tool-glyph tool-${machine}">${icon(machine)}</span>`;
+        <span class="tool-glyph tool-${machine}">${machineThumbnail(machine)}</span>`;
       let dragOrigin: { x: number; y: number } | undefined;
       let dragging = false;
       let suppressClick = false;
@@ -986,7 +1196,9 @@ export class AppUI {
       button.dataset.editorTool = tool.type;
       button.title = `${tool.label} · ${tool.hint}`;
       button.setAttribute('aria-label', `${tool.label}: ${tool.hint}`);
-      button.innerHTML = `<span class="tool-glyph tool-${tool.type}">${icon(tool.icon)}</span>`;
+      button.innerHTML = `<span class="tool-glyph tool-${tool.type}">${
+        tool.type === 'obstacle' ? icon(tool.icon) : machineThumbnail(tool.type)
+      }</span>`;
       button.addEventListener('click', () => {
         hotbar
           .querySelectorAll('.editor-tool-button')
@@ -998,21 +1210,48 @@ export class AppUI {
     }
   }
 
-  private renderSelection(machine?: MachineState, obstacle?: ObstacleDefinition): void {
-    const reverse = this.element<HTMLButtonElement>('[data-action="reverse"]');
+  private renderSelection(
+    machine?: MachineState,
+    obstacle?: ObstacleDefinition,
+    selectionCount = 0,
+  ): void {
     const editing = Boolean(this.editorContract && !this.editorPreviewActive);
-    const canReverse = machine?.type === 'conveyor' && (editing || !machine.fixed);
-    reverse.disabled = !canReverse;
-    reverse.title = canReverse ? 'Inverter esteira · R' : 'Selecione uma esteira';
+    const canManipulate = Boolean(
+      selectionCount > 1 || (machine && (editing || !machine.fixed)) || (editing && obstacle),
+    );
     const remove = this.element<HTMLButtonElement>('[data-action="delete"]');
-    const canDelete = Boolean((machine && (editing || !machine.fixed)) || (editing && obstacle));
-    remove.disabled = !canDelete;
-    remove.title = canDelete
-      ? 'Excluir seleção · Delete'
+    const copy = this.element<HTMLButtonElement>('[data-action="copy"]');
+    const cut = this.element<HTMLButtonElement>('[data-action="cut"]');
+    remove.disabled = !canManipulate;
+    copy.disabled = !canManipulate;
+    cut.disabled = !canManipulate;
+    const multiple = selectionCount > 1;
+    remove.setAttribute(
+      'aria-label',
+      multiple ? `Excluir ${selectionCount} itens` : 'Excluir item',
+    );
+    copy.setAttribute('aria-label', multiple ? `Copiar ${selectionCount} itens` : 'Copiar item');
+    cut.setAttribute('aria-label', multiple ? `Recortar ${selectionCount} itens` : 'Recortar item');
+    remove.title = canManipulate
+      ? multiple
+        ? `Excluir ${selectionCount} itens · Delete`
+        : 'Excluir seleção · Delete'
       : machine?.fixed
         ? 'Esta máquina faz parte do contrato'
         : 'Selecione uma máquina';
-    if (obstacle && editing) remove.title = 'Excluir bloqueador · Delete';
+    if (multiple) {
+      copy.title = `Copiar ${selectionCount} itens · Ctrl+C`;
+      cut.title = `Recortar ${selectionCount} itens · Ctrl+X`;
+    } else if (obstacle && editing) {
+      remove.title = 'Excluir bloqueador · Delete';
+      copy.title = 'Copiar bloqueador · Ctrl+C';
+      cut.title = 'Recortar bloqueador · Ctrl+X';
+    } else {
+      copy.title = 'Copiar item · Ctrl+C';
+      cut.title = 'Recortar item · Ctrl+X';
+    }
+    this.element('#selection-dock').classList.toggle('is-hidden', !canManipulate);
+    this.root.classList.toggle('has-selection-actions', canManipulate);
   }
 
   private renderSimulationSpeed(speed: number): void {
@@ -1086,6 +1325,7 @@ export class AppUI {
     const next = this.element<HTMLButtonElement>('[data-action="next"]');
     const currentIndex = this.contracts.findIndex((item) => item.id === result.contractId);
     next.classList.toggle('is-hidden', !success || currentIndex >= this.contracts.length - 1);
+    this.closePauseMenu();
     this.element('#result-modal').classList.remove('is-hidden');
     if (success) this.audio.play('win');
   }
@@ -1093,6 +1333,7 @@ export class AppUI {
   private setAdminEnabled(enabled: boolean): void {
     if (!this.adminAvailable) return;
     this.adminEnabled = enabled;
+    if (enabled) this.setMenuView('play');
     this.root.classList.toggle('is-admin-enabled', enabled);
     const toggle = this.element<HTMLButtonElement>('#admin-toggle');
     toggle.setAttribute('aria-pressed', String(enabled));
@@ -1110,13 +1351,19 @@ export class AppUI {
     this.element('#editor-rail').classList.toggle('is-hidden', this.editorPreviewActive);
     this.element('#editor-contract-title').textContent = contract.title.trim() || 'Fase sem título';
     const dirtyState = this.element('#editor-dirty-state');
-    dirtyState.textContent = this.editorDirty
-      ? this.editorIsNew
-        ? 'Nova fase · não salva'
-        : 'Alterações não salvas'
-      : 'Salva neste navegador';
+    const savingEditor = this.catalogSaving && this.catalogSavingContext === 'editor';
+    dirtyState.textContent = savingEditor
+      ? 'Salvando no JSON…'
+      : this.editorDirty
+        ? this.editorIsNew
+          ? 'Nova fase · não salva'
+          : 'Alterações não salvas'
+        : 'Salva no JSON local';
     dirtyState.classList.toggle('is-dirty', this.editorDirty);
-    this.element<HTMLButtonElement>('[data-action="editor-save"]').disabled = !this.editorDirty;
+    dirtyState.classList.toggle('is-saving', savingEditor);
+    const saveButton = this.element<HTMLButtonElement>('[data-action="editor-save"]');
+    saveButton.disabled = this.catalogSaving || !this.editorDirty;
+    saveButton.querySelector('span')!.textContent = savingEditor ? 'Salvando…' : 'Salvar';
 
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     if (!form.contains(document.activeElement)) this.populateEditorForm(contract);
@@ -1143,7 +1390,7 @@ export class AppUI {
   }
 
   private handleEditorFormInput(): void {
-    if (!this.editorContract) return;
+    if (!this.editorContract || this.catalogSaving) return;
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     const availableMachines: MachineType[] = [];
     if (formCheckbox(form, 'availableConveyor').checked) availableMachines.push('conveyor');
@@ -1172,7 +1419,8 @@ export class AppUI {
     const dirty = this.element('#editor-dirty-state');
     dirty.textContent = this.editorIsNew ? 'Nova fase · não salva' : 'Alterações não salvas';
     dirty.classList.add('is-dirty');
-    this.element<HTMLButtonElement>('[data-action="editor-save"]').disabled = false;
+    dirty.classList.remove('is-saving');
+    this.element<HTMLButtonElement>('[data-action="editor-save"]').disabled = this.catalogSaving;
     appEvents.emit('ui:editor-update-settings', { contract: structuredClone(contract) });
   }
 
@@ -1253,33 +1501,59 @@ export class AppUI {
     });
   }
 
-  private openAdminConfirmation(
-    kind: 'restore' | 'delete',
-    contractId: ContractId,
-    title: string,
-  ): void {
-    this.pendingAdminAction = { kind, contractId };
-    this.element('#admin-confirm-kicker').textContent =
-      kind === 'restore' ? 'RESTAURAR ORIGINAL' : 'EXCLUIR FASE';
-    this.element('#admin-confirm-title').textContent =
-      kind === 'restore' ? `Restaurar “${title}”?` : `Excluir “${title}”?`;
+  private openAdminConfirmation(contractId: ContractId, title: string): void {
+    if (this.catalogSaving) return;
+    this.pendingAdminAction = { contractId };
+    this.element('#admin-confirm-kicker').textContent = 'EXCLUIR FASE';
+    this.element('#admin-confirm-title').textContent = `Excluir “${title}”?`;
     this.element('#admin-confirm-copy').textContent =
-      kind === 'restore'
-        ? 'As alterações locais e o recorde desta fase serão removidos.'
-        : 'A fase personalizada e seu resultado salvo serão removidos deste navegador.';
-    this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]').textContent =
-      kind === 'restore' ? 'Restaurar' : 'Excluir';
+      'A fase e seu resultado salvo serão removidos do catálogo JSON local. Você poderá recuperá-la pelo histórico do Git.';
+    this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]').textContent = 'Excluir';
     this.element('#admin-confirm-modal').classList.remove('is-hidden');
   }
 
   private confirmAdminAction(): void {
     const pending = this.pendingAdminAction;
-    if (!pending) return;
+    if (!pending || this.catalogSaving) return;
     this.pendingAdminAction = undefined;
     this.element('#admin-confirm-modal').classList.add('is-hidden');
-    if (pending.kind === 'restore')
-      appEvents.emit('ui:admin-restore-contract', { contractId: pending.contractId });
-    else appEvents.emit('ui:admin-delete-contract', { contractId: pending.contractId });
+    appEvents.emit('ui:admin-delete-contract', { contractId: pending.contractId });
+  }
+
+  private renderCatalogSavingState(): void {
+    const saving = this.catalogSaving;
+    const editorSaving = saving && this.catalogSavingContext === 'editor';
+    const badge = this.element('#menu-admin-badge');
+    badge.textContent = saving ? 'SALVANDO NO JSON…' : 'ADMIN LOCAL';
+    badge.classList.toggle('is-saving', saving);
+
+    this.root.classList.toggle('is-catalog-saving', editorSaving);
+    this.element('#game-ui').toggleAttribute('inert', !this.gameReady || editorSaving);
+    this.element(`#${this.gameContainerId}`).toggleAttribute('inert', editorSaving);
+    this.element('#game-ui').setAttribute('aria-busy', String(!this.gameReady || editorSaving));
+    this.element('#editor-contract-form')
+      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
+        'input, textarea, button',
+      )
+      .forEach((control) => {
+        control.disabled = editorSaving;
+      });
+    this.root
+      .querySelectorAll<HTMLButtonElement>(
+        '[data-action="editor-cancel"], [data-action="editor-configure"], [data-action="editor-test"]',
+      )
+      .forEach((button) => {
+        button.disabled = editorSaving;
+      });
+
+    this.element<HTMLButtonElement>('#admin-toggle').disabled = saving;
+    this.element<HTMLButtonElement>('#create-contract-button').disabled = saving;
+    this.root
+      .querySelectorAll<HTMLButtonElement>('.contract-admin-actions button')
+      .forEach((button) => {
+        button.disabled = saving;
+      });
+    this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]').disabled = saving;
   }
 
   private clearEditorMessage(): void {
@@ -1308,12 +1582,21 @@ export class AppUI {
 
   private updateSoundControls(): void {
     const muted = this.audio.isMuted;
-    const button = this.element<HTMLButtonElement>('[data-action="mute"]');
-    button.setAttribute('aria-label', muted ? 'Ativar som' : 'Silenciar');
-    this.element('[data-sound-icon]').innerHTML = icon(muted ? 'muted' : 'sound');
-    button.classList.toggle('is-muted', muted);
-    const volume = this.root.querySelector<HTMLInputElement>('[data-volume]');
-    if (volume) volume.value = String(Math.round(this.audio.currentVolume * 100));
+    this.root.querySelectorAll<HTMLButtonElement>('[data-action="mute"]').forEach((button) => {
+      button.setAttribute('aria-label', muted ? 'Ativar som' : 'Silenciar');
+      button.setAttribute('aria-pressed', String(!muted));
+      button.querySelector<HTMLElement>('[data-sound-icon]')!.innerHTML = icon(
+        muted ? 'muted' : 'sound',
+      );
+      button.classList.toggle('is-muted', muted);
+    });
+    const volumeValue = Math.round(this.audio.currentVolume * 100);
+    this.root.querySelectorAll<HTMLInputElement>('[data-volume]').forEach((volume) => {
+      volume.value = String(volumeValue);
+    });
+    this.root.querySelectorAll<HTMLOutputElement>('[data-volume-output]').forEach((output) => {
+      output.value = `${volumeValue}%`;
+    });
   }
 
   private element<T extends HTMLElement = HTMLElement>(selector: string): T {
@@ -1390,6 +1673,52 @@ function stars(count: number, compact: boolean): string {
     .join('')}</span>`;
 }
 
+function contractStagePreview(contract: ContractDefinition): string {
+  const sourceCount = contract.fixedMachines.filter(({ type }) => type === 'source').length;
+  const hasSpring = contract.availableMachines.includes('spring');
+  const layout = Math.min(Math.max(contract.order, 1), 3);
+  return `<span class="stage-preview-layout stage-preview-layout-${layout}">
+    <span class="stage-preview-machine stage-preview-source">${machineThumbnail('source')}</span>
+    ${sourceCount > 1 ? `<span class="stage-preview-machine stage-preview-source-secondary">${machineThumbnail('source')}</span>` : ''}
+    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-a">${machineThumbnail('conveyor')}</span>
+    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-b">${machineThumbnail('conveyor')}</span>
+    ${hasSpring ? `<span class="stage-preview-machine stage-preview-spring">${machineThumbnail('spring')}</span>` : ''}
+    ${contract.obstacles.length > 0 ? '<span class="stage-preview-obstacle"></span>' : ''}
+    <span class="stage-preview-machine stage-preview-receiver">${machineThumbnail('receiver')}</span>
+    <span class="stage-preview-box"><img src="${factoryBoxTextureUrl}" alt="" draggable="false" /></span>
+  </span>`;
+}
+
+function machineThumbnail(type: MachineType): string {
+  switch (type) {
+    case 'source':
+      return `<svg class="machine-thumbnail machine-thumbnail-source" viewBox="0 0 72 72" aria-hidden="true">
+        <rect x="2" y="2" width="68" height="68" rx="5" fill="#202a33" stroke="#5f6a72" stroke-width="2" />
+        <path d="M32.5 12h7v18l5.5-5.5 5 5L36 44 22 29.5l5-5 5.5 5.5z" fill="#fff" />
+        <rect x="21" y="55" width="30" height="11" rx="3" fill="#ff7629" />
+      </svg>`;
+    case 'conveyor':
+      return `<svg class="machine-thumbnail machine-thumbnail-conveyor" viewBox="0 0 96 24" aria-hidden="true">
+        <rect x="1" y="1" width="94" height="22" fill="#40566b" stroke="#293139" stroke-width="2" />
+        <path d="M17 5l10 7-10 7zM39 5l10 7-10 7zM61 5l10 7-10 7zM83 5l10 7-10 7z" fill="#fff" />
+      </svg>`;
+    case 'receiver':
+      return `<svg class="machine-thumbnail machine-thumbnail-receiver" viewBox="0 0 72 72" aria-hidden="true">
+        <rect x="2" y="2" width="68" height="68" rx="6" fill="#fff" stroke="#258bc4" stroke-width="2" />
+        <path d="M8 8h13L8 21zM64 8H51l13 13zM8 64h13L8 51zM64 64H51l13-13z" fill="#ff7629" />
+        <rect x="7" y="20" width="58" height="32" rx="6" fill="#e4e7e9" />
+        <rect x="10" y="23" width="52" height="26" rx="4" fill="#202a33" stroke="#5f6a72" />
+        <text x="36" y="43" text-anchor="middle" fill="#d95050" font-family="monospace" font-size="20">0</text>
+      </svg>`;
+    case 'spring':
+      return `<svg class="machine-thumbnail machine-thumbnail-spring" viewBox="0 0 48 24" aria-hidden="true">
+        <rect x="1" y="2" width="46" height="7" fill="#b47a48" />
+        <path d="M8 17l5-8 5 8 5-8 5 8 5-8 7 8" fill="none" stroke="#43a96b" stroke-width="4" stroke-linejoin="round" />
+        <rect x="1" y="16" width="46" height="7" fill="#b47a48" />
+      </svg>`;
+  }
+}
+
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
     source: '<path d="M4 5h16v14H4z"/><path d="M8 9h8M12 2v7m-3-3 3 3 3-3"/>',
@@ -1398,22 +1727,23 @@ function icon(name: IconName): string {
     receiver: '<path d="M4 5h16v14H4z"/><path d="M8 15h8M12 2v8m-3-3 3 3 3-3"/>',
     spring: '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/>',
     play: '<path d="m8 5 11 7-11 7z"/>',
-    pause: '<path d="M7 5h4v14H7zm6 0h4v14h-4z"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
     reset: '<path d="M4.8 8A8 8 0 1 1 4 14"/><path d="M4 4v5h5"/>',
     undo: '<path d="m9 7-5 5 5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/>',
     redo: '<path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/>',
+    copy: '<rect x="8" y="8" width="11" height="12" rx="1.5"/><path d="M5 16V5a1 1 0 0 1 1-1h10"/>',
+    cut: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="m8 8 12 12M8 16 20 4M14.5 14.5 20 20"/>',
     trash: '<path d="M4 7h16M9 3h6l1 4H8zM7 7l1 14h8l1-14M10 11v6m4-6v6"/>',
     reverse: '<path d="M7 7h11l-3-3m3 3-3 3M17 17H6l3 3m-3-3 3-3"/>',
     menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
     sound: '<path d="M4 10v4h4l5 4V6L8 10zM16 9a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/>',
     muted: '<path d="M4 10v4h4l5 4V6L8 10zM17 10l4 4m0-4-4 4"/>',
     fullscreen: '<path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/>',
-    grid: '<rect x="3" y="3" width="5" height="5"/><rect x="9.5" y="3" width="5" height="5"/><rect x="16" y="3" width="5" height="5"/><rect x="3" y="9.5" width="5" height="5"/><rect x="9.5" y="9.5" width="5" height="5"/><rect x="16" y="9.5" width="5" height="5"/><rect x="3" y="16" width="5" height="5"/><rect x="9.5" y="16" width="5" height="5"/><rect x="16" y="16" width="5" height="5"/>',
+    grid: '<rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16"/>',
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4M4 20h16"/>',
-    restore: '<path d="M4 8V3m0 0h5M4 3l4 4a8 8 0 1 1-2 8"/>',
     settings:
       '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.3 3h-4.6l-.4 3a8 8 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.6-1a8 8 0 0 0 1.7 1l.4 3h4.6l.4-3a8 8 0 0 0 1.7-1l2.6 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',

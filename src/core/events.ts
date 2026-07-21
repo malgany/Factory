@@ -31,13 +31,13 @@ export interface AppEvents {
   'ui:editor-test': undefined;
   'ui:editor-return': undefined;
   'ui:editor-save': { contract: ContractDefinition };
+  'ui:editor-persistence': { saving: boolean };
   'ui:editor-mark-saved': { contract: ContractDefinition };
   'ui:editor-cancel': undefined;
   'ui:editor-configure': { open: boolean };
   'ui:admin-mode': { enabled: boolean };
   'ui:admin-create-contract': undefined;
   'ui:admin-edit-contract': { contractId: ContractId };
-  'ui:admin-restore-contract': { contractId: ContractId };
   'ui:admin-delete-contract': { contractId: ContractId };
   'ui:tool': { type: MachineType };
   'ui:tool-drag': {
@@ -54,6 +54,8 @@ export interface AppEvents {
   'ui:undo': undefined;
   'ui:redo': undefined;
   'ui:delete-selected': undefined;
+  'ui:copy-selected': undefined;
+  'ui:cut-selected': undefined;
   'ui:reverse-selected': undefined;
   'ui:toggle-grid': undefined;
   'ui:set-simulation-speed': { speed: number };
