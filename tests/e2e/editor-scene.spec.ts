@@ -150,6 +150,9 @@ test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ 
     });
     document.querySelector('#menu-screen')?.classList.add('is-hidden');
     document.querySelector('#app')?.classList.remove('is-menu-open');
+    const gameUi = document.querySelector<HTMLElement>('#game-ui');
+    gameUi?.removeAttribute('inert');
+    gameUi?.setAttribute('aria-hidden', 'false');
     if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {
@@ -228,6 +231,9 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
     });
     document.querySelector('#menu-screen')?.classList.add('is-hidden');
     document.querySelector('#app')?.classList.remove('is-menu-open');
+    const gameUi = document.querySelector<HTMLElement>('#game-ui');
+    gameUi?.removeAttribute('inert');
+    gameUi?.setAttribute('aria-hidden', 'false');
     if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {

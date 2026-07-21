@@ -86,6 +86,13 @@ async function openPlayMenu(page: Page): Promise<void> {
   await expect(page.locator('[data-menu-panel="play"]')).not.toHaveClass(/is-hidden/);
 }
 
+async function waitForMenuView(page: Page, view: 'home' | 'play' | 'options'): Promise<void> {
+  const menu = page.locator('#menu-screen');
+  await expect(menu).toHaveAttribute('data-menu-view', view);
+  await expect(menu).not.toHaveAttribute('data-menu-transitioning', 'true');
+  await expect(page.locator(`[data-menu-panel="${view}"]`)).toHaveAttribute('aria-hidden', 'false');
+}
+
 async function startSandbox(page: Page): Promise<void> {
   await openPlayMenu(page);
   await page.locator('[data-start-sandbox]').click();
@@ -144,16 +151,20 @@ test('bloqueia a interface até a cena do Phaser ficar pronta', async ({ page })
 
   await expect(loading).toBeHidden();
   await expect(shell).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('#game-ui')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('#game-ui')).toHaveAttribute('inert', '');
+  await expect(page.locator('#game-ui')).toHaveAttribute('aria-hidden', 'true');
   await expect(page.locator('#menu-screen')).not.toHaveAttribute('inert', '');
 
   await openPlayMenu(page);
   await page.locator('#contract-list .contract-card').first().click();
+  await expect(page.locator('#game-ui')).not.toHaveAttribute('inert', '');
+  await expect(page.locator('#game-ui')).toHaveAttribute('aria-hidden', 'false');
   await page.locator('[data-action="run"]').click();
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
 });
 
 test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
+  test.setTimeout(45_000);
   const pageErrors: Error[] = [];
   const consoleErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error));
@@ -166,11 +177,21 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   const homePanel = page.locator('[data-menu-panel="home"]');
   const playPanel = page.locator('[data-menu-panel="play"]');
   const optionsPanel = page.locator('[data-menu-panel="options"]');
+  const audioTab = optionsPanel.locator('[data-options-tab="audio-video"]');
+  const controlsTab = optionsPanel.locator('[data-options-tab="controls"]');
+  const audioPanel = optionsPanel.locator('[data-options-panel="audio-video"]');
+  const controlsPanel = optionsPanel.locator('[data-options-panel="controls"]');
+  const originStation = page.locator('.menu-origin-station');
+  const gameUi = page.locator('#game-ui');
 
   await expect(page.locator('#menu-title')).toHaveText('Factory.');
   await expect(homePanel).not.toHaveClass(/is-hidden/);
+  await expect(homePanel).not.toHaveAttribute('inert', '');
+  await expect(homePanel).toHaveAttribute('aria-hidden', 'false');
   await expect(playPanel).toHaveClass(/is-hidden/);
-  await expect(optionsPanel).toHaveClass(/is-hidden/);
+  await expect(optionsPanel).not.toHaveClass(/is-hidden/);
+  await expect(optionsPanel).toHaveAttribute('inert', '');
+  await expect(optionsPanel).toHaveAttribute('aria-hidden', 'true');
   await expect(page.locator('[data-action="menu-play"]')).toHaveText('Jogar');
   await expect(page.locator('[data-action="menu-options"]')).toHaveText('Opções');
   await expect(page.locator('[data-action="menu-exit"]')).toHaveText('Sair');
@@ -178,8 +199,148 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   await page.locator('[data-action="menu-exit"]').click();
   await expect(homePanel).not.toHaveClass(/is-hidden/);
 
-  await page.locator('[data-action="menu-options"]').click();
-  await expect(optionsPanel).not.toHaveClass(/is-hidden/);
+  const transitionStart = await page.evaluate(() => {
+    document.querySelector<HTMLButtonElement>('[data-action="menu-options"]')?.click();
+    const menu = document.querySelector<HTMLElement>('#menu-screen')!;
+    const world = menu.querySelector<HTMLElement>('.menu-world')!;
+    const home = menu.querySelector<HTMLElement>('[data-menu-panel="home"]')!;
+    const options = menu.querySelector<HTMLElement>('[data-menu-panel="options"]')!;
+    const style = getComputedStyle(world);
+    return {
+      transitioning: menu.dataset.menuTransitioning,
+      homeInert: home.hasAttribute('inert'),
+      optionsInert: options.hasAttribute('inert'),
+      duration: style.transitionDuration,
+      easing: style.transitionTimingFunction,
+    };
+  });
+  expect(transitionStart).toEqual({
+    transitioning: 'true',
+    homeInert: true,
+    optionsInert: true,
+    duration: '0.65s',
+    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  });
+  await waitForMenuView(page, 'options');
+  await expect(optionsPanel).not.toHaveAttribute('inert', '');
+  await expect(optionsPanel.locator('[data-action="menu-home"]')).toBeFocused();
+  await expect(originStation).toHaveAttribute('inert', '');
+  await expect(originStation).toHaveAttribute('aria-hidden', 'true');
+  await expect(gameUi).toHaveAttribute('inert', '');
+  await expect(gameUi).toHaveAttribute('aria-hidden', 'true');
+  await expect(optionsPanel.getByText('CONFIGURAÇÕES', { exact: true })).toHaveCount(0);
+  await expect(audioTab).toHaveText('Áudio e vídeo');
+  await expect(audioTab).toHaveAttribute('aria-pressed', 'true');
+  await expect(controlsTab).toHaveAttribute('aria-pressed', 'false');
+  await expect(audioPanel).not.toHaveClass(/is-hidden/);
+  await expect(audioPanel).not.toHaveAttribute('inert', '');
+  await expect(controlsPanel).toHaveClass(/is-hidden/);
+  await expect(controlsPanel).toHaveAttribute('inert', '');
+
+  const initialOptionsPresentation = await optionsPanel.evaluate((panel) => {
+    const audio = panel.querySelector<HTMLElement>('[data-options-tab="audio-video"]')!;
+    const controls = panel.querySelector<HTMLElement>('[data-options-tab="controls"]')!;
+    const rows = [...panel.querySelectorAll<HTMLElement>('.menu-option-row')];
+    return {
+      activeBackground: getComputedStyle(audio).backgroundColor,
+      activeColor: getComputedStyle(audio).color,
+      inactiveBackground: getComputedStyle(controls).backgroundColor,
+      inactiveColor: getComputedStyle(controls).color,
+      separators: rows.map((row) => getComputedStyle(row).borderBottomWidth),
+      subtexts: panel.querySelectorAll('.menu-option-row > div > span').length,
+    };
+  });
+  expect(initialOptionsPresentation).toEqual({
+    activeBackground: 'rgb(255, 121, 45)',
+    activeColor: 'rgb(255, 255, 255)',
+    inactiveBackground: 'rgb(255, 255, 255)',
+    inactiveColor: 'rgb(36, 71, 103)',
+    separators: ['0px', '0px', '0px'],
+    subtexts: 0,
+  });
+
+  const optionTypeSizes = await optionsPanel.evaluate((panel) => ({
+    category: Number.parseFloat(
+      getComputedStyle(panel.querySelector<HTMLElement>('[data-options-tab="audio-video"]')!)
+        .fontSize,
+    ),
+    setting: Number.parseFloat(
+      getComputedStyle(panel.querySelector<HTMLElement>('.menu-option-row strong')!).fontSize,
+    ),
+  }));
+  expect(optionTypeSizes.category).toBeGreaterThanOrEqual(31);
+  expect(optionTypeSizes.setting).toBeGreaterThanOrEqual(18);
+
+  const statusBeforeCategoryShortcut = (await debugState(page)).status;
+  await controlsTab.focus();
+  await page.keyboard.press('Space');
+  await expect(optionsPanel).toHaveAttribute('data-options-category', 'controls');
+  expect((await debugState(page)).status).toBe(statusBeforeCategoryShortcut);
+  await expect(audioTab).toHaveAttribute('aria-pressed', 'false');
+  await expect(controlsTab).toHaveAttribute('aria-pressed', 'true');
+  await expect(controlsTab).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await expect(audioTab).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(audioTab).toHaveCSS('color', 'rgb(36, 71, 103)');
+  await expect(audioPanel).toHaveClass(/is-hidden/);
+  await expect(audioPanel).toHaveAttribute('inert', '');
+  await expect(controlsPanel).not.toHaveClass(/is-hidden/);
+  await expect(controlsPanel).not.toHaveAttribute('inert', '');
+  await expect(controlsPanel.getByRole('heading', { name: 'Mouse' })).toBeVisible();
+  await expect(controlsPanel.getByRole('heading', { name: 'Teclado' })).toBeVisible();
+  await expect(controlsPanel).toContainText('Selecionar ou posicionar');
+  await expect(controlsPanel).toContainText('Mover peça ou câmera');
+  await expect(controlsPanel).toContainText('Iniciar ou pausar');
+  await expect(controlsPanel).toContainText('Inverter');
+  await expect(controlsPanel).not.toContainText('Inverter esteira');
+  await expect(controlsPanel).toContainText('Ctrl+Z / Ctrl+Y');
+
+  await audioTab.click();
+  await expect(optionsPanel).toHaveAttribute('data-options-category', 'audio-video');
+
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press('Tab');
+    const focusState = await optionsPanel.evaluate((panel) => {
+      const active = document.activeElement as HTMLElement;
+      return {
+        allowed: active === document.body || panel.contains(active),
+        action: active.dataset.action ?? '',
+        id: active.id,
+      };
+    });
+    expect(focusState.allowed).toBe(true);
+    expect(focusState.action).not.toBe('pause-menu');
+    expect(focusState.id).not.toBe('admin-toggle');
+  }
+
+  const stationBounds = await optionsPanel.boundingBox();
+  expect(stationBounds?.x).toBeCloseTo(0, 1);
+  expect(stationBounds?.y).toBeCloseTo(0, 1);
+  expect(stationBounds?.width).toBeCloseTo(page.viewportSize()?.width ?? 0, 1);
+  expect(stationBounds?.height).toBeCloseTo(page.viewportSize()?.height ?? 0, 1);
+
+  const sound = optionsPanel.locator('[data-action="mute"]');
+  await expect(optionsPanel.locator('[data-sound-state]')).toHaveText('Ligado');
+  await sound.click();
+  await expect(optionsPanel.locator('[data-sound-state]')).toHaveText('Desligado');
+  await expect(page.locator('#pause-modal [data-action="mute"]')).toHaveAttribute(
+    'aria-label',
+    'Ativar som',
+  );
+  await expect
+    .poll(() =>
+      page.evaluate((key) => {
+        const stored = localStorage.getItem(key);
+        return stored ? JSON.parse(stored).settings.muted : undefined;
+      }, STORAGE_KEY),
+    )
+    .toBe(true);
+  await sound.click();
+  await expect(optionsPanel.locator('[data-sound-state]')).toHaveText('Ligado');
+  await expect(page.locator('#pause-modal [data-action="mute"]')).toHaveAttribute(
+    'aria-label',
+    'Silenciar',
+  );
+
   const volume = page.locator('[data-volume]');
   await volume.evaluate((input) => {
     (input as HTMLInputElement).value = '42';
@@ -195,8 +356,36 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
     )
     .toBe(0.42);
 
+  await controlsTab.click();
+  await expect(optionsPanel).toHaveAttribute('data-options-category', 'controls');
+
+  const returnStart = await page.evaluate(() => {
+    document
+      .querySelector<HTMLButtonElement>('[data-menu-panel="options"] [data-action="menu-home"]')
+      ?.click();
+    const menu = document.querySelector<HTMLElement>('#menu-screen')!;
+    return {
+      transitioning: menu.dataset.menuTransitioning,
+      homeInert: menu.querySelector<HTMLElement>('[data-menu-panel="home"]')!.hasAttribute('inert'),
+      optionsInert: menu
+        .querySelector<HTMLElement>('[data-menu-panel="options"]')!
+        .hasAttribute('inert'),
+    };
+  });
+  expect(returnStart).toEqual({ transitioning: 'true', homeInert: true, optionsInert: true });
+  await waitForMenuView(page, 'home');
+  await expect(homePanel).not.toHaveAttribute('inert', '');
+  await expect(originStation).not.toHaveAttribute('inert', '');
+  await expect(originStation).toHaveAttribute('aria-hidden', 'false');
+  await expect(page.locator('[data-action="menu-options"]')).toBeFocused();
+
+  await page.locator('[data-action="menu-options"]').click();
+  await waitForMenuView(page, 'options');
+  await expect(optionsPanel).toHaveAttribute('data-options-category', 'audio-video');
+  await expect(audioTab).toHaveAttribute('aria-pressed', 'true');
+  await expect(audioPanel).not.toHaveAttribute('inert', '');
   await optionsPanel.locator('[data-action="menu-home"]').click();
-  await expect(homePanel).not.toHaveClass(/is-hidden/);
+  await waitForMenuView(page, 'home');
 
   await openPlayMenu(page);
   const contractCards = page.locator('#contract-list .contract-card');
@@ -237,7 +426,135 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   expect(consoleErrors).toEqual([]);
 });
 
+test('opções alternam tela cheia, modo janela e informam falhas', async ({ page }) => {
+  await openApp(page);
+  await page.locator('[data-action="menu-options"]').click();
+  await waitForMenuView(page, 'options');
+
+  const options = page.locator('[data-menu-panel="options"]');
+  const fullscreenButton = options.locator('[data-action="fullscreen"]');
+  const optionsTitle = options.locator('[data-fullscreen-title]');
+  const pauseTitle = page.locator('#pause-modal [data-fullscreen-title]');
+
+  await expect(optionsTitle).toHaveText('Tela cheia');
+  await expect(fullscreenButton).toHaveAttribute('aria-label', 'Entrar em tela cheia');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: document.documentElement,
+    });
+    document.dispatchEvent(new Event('fullscreenchange'));
+  });
+  await expect(optionsTitle).toHaveText('Modo janela');
+  await expect(pauseTitle).toHaveText('Modo janela');
+  await expect(fullscreenButton).toHaveAttribute('aria-label', 'Sair da tela cheia');
+  await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(options.locator('[data-fullscreen-state]')).toHaveText('Restaurar');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: null,
+    });
+    document.dispatchEvent(new Event('fullscreenchange'));
+  });
+  await expect(optionsTitle).toHaveText('Tela cheia');
+  await expect(pauseTitle).toHaveText('Tela cheia');
+  await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'false');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document.documentElement, 'requestFullscreen', {
+      configurable: true,
+      value: () => Promise.reject(new Error('fullscreen unavailable')),
+    });
+  });
+  await fullscreenButton.click();
+  await expect(page.locator('#toast')).toHaveText('Não foi possível alternar a tela cheia.');
+  await expect(page.locator('#toast')).toBeVisible();
+  await expect(optionsTitle).toHaveText('Tela cheia');
+});
+
+test('opções respeitam movimento reduzido e mantêm a demonstração parada', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await openApp(page);
+
+  const menu = page.locator('#menu-screen');
+  const demo = page.locator('#menu-motion-demo');
+  const options = page.locator('[data-menu-panel="options"]');
+  await expect(demo).toHaveAttribute('data-active', 'false');
+
+  await page.locator('[data-action="menu-options"]').click();
+  await waitForMenuView(page, 'options');
+  await expect(menu).not.toHaveAttribute('data-menu-transitioning', 'true');
+  await expect(options.locator('[data-action="menu-home"]')).toBeFocused();
+
+  await options.locator('[data-action="menu-home"]').click();
+  await waitForMenuView(page, 'home');
+  await expect(menu).not.toHaveAttribute('data-menu-transitioning', 'true');
+  await expect(demo).toHaveAttribute('data-active', 'false');
+  await expect(page.locator('[data-action="menu-options"]')).toBeFocused();
+});
+
+test('opções ocupam o viewport sem overflow nas resoluções suportadas', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 640 });
+  await openApp(page);
+  await page.locator('[data-action="menu-options"]').click();
+  await waitForMenuView(page, 'options');
+
+  const options = page.locator('[data-menu-panel="options"]');
+  const audioTab = options.locator('[data-options-tab="audio-video"]');
+  const controlsTab = options.locator('[data-options-tab="controls"]');
+  const audioPanel = options.locator('[data-options-panel="audio-video"]');
+  const controlsPanel = options.locator('[data-options-panel="controls"]');
+  for (const viewport of [
+    { width: 1024, height: 640 },
+    { width: 1280, height: 720 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const bounds = await options.boundingBox();
+    expect(bounds?.x).toBeCloseTo(0, 1);
+    expect(bounds?.y).toBeCloseTo(0, 1);
+    expect(bounds?.width).toBeCloseTo(viewport.width, 1);
+    expect(bounds?.height).toBeCloseTo(viewport.height, 1);
+    await expect(options.locator('.options-back-button')).toBeInViewport();
+    await expect(options.locator('.options-layout')).toBeInViewport();
+    await audioTab.click();
+    await expect(audioPanel).toBeInViewport();
+    await controlsTab.click();
+    await expect(controlsPanel).toBeInViewport();
+    await expect(controlsPanel.locator('.control-device-card')).toHaveCount(2);
+    const menuClipState = await page.locator('#menu-screen').evaluate((menu) => ({
+      overflow: getComputedStyle(menu).overflow,
+      scrollLeft: menu.scrollLeft,
+      scrollTop: menu.scrollTop,
+    }));
+    expect(menuClipState).toEqual({ overflow: 'clip', scrollLeft: 0, scrollTop: 0 });
+    const contentFits = await options.evaluate((station) => {
+      const viewport = station.getBoundingClientRect();
+      const layout = station.querySelector<HTMLElement>('.options-layout')!.getBoundingClientRect();
+      const controls = station
+        .querySelector<HTMLElement>('[data-options-panel="controls"]')!
+        .getBoundingClientRect();
+      return [layout, controls].every(
+        (bounds) =>
+          bounds.left >= viewport.left - 1 &&
+          bounds.top >= viewport.top - 1 &&
+          bounds.right <= viewport.right + 1 &&
+          bounds.bottom <= viewport.bottom + 1,
+      );
+    });
+    expect(contentFits).toBe(true);
+    const overflows = await page.evaluate(
+      () =>
+        document.body.scrollWidth > document.documentElement.clientWidth ||
+        document.body.scrollHeight > document.documentElement.clientHeight,
+    );
+    expect(overflows).toBe(false);
+  }
+});
+
 test('demonstração do menu usa física lenta e descarta caixas fora da tela', async ({ page }) => {
+  test.setTimeout(60_000);
   await openApp(page);
 
   const demo = page.locator('#menu-motion-demo');
@@ -269,6 +586,36 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
   await expect(demo).toHaveAttribute('data-last-offscreen-side', 'right');
   expect(Number((await demo.getAttribute('data-last-offscreen-x')) ?? 0)).toBeGreaterThan(312);
   expect(Number((await demo.getAttribute('data-active-boxes')) ?? 0)).toBeLessThanOrEqual(1);
+
+  const pausedForOptions = await page.evaluate(() => {
+    document.querySelector<HTMLButtonElement>('[data-action="menu-options"]')?.click();
+    const menu = document.querySelector<HTMLElement>('#menu-screen')!;
+    const demo = document.querySelector<HTMLElement>('#menu-motion-demo')!;
+    return {
+      transitioning: menu.dataset.menuTransitioning,
+      active: demo.dataset.active,
+      boxes: demo.dataset.activeBoxes,
+      steps: Number(demo.dataset.simulationSteps ?? 0),
+    };
+  });
+  expect(pausedForOptions).toMatchObject({ transitioning: 'true', active: 'false', boxes: '0' });
+  const pausedSteps = pausedForOptions.steps;
+  await page.waitForTimeout(180);
+  expect(Number((await demo.getAttribute('data-simulation-steps')) ?? 0)).toBe(pausedSteps);
+  await waitForMenuView(page, 'options');
+
+  const pausedForReturn = await page.evaluate(() => {
+    document
+      .querySelector<HTMLButtonElement>('[data-menu-panel="options"] [data-action="menu-home"]')
+      ?.click();
+    return document.querySelector<HTMLElement>('#menu-motion-demo')?.dataset.active;
+  });
+  expect(pausedForReturn).toBe('false');
+  await waitForMenuView(page, 'home');
+  await expect(demo).toHaveAttribute('data-active', 'true');
+  await expect
+    .poll(async () => Number((await demo.getAttribute('data-active-boxes')) ?? 0))
+    .toBe(1);
 
   await page.locator('[data-action="menu-play"]').click();
   await expect(demo).toHaveAttribute('data-active', 'false');
@@ -757,7 +1104,7 @@ test('menu de pausa interrompe a linha e oferece salvar e configurações', asyn
   await expect.poll(async () => (await debugState(page)).status).toBe('paused');
 
   const sound = page.locator('#pause-modal [data-action="mute"]');
-  await expect(page.locator('[data-action="fullscreen"]')).toBeVisible();
+  await expect(page.locator('#pause-modal [data-action="fullscreen"]')).toBeVisible();
   await expect(sound).toHaveAttribute('aria-label', 'Silenciar');
   await sound.click();
   await expect(sound).toHaveAttribute('aria-label', 'Ativar som');

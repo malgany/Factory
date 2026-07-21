@@ -1551,34 +1551,52 @@ export class FactoryScene extends Phaser.Scene {
     this.input.on(Phaser.Input.Events.POINTER_WHEEL, this.handleWheel, this);
 
     this.input.keyboard?.on('keydown-SPACE', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       event.preventDefault();
       this.toggleSimulation();
     });
-    this.input.keyboard?.on('keydown-DELETE', () => this.deleteSelected());
+    this.input.keyboard?.on('keydown-DELETE', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
+      this.deleteSelected();
+    });
     this.input.keyboard?.on('keydown-BACKSPACE', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       event.preventDefault();
       this.deleteSelected();
     });
-    this.input.keyboard?.on('keydown-Q', () => this.rotateSelectedBy(-this.rotationStep()));
-    this.input.keyboard?.on('keydown-E', () => this.rotateSelectedBy(this.rotationStep()));
-    this.input.keyboard?.on('keydown-R', () => this.reverseSelected());
+    this.input.keyboard?.on('keydown-Q', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
+      this.rotateSelectedBy(-this.rotationStep());
+    });
+    this.input.keyboard?.on('keydown-E', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
+      this.rotateSelectedBy(this.rotationStep());
+    });
+    this.input.keyboard?.on('keydown-R', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
+      this.reverseSelected();
+    });
     this.input.keyboard?.on('keydown-C', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       this.copySelected();
     });
     this.input.keyboard?.on('keydown-X', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       this.cutSelected();
     });
     this.input.keyboard?.on('keydown-Z', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       if (event.shiftKey) this.redo();
       else this.undo();
     });
     this.input.keyboard?.on('keydown-Y', (event: KeyboardEvent) => {
+      if (this.shouldIgnoreGameplayShortcut(event)) return;
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       this.redo();
@@ -1586,6 +1604,25 @@ export class FactoryScene extends Phaser.Scene {
 
     this.contextMenuHandler = (event: MouseEvent) => event.preventDefault();
     this.game.canvas.addEventListener('contextmenu', this.contextMenuHandler);
+  }
+
+  private shouldIgnoreGameplayShortcut(event: KeyboardEvent): boolean {
+    if (document.querySelector('#menu-screen:not(.is-hidden), .modal-layer:not(.is-hidden)')) {
+      return true;
+    }
+
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return false;
+    if (
+      target.isContentEditable ||
+      target.matches('input, textarea, select, [role="textbox"], [role="slider"]')
+    ) {
+      return true;
+    }
+
+    return (
+      event.code === 'Space' && Boolean(target.closest('button, summary, a[href], [role="button"]'))
+    );
   }
 
   private handleToolDrag(payload: {
@@ -2849,11 +2886,28 @@ export class FactoryScene extends Phaser.Scene {
     graphics.fillCircle(handle.x, handle.y, 11 / logicalZoom);
     graphics.lineStyle(3 / logicalZoom, color, 1);
     graphics.strokeCircle(handle.x, handle.y, 11 / logicalZoom);
-    const arrowA = localToWorld(handle, machine.angle, -5 / logicalZoom, 1);
-    const arrowB = localToWorld(handle, machine.angle, 0, -5 / logicalZoom);
-    const arrowC = localToWorld(handle, machine.angle, 5 / logicalZoom, 1);
-    graphics.lineBetween(arrowA.x, arrowA.y, arrowB.x, arrowB.y);
-    graphics.lineBetween(arrowB.x, arrowB.y, arrowC.x, arrowC.y);
+    const glyphRadius = 5 / logicalZoom;
+    const glyphStart = Phaser.Math.DegToRad(-45);
+    const glyphEnd = Phaser.Math.DegToRad(255);
+    graphics.beginPath();
+    graphics.arc(handle.x, handle.y, glyphRadius, glyphStart, glyphEnd, false);
+    graphics.strokePath();
+    const arrowTip = {
+      x: handle.x + Math.cos(glyphEnd) * glyphRadius,
+      y: handle.y + Math.sin(glyphEnd) * glyphRadius,
+    };
+    graphics.lineBetween(
+      arrowTip.x,
+      arrowTip.y,
+      arrowTip.x - 4.5 / logicalZoom,
+      arrowTip.y - 1 / logicalZoom,
+    );
+    graphics.lineBetween(
+      arrowTip.x,
+      arrowTip.y,
+      arrowTip.x - 1 / logicalZoom,
+      arrowTip.y + 4.5 / logicalZoom,
+    );
   }
 
   private drawObstacleSelection(

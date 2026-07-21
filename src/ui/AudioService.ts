@@ -1,18 +1,12 @@
 export type AudioCue =
-  | 'hover'
-  | 'click'
-  | 'spawn'
-  | 'place'
-  | 'bounce'
-  | 'deliver'
-  | 'error'
-  | 'success'
-  | 'win';
+  'hover' | 'click' | 'spawn' | 'place' | 'bounce' | 'deliver' | 'error' | 'success' | 'win';
 
 interface AudioSettings {
   muted?: boolean;
   volume?: number;
 }
+
+const OUTPUT_GAIN_MULTIPLIER = 4;
 
 /**
  * Tiny dependency-free synthesizer for interface and simulation feedback.
@@ -127,7 +121,7 @@ export class AudioService {
 
   private syncMaster(): void {
     if (!this.context || !this.master) return;
-    const gain = this.muted ? 0 : this.volume;
+    const gain = this.muted ? 0 : this.volume * OUTPUT_GAIN_MULTIPLIER;
     this.master.gain.cancelScheduledValues(this.context.currentTime);
     this.master.gain.setTargetAtTime(gain, this.context.currentTime, 0.012);
   }

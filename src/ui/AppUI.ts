@@ -35,6 +35,7 @@ export interface AdminEditorMessage {
 
 type Unsubscribe = () => void;
 type MenuView = 'home' | 'play' | 'options';
+type OptionsCategory = 'audio-video' | 'controls';
 type IconName =
   | MachineType
   | 'play'
@@ -50,6 +51,10 @@ type IconName =
   | 'sound'
   | 'muted'
   | 'fullscreen'
+  | 'windowed'
+  | 'back'
+  | 'mouse'
+  | 'keyboard'
   | 'grid'
   | 'clear'
   | 'lock'
@@ -74,6 +79,8 @@ const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
 const MINIMUM_LOADING_DURATION_MS = 360;
+const MENU_CAMERA_DURATION_MS = 650;
+const MENU_CAMERA_FALLBACK_MS = MENU_CAMERA_DURATION_MS + 100;
 
 export class AppUI {
   readonly gameContainerId = 'game-container';
@@ -102,6 +109,7 @@ export class AppUI {
   private unsubs: Unsubscribe[] = [];
   private toastTimer?: number;
   private menuDemo?: MenuDemoController;
+  private menuTransitionCleanup?: () => void;
 
   constructor(options: AppUIOptions) {
     this.root = options.root;
@@ -114,6 +122,7 @@ export class AppUI {
     this.audio = new AudioService(options.progress.settings);
 
     this.renderShell();
+    this.root.classList.add('is-menu-open');
     this.menuDemo = createMenuDemo(this.element('.menu-motion-demo'));
     this.menuDemo.setActive(true);
     this.setGameReady(false);
@@ -121,6 +130,7 @@ export class AppUI {
     this.bindEvents();
     this.renderMenuCards();
     this.updateSoundControls();
+    this.updateFullscreenControls();
   }
 
   updateProgress(progress: ProgressSave): void {
@@ -206,55 +216,146 @@ export class AppUI {
     this.closePauseMenu();
     this.setMenuView(view);
     this.root.classList.add('is-menu-open');
+    this.updateGameUiAvailability();
   }
 
   hideMenu(): void {
+    this.cancelMenuTransition();
     this.menuDemo?.setActive(false);
-    this.element('#menu-screen').classList.add('is-hidden');
+    const menu = this.element('#menu-screen');
+    menu.classList.add('is-hidden');
+    delete menu.dataset.menuTransitioning;
     this.root.classList.remove('is-menu-open');
+    this.updateGameUiAvailability();
   }
 
   private setMenuView(view: MenuView): void {
     const menu = this.element('#menu-screen');
+    const previousView = (menu.dataset.menuView as MenuView | undefined) ?? 'home';
+    if (view === 'options') this.setOptionsCategory('audio-video');
+    const cameraMove =
+      (previousView === 'home' && view === 'options') ||
+      (previousView === 'options' && view === 'home');
+    const shouldAnimate =
+      cameraMove &&
+      !menu.classList.contains('is-hidden') &&
+      !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    this.cancelMenuTransition();
+    if (view !== 'home' || cameraMove) this.menuDemo?.setActive(false);
+
+    if (!shouldAnimate) {
+      menu.dataset.menuView = view;
+      this.completeMenuView(view, previousView);
+      return;
+    }
+
+    const world = this.element('.menu-world');
+    menu.dataset.menuTransitioning = 'true';
+    this.updateMenuPanels(view, true);
+    world.getBoundingClientRect();
+
+    let finished = false;
+    const cleanup = () => {
+      world.removeEventListener('transitionend', handleTransitionEnd);
+      window.clearTimeout(fallbackTimer);
+      if (this.menuTransitionCleanup === cleanup) this.menuTransitionCleanup = undefined;
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      this.completeMenuView(view, previousView);
+    };
+    const handleTransitionEnd = (event: TransitionEvent) => {
+      if (event.target === world && event.propertyName === 'transform') finish();
+    };
+
+    world.addEventListener('transitionend', handleTransitionEnd);
+    const fallbackTimer = window.setTimeout(finish, MENU_CAMERA_FALLBACK_MS);
+    this.menuTransitionCleanup = cleanup;
     menu.dataset.menuView = view;
-    this.menuDemo?.setActive(view === 'home' && !menu.classList.contains('is-hidden'));
+  }
+
+  private completeMenuView(view: MenuView, previousView: MenuView): void {
+    const menu = this.element('#menu-screen');
+    delete menu.dataset.menuTransitioning;
+    this.updateMenuPanels(view, false);
+    if (view === 'home' && !menu.classList.contains('is-hidden')) this.menuDemo?.setActive(true);
+
+    window.requestAnimationFrame(() => this.focusMenuView(view, previousView));
+  }
+
+  private updateMenuPanels(view: MenuView, transitioning: boolean): void {
+    const menu = this.element('#menu-screen');
+    const originStation = menu.querySelector<HTMLElement>('.menu-origin-station');
+    const originUnavailable = transitioning || view === 'options';
+    originStation?.toggleAttribute('inert', originUnavailable);
+    originStation?.setAttribute('aria-hidden', String(originUnavailable));
+
     menu.querySelectorAll<HTMLElement>('[data-menu-panel]').forEach((panel) => {
-      const hidden = panel.dataset.menuPanel !== view;
-      panel.classList.toggle('is-hidden', hidden);
-      panel.setAttribute('aria-hidden', String(hidden));
-    });
-
-    window.requestAnimationFrame(() => {
-      if (view === 'play' && !this.adminEnabled) {
-        const dots = [...this.root.querySelectorAll<HTMLButtonElement>('[data-contract-dot]')];
-        const selectedIndex = Math.max(
-          0,
-          dots.findIndex((dot) => dot.getAttribute('aria-current') === 'true'),
-        );
-        this.selectMenuContract(selectedIndex, true, 'auto');
-        const currentCard = this.root.querySelector<HTMLButtonElement>(
-          '#contract-list .stage-contract-card.is-current',
-        );
-        const focusTarget =
-          currentCard && !currentCard.disabled
-            ? currentCard
-            : (dots[selectedIndex] ??
-              this.root.querySelector<HTMLButtonElement>('.campaign-back-button'));
-        focusTarget?.focus({ preventScroll: true });
-        return;
-      }
-
-      const focusTarget =
-        view === 'home'
-          ? this.root.querySelector<HTMLButtonElement>('[data-action="menu-play"]')
-          : this.root.querySelector<HTMLButtonElement>(
-              `[data-menu-panel="${view}"] [data-action="menu-home"]`,
-            );
-      focusTarget?.focus({ preventScroll: true });
+      const panelView = panel.dataset.menuPanel as MenuView;
+      const visuallyHidden =
+        panelView === 'play' ? view !== 'play' : panelView === 'home' && view === 'play';
+      const unavailable = transitioning || panelView !== view;
+      panel.classList.toggle('is-hidden', visuallyHidden);
+      panel.toggleAttribute('inert', unavailable);
+      panel.setAttribute('aria-hidden', String(unavailable));
     });
   }
 
+  private setOptionsCategory(category: OptionsCategory): void {
+    const options = this.element<HTMLElement>('[data-menu-panel="options"]');
+    options.dataset.optionsCategory = category;
+    options.querySelectorAll<HTMLButtonElement>('[data-options-tab]').forEach((button) => {
+      const active = button.dataset.optionsTab === category;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    options.querySelectorAll<HTMLElement>('[data-options-panel]').forEach((panel) => {
+      const active = panel.dataset.optionsPanel === category;
+      panel.classList.toggle('is-hidden', !active);
+      panel.toggleAttribute('inert', !active);
+      panel.setAttribute('aria-hidden', String(!active));
+    });
+  }
+
+  private focusMenuView(view: MenuView, previousView: MenuView): void {
+    if (view === 'play' && !this.adminEnabled) {
+      const dots = [...this.root.querySelectorAll<HTMLButtonElement>('[data-contract-dot]')];
+      const selectedIndex = Math.max(
+        0,
+        dots.findIndex((dot) => dot.getAttribute('aria-current') === 'true'),
+      );
+      this.selectMenuContract(selectedIndex, true, 'auto');
+      const currentCard = this.root.querySelector<HTMLButtonElement>(
+        '#contract-list .stage-contract-card.is-current',
+      );
+      const focusTarget =
+        currentCard && !currentCard.disabled
+          ? currentCard
+          : (dots[selectedIndex] ??
+            this.root.querySelector<HTMLButtonElement>('.campaign-back-button'));
+      focusTarget?.focus({ preventScroll: true });
+      return;
+    }
+
+    const focusSelector =
+      view === 'home'
+        ? previousView === 'options'
+          ? '[data-action="menu-options"]'
+          : '[data-action="menu-play"]'
+        : `[data-menu-panel="${view}"] [data-action="menu-home"]`;
+    this.root.querySelector<HTMLButtonElement>(focusSelector)?.focus({ preventScroll: true });
+  }
+
+  private cancelMenuTransition(): void {
+    this.menuTransitionCleanup?.();
+    this.menuTransitionCleanup = undefined;
+  }
+
   destroy(): void {
+    this.cancelMenuTransition();
     this.menuDemo?.destroy();
     this.menuDemo = undefined;
     this.domEvents.abort();
@@ -384,80 +485,132 @@ export class AppUI {
         </section>
 
         <section id="menu-screen" class="menu-screen" data-menu-view="home" aria-labelledby="menu-title">
-          <div class="menu-backdrop"></div>
-          <div class="menu-content">
-            <header class="menu-intro">
-              <h1 id="menu-title">Factory<span aria-hidden="true">.</span></h1>
-            </header>
+          <div class="menu-world">
+            <div class="menu-backdrop"></div>
+            <div class="menu-station menu-origin-station" aria-hidden="false">
+              <div class="menu-content">
+                <header class="menu-intro">
+                  <h1 id="menu-title">Factory<span aria-hidden="true">.</span></h1>
+                </header>
 
-            <section class="menu-view menu-home-view" data-menu-panel="home" aria-label="Menu principal">
-              <nav class="main-menu-nav" aria-label="Opções principais">
-                <button class="main-menu-action" data-action="menu-play" type="button">Jogar</button>
-                <button class="main-menu-action" data-action="menu-options" type="button">Opções</button>
-                <button class="main-menu-action" data-action="menu-exit" type="button">Sair</button>
-              </nav>
-            </section>
+                <section class="menu-view menu-home-view" data-menu-panel="home" aria-label="Menu principal" aria-hidden="false">
+                  <nav class="main-menu-nav" aria-label="Opções principais">
+                    <button class="main-menu-action" data-action="menu-play" type="button">Jogar</button>
+                    <button class="main-menu-action" data-action="menu-options" type="button">Opções</button>
+                    <button class="main-menu-action" data-action="menu-exit" type="button">Sair</button>
+                  </nav>
+                </section>
 
-            <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-labelledby="play-menu-title" aria-hidden="true">
-              <button class="menu-back-button campaign-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal"><span aria-hidden="true">←</span><span>Voltar</span></button>
-              <header class="campaign-heading">
-                <span class="eyebrow">JOGAR</span>
-                <h2 id="play-menu-title">Escolha uma fase</h2>
-                <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
-              </header>
-              <div class="contract-browser campaign-browser">
-                <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
-                <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
-                <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
-                <div class="campaign-actions">
-                  <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
-                    <span class="create-contract-mark">${icon('plus')}</span>
-                    <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
-                    <span class="card-arrow" aria-hidden="true">→</span>
+                <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-labelledby="play-menu-title" aria-hidden="true" inert>
+                  <button class="menu-back-button campaign-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal"><span aria-hidden="true">←</span><span>Voltar</span></button>
+                  <header class="campaign-heading">
+                    <span class="eyebrow">JOGAR</span>
+                    <h2 id="play-menu-title">Escolha uma fase</h2>
+                    <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
+                  </header>
+                  <div class="contract-browser campaign-browser">
+                    <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
+                    <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
+                    <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
+                    <div class="campaign-actions">
+                      <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
+                        <span class="create-contract-mark">${icon('plus')}</span>
+                        <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
+                        <span class="card-arrow" aria-hidden="true">→</span>
+                      </button>
+                      <button class="sandbox-card" data-start-sandbox>
+                        <span class="sandbox-mark">∞</span>
+                        <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
+                        <span class="card-arrow" aria-hidden="true">→</span>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <div id="menu-motion-demo" class="menu-motion-demo" aria-hidden="true"></div>
+              </div>
+              <footer class="menu-footer">
+                <button id="admin-toggle" class="admin-toggle${this.adminAvailable ? '' : ' is-hidden'}" data-action="toggle-admin" type="button" aria-pressed="false">
+                  ${icon('settings')} <span>Ativar admin</span>
+                </button>
+              </footer>
+            </div>
+
+            <section class="menu-view menu-options-view menu-station" data-menu-panel="options" data-options-category="audio-video" aria-label="Opções" aria-hidden="true" inert>
+              <button class="options-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal">
+                ${icon('back')}
+              </button>
+              <div class="options-layout">
+                <nav class="options-category-menu" aria-label="Categorias de opções">
+                  <button id="options-audio-video-tab" class="options-category-button is-active" data-action="options-audio-video" data-options-tab="audio-video" type="button" aria-controls="options-audio-video-panel" aria-pressed="true">
+                    Áudio e vídeo
                   </button>
-                  <button class="sandbox-card" data-start-sandbox>
-                    <span class="sandbox-mark">∞</span>
-                    <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
-                    <span class="card-arrow" aria-hidden="true">→</span>
+                  <button id="options-controls-tab" class="options-category-button" data-action="options-controls" data-options-tab="controls" type="button" aria-controls="options-controls-panel" aria-pressed="false">
+                    Controles
                   </button>
+                </nav>
+
+                <div class="options-content">
+                  <section id="options-audio-video-panel" class="options-panel menu-options-list" data-options-panel="audio-video" aria-labelledby="options-audio-video-tab" aria-hidden="false">
+                    <div class="menu-option-row">
+                      <div><strong>Som</strong></div>
+                      <button class="menu-sound-toggle" data-action="mute" type="button" aria-label="Silenciar" aria-pressed="false">
+                        <span class="menu-option-state" data-sound-state>Ligado</span>
+                        <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
+                      </button>
+                    </div>
+                    <label class="menu-option-row menu-volume-option">
+                      <div><strong>Volume</strong></div>
+                      <span class="menu-volume-control">
+                        <input data-volume type="range" min="0" max="100" value="${Math.round(this.progress.settings.volume * 100)}" aria-label="Volume dos efeitos" />
+                        <output data-volume-output>${Math.round(this.progress.settings.volume * 100)}%</output>
+                      </span>
+                    </label>
+                    <div class="menu-option-row">
+                      <div><strong data-fullscreen-title>Tela cheia</strong></div>
+                      <button class="menu-fullscreen-toggle" data-action="fullscreen" type="button" aria-label="Entrar em tela cheia" aria-pressed="false">
+                        <span class="menu-option-state" data-fullscreen-state>Ativar</span>
+                        <span data-fullscreen-icon>${icon('fullscreen')}</span>
+                      </button>
+                    </div>
+                  </section>
+
+                  <section id="options-controls-panel" class="options-panel controls-reference is-hidden" data-options-panel="controls" aria-labelledby="options-controls-tab" aria-hidden="true" inert>
+                    <div class="control-device-grid">
+                      <section class="control-device-card" aria-labelledby="mouse-controls-title">
+                        <header class="control-device-heading">
+                          <span class="control-device-icon">${icon('mouse')}</span>
+                          <h3 id="mouse-controls-title">Mouse</h3>
+                        </header>
+                        <ul class="control-help-list">
+                          <li><kbd>Esquerdo</kbd><span>Selecionar ou posicionar</span></li>
+                          <li><kbd>Arrastar</kbd><span>Mover peça ou câmera</span></li>
+                          <li><kbd>Alça circular</kbd><span>Girar peça</span></li>
+                          <li><kbd>Direito + arrastar</kbd><span>Selecionar uma área</span></li>
+                          <li><kbd>Roda</kbd><span>Aproximar ou afastar</span></li>
+                        </ul>
+                      </section>
+
+                      <section class="control-device-card" aria-labelledby="keyboard-controls-title">
+                        <header class="control-device-heading">
+                          <span class="control-device-icon control-keyboard-icon">${icon('keyboard')}</span>
+                          <h3 id="keyboard-controls-title">Teclado</h3>
+                        </header>
+                        <ul class="control-help-list">
+                          <li><kbd>Espaço</kbd><span>Iniciar ou pausar</span></li>
+                          <li><kbd>Q / E</kbd><span>Girar seleção</span></li>
+                          <li><kbd>R</kbd><span>Inverter</span></li>
+                          <li><kbd>Delete</kbd><span>Excluir seleção</span></li>
+                          <li><kbd>Ctrl+C / Ctrl+X</kbd><span>Copiar ou recortar</span></li>
+                          <li><kbd>Ctrl+Z / Ctrl+Y</kbd><span>Desfazer ou refazer</span></li>
+                        </ul>
+                      </section>
+                    </div>
+                  </section>
                 </div>
               </div>
             </section>
-
-            <section class="menu-view menu-options-view is-hidden" data-menu-panel="options" aria-labelledby="options-menu-title" aria-hidden="true">
-              <div class="options-panel menu-subpanel">
-                <div class="menu-view-heading">
-                  <button class="menu-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal">← <span>Voltar</span></button>
-                  <div class="section-heading">
-                    <div><span class="eyebrow">CONFIGURAÇÕES</span><h2 id="options-menu-title">Opções</h2></div>
-                  </div>
-                </div>
-                <div class="menu-options-list">
-                  <div class="menu-option-row">
-                    <div><strong>Som</strong><span>Ativar efeitos sonoros</span></div>
-                    <button class="menu-sound-toggle" data-action="mute" type="button" aria-label="Silenciar" aria-pressed="false">
-                      <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
-                    </button>
-                  </div>
-                  <label class="menu-option-row menu-volume-option">
-                    <div><strong>Volume</strong><span>Intensidade dos efeitos</span></div>
-                    <span class="menu-volume-control">
-                      <input data-volume type="range" min="0" max="100" value="${Math.round(this.progress.settings.volume * 100)}" aria-label="Volume dos efeitos" />
-                      <output data-volume-output>${Math.round(this.progress.settings.volume * 100)}%</output>
-                    </span>
-                  </label>
-                </div>
-                <p class="options-placeholder">Novas opções serão adicionadas aqui.</p>
-              </div>
-            </section>
-
-            <div id="menu-motion-demo" class="menu-motion-demo" aria-hidden="true"></div>
           </div>
-          <footer class="menu-footer">
-            <button id="admin-toggle" class="admin-toggle${this.adminAvailable ? '' : ' is-hidden'}" data-action="toggle-admin" type="button" aria-pressed="false">
-              ${icon('settings')} <span>Ativar admin</span>
-            </button>
-          </footer>
         </section>
 
         <div id="angle-indicator" class="angle-indicator is-hidden" aria-hidden="true">
@@ -484,9 +637,9 @@ export class AppUI {
               </button>
             </div>
             <div class="pause-setting">
-              <div><strong>Tela cheia</strong><span>Alternar visualização</span></div>
-              <button class="icon-button" data-action="fullscreen" type="button" aria-label="Alternar tela cheia" title="Tela cheia">
-                ${icon('fullscreen')}
+              <div><strong data-fullscreen-title>Tela cheia</strong><span data-fullscreen-description>Expandir visualização</span></div>
+              <button class="icon-button" data-action="fullscreen" type="button" aria-label="Entrar em tela cheia" title="Tela cheia" aria-pressed="false">
+                <span data-fullscreen-icon>${icon('fullscreen')}</span>
               </button>
             </div>
             <button class="soft-button pause-main-menu" data-action="menu" type="button">Menu principal</button>
@@ -615,6 +768,9 @@ export class AppUI {
     };
     window.addEventListener('beforeunload', preventDirtyUnload);
     this.unsubs.push(() => window.removeEventListener('beforeunload', preventDirtyUnload));
+    document.addEventListener('fullscreenchange', () => this.updateFullscreenControls(), {
+      signal: this.domEvents.signal,
+    });
 
     this.root.addEventListener(
       'input',
@@ -686,7 +842,7 @@ export class AppUI {
     const shell = this.element('.factory-app');
     const loading = this.element('#game-loading');
     shell.setAttribute('aria-busy', String(!ready));
-    this.element('#game-ui').toggleAttribute('inert', !ready);
+    this.updateGameUiAvailability();
     this.element('#menu-screen').toggleAttribute('inert', !ready);
     loading.classList.toggle('is-hidden', ready);
     loading.setAttribute('aria-hidden', String(ready));
@@ -708,6 +864,11 @@ export class AppUI {
 
   private handleAction(action: string): void {
     if (this.catalogSaving && this.catalogSavingContext === 'editor') return;
+    if (
+      this.element('#menu-screen').dataset.menuTransitioning === 'true' &&
+      (action === 'menu-home' || action === 'menu-options' || action === 'menu-play')
+    )
+      return;
 
     switch (action) {
       case 'menu-play':
@@ -718,6 +879,12 @@ export class AppUI {
         break;
       case 'menu-home':
         this.setMenuView('home');
+        break;
+      case 'options-audio-video':
+        this.setOptionsCategory('audio-video');
+        break;
+      case 'options-controls':
+        this.setOptionsCategory('controls');
         break;
       case 'menu-exit':
         break;
@@ -829,9 +996,19 @@ export class AppUI {
         break;
       }
       case 'fullscreen':
-        appEvents.emit('ui:fullscreen', undefined);
-        void this.onRequestFullscreen?.();
+        void this.toggleFullscreen();
         break;
+    }
+  }
+
+  private async toggleFullscreen(): Promise<void> {
+    appEvents.emit('ui:fullscreen', undefined);
+    if (!this.onRequestFullscreen) return;
+    try {
+      await this.onRequestFullscreen();
+    } catch {
+      this.updateFullscreenControls();
+      this.showToast('Não foi possível alternar a tela cheia.', 'danger');
     }
   }
 
@@ -1528,9 +1705,8 @@ export class AppUI {
     badge.classList.toggle('is-saving', saving);
 
     this.root.classList.toggle('is-catalog-saving', editorSaving);
-    this.element('#game-ui').toggleAttribute('inert', !this.gameReady || editorSaving);
+    this.updateGameUiAvailability();
     this.element(`#${this.gameContainerId}`).toggleAttribute('inert', editorSaving);
-    this.element('#game-ui').setAttribute('aria-busy', String(!this.gameReady || editorSaving));
     this.element('#editor-contract-form')
       .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
         'input, textarea, button',
@@ -1590,12 +1766,55 @@ export class AppUI {
       );
       button.classList.toggle('is-muted', muted);
     });
+    this.root.querySelectorAll<HTMLElement>('[data-sound-state]').forEach((state) => {
+      state.textContent = muted ? 'Desligado' : 'Ligado';
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-sound-description]').forEach((description) => {
+      description.textContent = muted ? 'Efeitos sonoros desligados' : 'Efeitos sonoros ligados';
+    });
     const volumeValue = Math.round(this.audio.currentVolume * 100);
     this.root.querySelectorAll<HTMLInputElement>('[data-volume]').forEach((volume) => {
       volume.value = String(volumeValue);
     });
     this.root.querySelectorAll<HTMLOutputElement>('[data-volume-output]').forEach((output) => {
       output.value = `${volumeValue}%`;
+    });
+  }
+
+  private updateGameUiAvailability(): void {
+    const gameUi = this.element('#game-ui');
+    const menuOpen = !this.element('#menu-screen').classList.contains('is-hidden');
+    const editorSaving = this.catalogSaving && this.catalogSavingContext === 'editor';
+    gameUi.toggleAttribute('inert', !this.gameReady || editorSaving || menuOpen);
+    gameUi.setAttribute('aria-hidden', String(menuOpen));
+    gameUi.setAttribute('aria-busy', String(!this.gameReady || editorSaving));
+  }
+
+  private updateFullscreenControls(): void {
+    const fullscreen = Boolean(document.fullscreenElement);
+    const title = fullscreen ? 'Modo janela' : 'Tela cheia';
+    const description = fullscreen ? 'Restaurar visualização' : 'Expandir visualização';
+    const action = fullscreen ? 'Sair da tela cheia' : 'Entrar em tela cheia';
+    const state = fullscreen ? 'Restaurar' : 'Ativar';
+
+    this.root
+      .querySelectorAll<HTMLButtonElement>('[data-action="fullscreen"]')
+      .forEach((button) => {
+        button.setAttribute('aria-label', action);
+        button.setAttribute('aria-pressed', String(fullscreen));
+        button.title = title;
+        button.classList.toggle('is-active', fullscreen);
+        const iconNode = button.querySelector<HTMLElement>('[data-fullscreen-icon]');
+        if (iconNode) iconNode.innerHTML = icon(fullscreen ? 'windowed' : 'fullscreen');
+      });
+    this.root.querySelectorAll<HTMLElement>('[data-fullscreen-title]').forEach((node) => {
+      node.textContent = title;
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-fullscreen-description]').forEach((node) => {
+      node.textContent = description;
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-fullscreen-state]').forEach((node) => {
+      node.textContent = state;
     });
   }
 
@@ -1739,6 +1958,11 @@ function icon(name: IconName): string {
     sound: '<path d="M4 10v4h4l5 4V6L8 10zM16 9a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/>',
     muted: '<path d="M4 10v4h4l5 4V6L8 10zM17 10l4 4m0-4-4 4"/>',
     fullscreen: '<path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/>',
+    windowed: '<path d="M9 4v5H4m11-5v5h5M9 20v-5H4m11 5v-5h5"/>',
+    back: '<path d="M20 12H4m7-7-7 7 7 7"/>',
+    mouse: '<rect x="7" y="2.5" width="10" height="19" rx="5"/><path d="M12 2.5v7M7 9.5h10"/>',
+    keyboard:
+      '<rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M5 8h1m2 0h1m2 0h1m2 0h1m2 0h2M5 11h1m2 0h1m2 0h1m2 0h1m2 0h2M5 14h3m2 0h8"/>',
     grid: '<rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16"/>',
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
