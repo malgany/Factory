@@ -481,13 +481,15 @@ test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({
   await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
 
-  await page.evaluate(() => {
+  const obstacleId = await page.evaluate(() => {
     const debug = window.__FACTORY_DEBUG__!;
+    const existingObstacleIds = new Set(debug.getObstacles().map(({ id }) => id));
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle could not be placed');
-    const obstacle = debug.getObstacles()[0];
+    const obstacle = debug.getObstacles().find(({ id }) => !existingObstacleIds.has(id));
     if (!obstacle || !debug.selectObstacle(obstacle.id)) {
       throw new Error('Obstacle could not be selected');
     }
+    return obstacle.id;
   });
 
   const canvas = page.locator('#game-container canvas');
@@ -495,8 +497,8 @@ test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({
   const camera = await page.evaluate(() => window.__FACTORY_DEBUG__!.getCamera());
   if (!bounds) throw new Error('Canvas has no bounds');
   const screenPoint = (worldX: number, worldY: number) => ({
-    x: bounds.x + (worldX - camera.scrollX) * camera.zoom,
-    y: bounds.y + (worldY - camera.scrollY) * camera.zoom,
+    x: bounds.x + bounds.width / 2 + (worldX - camera.centerX) * camera.zoom,
+    y: bounds.y + bounds.height / 2 + (worldY - camera.centerY) * camera.zoom,
   });
   const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
     await page.mouse.move(from.x, from.y);
@@ -511,7 +513,12 @@ test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({
     screenPoint(initialCenter.x + 86, initialCenter.y),
   );
   await expect
-    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]?.angle))
+    .poll(() =>
+      page.evaluate(
+        (id) => window.__FACTORY_DEBUG__!.getObstacles().find((obstacle) => obstacle.id === id)?.angle,
+        obstacleId,
+      ),
+    )
     .toBe(90);
 
   // At 90 degrees, the local right-side handle is visually below the obstacle.
@@ -520,22 +527,33 @@ test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({
     screenPoint(initialCenter.x, initialCenter.y + 96),
   );
   await expect
-    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]))
+    .poll(() =>
+      page.evaluate(
+        (id) => window.__FACTORY_DEBUG__!.getObstacles().find((obstacle) => obstacle.id === id),
+        obstacleId,
+      ),
+    )
     .toMatchObject({ gridX: 9.5, gridY: 6.5, columns: 3, rows: 2, angle: 90 });
 
   // The rotated bottom-right corner grows both axes while its opposite corner stays anchored.
   await drag(screenPoint(480, 432), screenPoint(432, 480));
   await expect
-    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]))
+    .poll(() =>
+      page.evaluate(
+        (id) => window.__FACTORY_DEBUG__!.getObstacles().find((obstacle) => obstacle.id === id),
+        obstacleId,
+      ),
+    )
     .toMatchObject({ gridX: 8.5, gridY: 6.5, columns: 4, rows: 3, angle: 90 });
 
-  const rejectedOverlap = await page.evaluate(() => {
+  const rejectedOverlap = await page.evaluate((selectedObstacleId) => {
     const debug = window.__FACTORY_DEBUG__!;
-    const first = debug.getObstacles()[0]!;
+    const first = debug.getObstacles().find(({ id }) => id === selectedObstacleId);
+    if (!first) throw new Error('First obstacle could not be found');
     if (!debug.placeObstacle(13, 6, 2, 2)) throw new Error('Second obstacle could not be placed');
     if (!debug.selectObstacle(first.id)) throw new Error('First obstacle could not be selected');
     return debug.resizeSelectedObstacle(8, 3);
-  });
+  }, obstacleId);
   expect(rejectedOverlap).toBe(false);
 });
 
@@ -551,9 +569,12 @@ test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e cont
 
   const ids = await page.evaluate(() => {
     const debug = window.__FACTORY_DEBUG__!;
+    const existingMachineIds = new Set(debug.getMachines().map(({ id }) => id));
     const existingStars = new Set(debug.getCollectibles().map(({ id }) => id));
     if (!debug.placeMachine('spring', 10, 10, 0)) throw new Error('Spring could not be placed');
-    const spring = debug.getMachines().find(({ type }) => type === 'spring');
+    const spring = debug
+      .getMachines()
+      .find(({ id, type }) => type === 'spring' && !existingMachineIds.has(id));
     if (!spring) throw new Error('Spring was not found');
 
     // The first star overlaps the rotation handle (the handle is two pixels below its center).
@@ -575,8 +596,8 @@ test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e cont
   const camera = await page.evaluate(() => window.__FACTORY_DEBUG__!.getCamera());
   if (!bounds) throw new Error('Canvas has no bounds');
   const screenPoint = (worldX: number, worldY: number) => ({
-    x: bounds.x + (worldX - camera.scrollX) * camera.zoom,
-    y: bounds.y + (worldY - camera.scrollY) * camera.zoom,
+    x: bounds.x + bounds.width / 2 + (worldX - camera.centerX) * camera.zoom,
+    y: bounds.y + bounds.height / 2 + (worldY - camera.centerY) * camera.zoom,
   });
   const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
     await page.mouse.move(from.x, from.y);

@@ -109,7 +109,7 @@ function expectSolved(
 }
 
 test('1-1 Linha de montagem possui solução e coleta a estrela', async ({ page }) => {
-  const layout = [5, 7, 9, 11].map((x, index) =>
+  const layout = [4.5, 6.5, 8.5, 10.5].map((x, index) =>
     conveyor(`solution-${index + 1}`, x, 6, 0),
   );
   const result = await runSolution(page, 'assembly-line', layout, 25);

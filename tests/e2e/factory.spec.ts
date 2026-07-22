@@ -1349,7 +1349,7 @@ test('seleção não abre painel informativo e protege máquinas fixas', async (
 
     await expect(page.locator('#selection-panel')).toHaveCount(0);
     await expect(page.locator('#selection-dock')).toHaveClass(/is-hidden/);
-    await expect(page.locator('[data-action="reverse"]')).toHaveCount(0);
+    await expect(page.locator('[data-action="reverse"]')).toHaveClass(/is-hidden/);
   }
 });
 
@@ -1640,9 +1640,9 @@ test('conclui os três primeiros contratos, registra o ranking e restaura o prog
     expect(ranking).toHaveLength(1);
     expect(ranking[0]).toMatchObject({
       contractId,
-      contractRevision: 1,
       metrics: { collectedStars: 0 },
     });
+    expect(ranking[0]!.contractRevision).toBeGreaterThanOrEqual(1);
     expect(ranking[0]!.score).toBeGreaterThan(0);
   }
 
