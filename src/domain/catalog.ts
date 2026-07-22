@@ -25,7 +25,13 @@ export const MIN_SPAWN_INTERVAL_SECONDS = 0.8;
 export const MAX_SPAWN_INTERVAL_SECONDS = 10;
 export const SPAWN_INTERVAL_STEP_SECONDS = 0.05;
 
-const MACHINE_TYPES: readonly MachineType[] = ['source', 'conveyor', 'receiver', 'spring'];
+const MACHINE_TYPES: readonly MachineType[] = [
+  'source',
+  'conveyor',
+  'tracked-conveyor',
+  'receiver',
+  'spring',
+];
 const CUSTOM_ID_PREFIX = 'custom-';
 const EMPTY_UPDATED_AT = new Date(0).toISOString();
 
@@ -262,7 +268,7 @@ export function createEmptyContractDraft(
     subtitle: 'Crie um novo desafio.',
     description: 'Monte o cenário e configure as ferramentas disponíveis.',
     grid: { columns: GRID_COLUMNS, rows: GRID_ROWS },
-    availableMachines: ['conveyor', 'spring'],
+    availableMachines: ['tracked-conveyor', 'spring'],
     fixedMachines: [],
     obstacles: [],
     collectibles: [],
@@ -400,17 +406,18 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     }
     entityIds.add(obstacle.id);
     if (
-      !Number.isInteger(obstacle.gridX) ||
-      !Number.isInteger(obstacle.gridY) ||
+      !isQuarterGrid(obstacle.gridX) ||
+      !isQuarterGrid(obstacle.gridY) ||
       !Number.isInteger(obstacle.columns) ||
       !Number.isInteger(obstacle.rows) ||
       obstacle.columns < 1 ||
-      obstacle.rows < 1
+      obstacle.rows < 1 ||
+      (obstacle.angle !== undefined && !Number.isFinite(obstacle.angle))
     ) {
       add(
         'invalid-obstacle',
         path,
-        'Bloqueadores devem ocupar células inteiras e medir pelo menos 1×1.',
+        'Bloqueadores devem respeitar a grade e medir pelo menos 1×1.',
       );
     }
     if (!obstacleWithinBoard(obstacle)) {
@@ -499,6 +506,7 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
     gridY: roundForCatalog(obstacle.gridY, 4),
     columns: roundForCatalog(obstacle.columns, 4),
     rows: roundForCatalog(obstacle.rows, 4),
+    angle: normalizeDegrees(obstacle.angle ?? 0),
   }));
   normalized.collectibles = normalized.collectibles.map((collectible) => ({
     ...collectible,
@@ -662,7 +670,9 @@ function isObstacleDefinition(value: unknown): value is ObstacleDefinition {
     typeof value.columns === 'number' &&
     Number.isFinite(value.columns) &&
     typeof value.rows === 'number' &&
-    Number.isFinite(value.rows)
+    Number.isFinite(value.rows) &&
+    (value.angle === undefined ||
+      (typeof value.angle === 'number' && Number.isFinite(value.angle)))
   );
 }
 
@@ -757,6 +767,10 @@ function isQuarterGrid(value: number): boolean {
   return Number.isFinite(value) && Math.abs(value * 4 - Math.round(value * 4)) < 0.000_001;
 }
 
+function normalizeDegrees(value: number): number {
+  return ((Math.round(value) % 360) + 360) % 360;
+}
+
 interface Point {
   x: number;
   y: number;
@@ -765,6 +779,7 @@ interface Point {
 const MACHINE_SIZE_IN_CELLS: Record<MachineType, { width: number; height: number }> = {
   source: { width: 68 / 48, height: 68 / 48 },
   conveyor: { width: 92 / 48, height: 22 / 48 },
+  'tracked-conveyor': { width: 92 / 48, height: 22 / 48 },
   receiver: { width: 76 / 48, height: 76 / 48 },
   spring: { width: 2, height: 1 },
 };
@@ -787,7 +802,7 @@ function obstaclePolygon(obstacle: ObstacleDefinition): Point[] {
     },
     obstacle.columns,
     obstacle.rows,
-    0,
+    obstacle.angle ?? 0,
   );
 }
 
@@ -818,12 +833,7 @@ function polygonWithinBoard(polygon: readonly Point[]): boolean {
 }
 
 function obstacleWithinBoard(obstacle: ObstacleDefinition): boolean {
-  return (
-    obstacle.gridX >= PLAY_AREA_MIN_COLUMN &&
-    obstacle.gridY >= PLAY_AREA_MIN_ROW &&
-    obstacle.gridX + obstacle.columns <= PLAY_AREA_MAX_COLUMN &&
-    obstacle.gridY + obstacle.rows <= PLAY_AREA_MAX_ROW
-  );
+  return polygonWithinBoard(obstaclePolygon(obstacle));
 }
 
 function pointWithinBoard(x: number, y: number, margin = 0): boolean {

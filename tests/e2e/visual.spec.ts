@@ -70,13 +70,22 @@ test('renderiza o canvas nítido em 1920×1080 HiDPI sem overflow', async ({ pag
   await page
     .locator('[data-start-sandbox]')
     .evaluate((button: HTMLButtonElement) => button.click());
-  await page.locator('[data-tool="conveyor"]').click();
+  const conveyorToolBounds = await page
+    .locator('[data-tool="tracked-conveyor"]')
+    .boundingBox();
   const canvasBounds = await page.locator('#game-container canvas').boundingBox();
-  if (!canvasBounds) throw new Error('Canvas sem dimensões');
-  await page.mouse.click(
+  if (!conveyorToolBounds || !canvasBounds) throw new Error('Hotbar ou canvas sem dimensões');
+  await page.mouse.move(
+    conveyorToolBounds.x + conveyorToolBounds.width / 2,
+    conveyorToolBounds.y + conveyorToolBounds.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
     canvasBounds.x + canvasBounds.width * 0.5,
     canvasBounds.y + canvasBounds.height * 0.45,
+    { steps: 12 },
   );
+  await page.mouse.up();
   await expect(page.locator('#selection-panel')).toHaveCount(0);
   await expect(page.locator('[data-action="delete"]')).toBeEnabled();
 });

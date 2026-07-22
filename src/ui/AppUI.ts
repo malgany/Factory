@@ -77,11 +77,13 @@ export type CatalogSavingContext = 'editor' | 'operation';
 const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
   source: { name: 'Saída', hint: 'Gera caixas' },
   conveyor: { name: 'Esteira', hint: 'Conduz o fluxo' },
+  'tracked-conveyor': { name: 'Esteira física', hint: 'Move por corrente e atrito' },
   receiver: { name: 'Entrada', hint: 'Recebe caixas' },
   spring: { name: 'Trampolim', hint: 'Projeta caixas' },
 };
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
+const DRAG_UI_RESTORE_DELAY_MS = 300;
 const MINIMUM_LOADING_DURATION_MS = 360;
 const MENU_CAMERA_DURATION_MS = 650;
 const MENU_CAMERA_FALLBACK_MS = MENU_CAMERA_DURATION_MS + 100;
@@ -149,6 +151,7 @@ export class AppUI {
   private readyTimer?: number;
   private unsubs: Unsubscribe[] = [];
   private toastTimer?: number;
+  private dragUiRestoreTimer?: number;
   private menuDemo?: MenuDemoController;
   private menuTransitionCleanup?: () => void;
 
@@ -418,6 +421,7 @@ export class AppUI {
     this.unsubs = [];
     if (this.toastTimer) window.clearTimeout(this.toastTimer);
     if (this.readyTimer !== undefined) window.clearTimeout(this.readyTimer);
+    if (this.dragUiRestoreTimer !== undefined) window.clearTimeout(this.dragUiRestoreTimer);
     this.audio.destroy();
     this.root.replaceChildren();
   }
@@ -498,6 +502,9 @@ export class AppUI {
             <button class="selection-action" data-action="cut" type="button" aria-label="Recortar item" title="Recortar · Ctrl+X">
               ${icon('cut')}
             </button>
+            <button class="selection-action is-hidden" data-action="reverse" type="button" aria-label="Inverter sentido da esteira" title="Inverter sentido · R">
+              ${icon('reverse')}
+            </button>
             <button class="selection-action selection-action-danger" data-action="delete" type="button" aria-label="Excluir item" title="Excluir · Delete">
               ${icon('trash')}
             </button>
@@ -536,7 +543,7 @@ export class AppUI {
               </fieldset>
               <fieldset class="field-group tool-availability">
                 <legend>Ferramentas do jogador</legend>
-                <label class="check-field"><input name="availableConveyor" type="checkbox" /><span>${icon('conveyor')} Esteira</span></label>
+                <label class="check-field"><input name="availableTrackedConveyor" type="checkbox" /><span>${icon('conveyor')} Esteira física</span></label>
                 <label class="check-field"><input name="availableSpring" type="checkbox" /><span>${icon('spring')} Trampolim</span></label>
               </fieldset>
             </form>
@@ -573,12 +580,6 @@ export class AppUI {
                       ${icon('back')}
                     </button>
                     <section id="campaign-stage-actions" class="campaign-stage-actions is-hidden" aria-live="polite">
-                      <div>
-                        <span class="eyebrow">MUNDO 1</span>
-                        <strong data-campaign-stage-label>1-1</strong>
-                        <small data-campaign-best-score>Sem pontuação</small>
-                      </div>
-                      <button class="soft-button" data-action="campaign-ranking" type="button">${icon('ranking')} Ranking</button>
                       <button class="primary-action" data-action="campaign-play" type="button">${icon('play')} Jogar</button>
                     </section>
                   </div>
@@ -697,7 +698,7 @@ export class AppUI {
         </section>
 
         <div id="angle-indicator" class="angle-indicator is-hidden" aria-hidden="true">
-          <span class="angle-ring"></span><strong>0°</strong>
+          <strong>0°</strong>
         </div>
         <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
@@ -948,40 +949,38 @@ export class AppUI {
       appEvents.on('game:ready', () => this.finishGameLoading()),
       appEvents.on('game:snapshot', (snapshot) => this.renderSnapshot(snapshot)),
       appEvents.on('game:angle', (payload) => this.renderAngle(payload)),
+      appEvents.on('game:dragging', ({ active }) => this.setDragUiOccluded(active)),
       appEvents.on('game:toast', ({ message, tone }) => this.showToast(message, tone)),
       appEvents.on('game:audio', ({ kind }) => this.audio.play(kind)),
       appEvents.on('game:result', ({ contractId, snapshot }) => {
         if (snapshot.status === 'success' && snapshot.mode === 'campaign') return;
-        const contract =
-          this.contracts.find(({ id }) => id === contractId) ?? this.editorContract;
+        const contract = this.contracts.find(({ id }) => id === contractId) ?? this.editorContract;
         const result =
           snapshot.status === 'success' && contract
             ? createContractResult(contract, snapshot.metrics)
             : undefined;
         this.renderResult({ contractId, snapshot, result });
       }),
-      appEvents.on(
-        'game:result-recorded', ({ result, snapshot, rankingPosition, isNewRecord }) => {
-          const contract = this.contracts.find(({ id }) => id === result.contractId);
-          const next = contract
-            ? this.contracts.find(
-                (candidate) =>
-                  candidate.world === contract.world && candidate.stage === contract.stage + 1,
-              )
-            : undefined;
-          if (next && this.progress.unlockedContracts.includes(next.id)) {
-            this.selectedCampaignContractId = next.id;
-            this.renderCampaignMap();
-          }
-          this.renderResult({
-            contractId: result.contractId,
-            snapshot,
-            result,
-            rankingPosition,
-            isNewRecord,
-          });
-        },
-      ),
+      appEvents.on('game:result-recorded', ({ result, snapshot, rankingPosition, isNewRecord }) => {
+        const contract = this.contracts.find(({ id }) => id === result.contractId);
+        const next = contract
+          ? this.contracts.find(
+              (candidate) =>
+                candidate.world === contract.world && candidate.stage === contract.stage + 1,
+            )
+          : undefined;
+        if (next && this.progress.unlockedContracts.includes(next.id)) {
+          this.selectedCampaignContractId = next.id;
+          this.renderCampaignMap();
+        }
+        this.renderResult({
+          contractId: result.contractId,
+          snapshot,
+          result,
+          rankingPosition,
+          isNewRecord,
+        });
+      }),
       appEvents.on('game:editor-changed', ({ contract, dirty }) => {
         if (!this.editorContract) return;
         this.editorContract = structuredClone(contract);
@@ -1292,9 +1291,7 @@ export class AppUI {
       dot.dataset.contractDot = contract.id;
       dot.setAttribute(
         'aria-label',
-        unlocked
-          ? `Ver fase ${label}`
-          : `Ver fase ${label}, bloqueada`,
+        unlocked ? `Ver fase ${label}` : `Ver fase ${label}, bloqueada`,
       );
       dot.innerHTML = unlocked
         ? `<span>${String(contract.order).padStart(2, '0')}</span>`
@@ -1321,8 +1318,7 @@ export class AppUI {
     );
     const unlockedContracts = this.contracts.filter(
       (contract) =>
-        contract.world === CAMPAIGN_WORLD &&
-        this.progress.unlockedContracts.includes(contract.id),
+        contract.world === CAMPAIGN_WORLD && this.progress.unlockedContracts.includes(contract.id),
     );
     const currentSelection = unlockedContracts.find(
       (contract) => contract.id === this.selectedCampaignContractId,
@@ -1347,9 +1343,7 @@ export class AppUI {
     const nodes = this.element('#campaign-stage-nodes');
     nodes.innerHTML = CAMPAIGN_STAGE_POSITIONS.map((position) => {
       const contract = contractsByStage.get(position.stage);
-      const unlocked = Boolean(
-        contract && this.progress.unlockedContracts.includes(contract.id),
-      );
+      const unlocked = Boolean(contract && this.progress.unlockedContracts.includes(contract.id));
       const selected = unlocked && contract?.id === this.selectedCampaignContractId;
       const completed = Boolean(contract && this.progress.rankings[contract.id]?.length);
       const label = `${position.stage}-${CAMPAIGN_WORLD}`;
@@ -1401,12 +1395,6 @@ export class AppUI {
     const contract = this.contracts.find(({ id }) => id === this.selectedCampaignContractId);
     const available = Boolean(contract && this.progress.unlockedContracts.includes(contract.id));
     panel.classList.toggle('is-hidden', !available);
-    if (!contract || !available) return;
-    const ranking = this.progress.rankings[contract.id] ?? [];
-    this.element('[data-campaign-stage-label]').textContent = contractLabel(contract);
-    this.element('[data-campaign-best-score]').textContent = ranking[0]
-      ? `Melhor: ${formatScore(ranking[0].score)} pontos`
-      : 'Sem pontuação';
   }
 
   private startSelectedCampaign(): void {
@@ -1520,9 +1508,7 @@ export class AppUI {
       remove.className = 'text-button danger';
       remove.type = 'button';
       remove.innerHTML = `${icon('trash')} Excluir`;
-      remove.addEventListener('click', () =>
-        this.openAdminConfirmation(contract.id, label),
-      );
+      remove.addEventListener('click', () => this.openAdminConfirmation(contract.id, label));
       actions.append(remove);
       entry.append(actions);
       list.append(entry);
@@ -1600,80 +1586,10 @@ export class AppUI {
       button.className = 'tool-button';
       button.dataset.tool = machine;
       button.setAttribute('aria-label', `${copy.name}: ${copy.hint}`);
-      button.title = copy.name;
+      button.title = `${copy.name} · Arraste para posicionar`;
       button.innerHTML = `
         <span class="tool-glyph tool-${machine}">${machineThumbnail(machine)}</span>`;
-      let dragOrigin: { x: number; y: number } | undefined;
-      let dragging = false;
-      let suppressClick = false;
-      button.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0) return;
-        dragOrigin = { x: event.clientX, y: event.clientY };
-        dragging = false;
-        suppressClick = false;
-        button.setPointerCapture(event.pointerId);
-        hotbar
-          .querySelectorAll('.tool-button')
-          .forEach((node) => node.classList.remove('is-active'));
-        button.classList.add('is-active');
-        appEvents.emit('ui:tool-drag', {
-          type: machine,
-          phase: 'start',
-          clientX: event.clientX,
-          clientY: event.clientY,
-        });
-      });
-      button.addEventListener('pointermove', (event) => {
-        if (!dragOrigin) return;
-        if (Math.hypot(event.clientX - dragOrigin.x, event.clientY - dragOrigin.y) >= 6) {
-          dragging = true;
-        }
-        if (!dragging) return;
-        appEvents.emit('ui:tool-drag', {
-          type: machine,
-          phase: 'move',
-          clientX: event.clientX,
-          clientY: event.clientY,
-        });
-      });
-      button.addEventListener('pointerup', (event) => {
-        if (!dragOrigin) return;
-        if (dragging) {
-          suppressClick = true;
-          appEvents.emit('ui:tool-drag', {
-            type: machine,
-            phase: 'end',
-            clientX: event.clientX,
-            clientY: event.clientY,
-          });
-        }
-        dragOrigin = undefined;
-        dragging = false;
-        if (button.hasPointerCapture(event.pointerId))
-          button.releasePointerCapture(event.pointerId);
-      });
-      button.addEventListener('pointercancel', (event) => {
-        if (!dragOrigin) return;
-        dragOrigin = undefined;
-        dragging = false;
-        appEvents.emit('ui:tool-drag', {
-          type: machine,
-          phase: 'cancel',
-          clientX: event.clientX,
-          clientY: event.clientY,
-        });
-      });
-      button.addEventListener('click', () => {
-        if (suppressClick) {
-          suppressClick = false;
-          return;
-        }
-        hotbar
-          .querySelectorAll('.tool-button')
-          .forEach((node) => node.classList.remove('is-active'));
-        button.classList.add('is-active');
-        appEvents.emit('ui:tool', { type: machine });
-      });
+      this.bindPaletteDrag(button, hotbar, machine);
       hotbar.append(button);
     }
   }
@@ -1687,7 +1603,12 @@ export class AppUI {
     const tools: Array<{ type: AdminTool; label: string; hint: string; icon: IconName }> = [
       { type: 'source', label: 'Saída', hint: 'Gera caixas', icon: 'source' },
       { type: 'receiver', label: 'Entrada', hint: 'Recebe caixas', icon: 'receiver' },
-      { type: 'conveyor', label: 'Esteira', hint: 'Cenário fixo', icon: 'conveyor' },
+      {
+        type: 'tracked-conveyor',
+        label: 'Esteira física',
+        hint: 'Corrente motorizada',
+        icon: 'conveyor',
+      },
       { type: 'spring', label: 'Trampolim', hint: 'Cenário fixo', icon: 'spring' },
       {
         type: 'obstacle',
@@ -1702,22 +1623,77 @@ export class AppUI {
       button.type = 'button';
       button.className = 'tool-button editor-tool-button';
       button.dataset.editorTool = tool.type;
-      button.title = `${tool.label} · ${tool.hint}`;
+      button.title = `${tool.label} · Arraste para posicionar`;
       button.setAttribute('aria-label', `${tool.label}: ${tool.hint}`);
       button.innerHTML = `<span class="tool-glyph tool-${tool.type}">${
         tool.type === 'obstacle' || tool.type === 'star'
           ? icon(tool.icon)
           : machineThumbnail(tool.type)
       }</span>`;
-      button.addEventListener('click', () => {
-        hotbar
-          .querySelectorAll('.editor-tool-button')
-          .forEach((node) => node.classList.remove('is-active'));
-        button.classList.add('is-active');
-        appEvents.emit('ui:editor-tool', { type: tool.type });
-      });
+      this.bindPaletteDrag(button, hotbar, tool.type);
       hotbar.append(button);
     }
+  }
+
+  private bindPaletteDrag(
+    button: HTMLButtonElement,
+    hotbar: HTMLElement,
+    type: AdminTool,
+  ): void {
+    let origin: { x: number; y: number } | undefined;
+    let dragging = false;
+
+    const finish = (event: PointerEvent, phase: 'end' | 'cancel'): void => {
+      if (!origin) return;
+      const wasDragging = dragging;
+      origin = undefined;
+      dragging = false;
+      button.classList.remove('is-active');
+      if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId);
+      if (!wasDragging) return;
+      this.setDragUiOccluded(false);
+      appEvents.emit('ui:tool-drag', {
+        type,
+        phase,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+    };
+
+    button.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      origin = { x: event.clientX, y: event.clientY };
+      dragging = false;
+      button.setPointerCapture(event.pointerId);
+      hotbar
+        .querySelectorAll('.tool-button')
+        .forEach((node) => node.classList.remove('is-active'));
+      button.classList.add('is-active');
+    });
+    button.addEventListener('pointermove', (event) => {
+      if (!origin) return;
+      if (!dragging && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) >= 6) {
+        dragging = true;
+        this.setDragUiOccluded(true);
+        appEvents.emit('ui:tool-drag', {
+          type,
+          phase: 'start',
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
+      }
+      if (!dragging) return;
+      appEvents.emit('ui:tool-drag', {
+        type,
+        phase: 'move',
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+    });
+    button.addEventListener('pointerup', (event) => finish(event, 'end'));
+    button.addEventListener('pointercancel', (event) => finish(event, 'cancel'));
+    button.addEventListener('click', () => button.classList.remove('is-active'));
   }
 
   private renderSelection(
@@ -1728,17 +1704,26 @@ export class AppUI {
     const editing = Boolean(this.editorContract && !this.editorPreviewActive);
     const canManipulate = Boolean(
       selectionCount > 1 ||
-        (machine && (editing || !machine.fixed)) ||
-        (editing && obstacle) ||
-        (editing && selectionCount === 1 && !machine && !obstacle),
+      (machine && (editing || !machine.fixed)) ||
+      (editing && obstacle) ||
+      (editing && selectionCount === 1 && !machine && !obstacle),
     );
     const remove = this.element<HTMLButtonElement>('[data-action="delete"]');
     const copy = this.element<HTMLButtonElement>('[data-action="copy"]');
     const cut = this.element<HTMLButtonElement>('[data-action="cut"]');
+    const reverse = this.element<HTMLButtonElement>('[data-action="reverse"]');
     remove.disabled = !canManipulate;
     copy.disabled = !canManipulate;
     cut.disabled = !canManipulate;
     const multiple = selectionCount > 1;
+    const canReverse = Boolean(
+      !multiple &&
+        machine &&
+        (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') &&
+        (editing || !machine.fixed),
+    );
+    reverse.classList.toggle('is-hidden', !canReverse);
+    reverse.disabled = !canReverse;
     remove.setAttribute(
       'aria-label',
       multiple ? `Excluir ${selectionCount} itens` : 'Excluir item',
@@ -1783,6 +1768,24 @@ export class AppUI {
     this.element('[data-speed-label]').textContent = label;
   }
 
+  private setDragUiOccluded(occluded: boolean): void {
+    if (this.dragUiRestoreTimer !== undefined) {
+      window.clearTimeout(this.dragUiRestoreTimer);
+      this.dragUiRestoreTimer = undefined;
+    }
+
+    const shell = this.element('.factory-app');
+    if (occluded) {
+      shell.classList.add('is-dragging-object');
+      return;
+    }
+
+    this.dragUiRestoreTimer = window.setTimeout(() => {
+      this.dragUiRestoreTimer = undefined;
+      shell.classList.remove('is-dragging-object');
+    }, DRAG_UI_RESTORE_DELAY_MS);
+  }
+
   private renderAngle(payload: {
     angle: number;
     clientX: number;
@@ -1793,7 +1796,6 @@ export class AppUI {
     indicator.classList.toggle('is-hidden', !payload.visible);
     if (!payload.visible) return;
     indicator.style.transform = `translate3d(${Math.round(payload.clientX + 22)}px, ${Math.round(payload.clientY - 62)}px, 0)`;
-    indicator.style.setProperty('--angle', `${payload.angle}deg`);
     indicator.querySelector('strong')!.textContent = `${normalizeAngle(payload.angle)}°`;
   }
 
@@ -1940,8 +1942,9 @@ export class AppUI {
     this.updateEditorFormOutputs(contract);
     setFormControlChecked(
       form,
-      'availableConveyor',
-      contract.availableMachines.includes('conveyor'),
+      'availableTrackedConveyor',
+      contract.availableMachines.includes('tracked-conveyor') ||
+        contract.availableMachines.includes('conveyor'),
     );
     setFormControlChecked(form, 'availableSpring', contract.availableMachines.includes('spring'));
   }
@@ -1950,7 +1953,9 @@ export class AppUI {
     if (!this.editorContract || this.catalogSaving) return;
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     const availableMachines: MachineType[] = [];
-    if (formCheckbox(form, 'availableConveyor').checked) availableMachines.push('conveyor');
+    if (formCheckbox(form, 'availableTrackedConveyor').checked) {
+      availableMachines.push('tracked-conveyor');
+    }
     if (formCheckbox(form, 'availableSpring').checked) availableMachines.push('spring');
     const world = Math.round(numberFormValue(form, 'world'));
     const stage = Math.round(numberFormValue(form, 'stage'));
@@ -2070,8 +2075,7 @@ export class AppUI {
     const current = this.contracts.find((contract) => contract.id === this.resultContractId);
     const next = current
       ? this.contracts.find(
-          (contract) =>
-            contract.world === current.world && contract.stage === current.stage + 1,
+          (contract) => contract.world === current.world && contract.stage === current.stage + 1,
         )
       : undefined;
     if (!next || !this.progress.unlockedContracts.includes(next.id)) {
@@ -2115,9 +2119,9 @@ export class AppUI {
     this.root.classList.toggle('is-catalog-saving', editorSaving);
     this.updateGameUiAvailability();
     this.element('#editor-contract-form')
-      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>(
-        'input, textarea, select, button',
-      )
+      .querySelectorAll<
+        HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement
+      >('input, textarea, select, button')
       .forEach((control) => {
         control.disabled = editorSaving;
       });
@@ -2329,8 +2333,8 @@ function contractStagePreview(contract: ContractDefinition): string {
   return `<span class="stage-preview-layout stage-preview-layout-${layout}">
     <span class="stage-preview-machine stage-preview-source">${machineThumbnail('source')}</span>
     ${sourceCount > 1 ? `<span class="stage-preview-machine stage-preview-source-secondary">${machineThumbnail('source')}</span>` : ''}
-    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-a">${machineThumbnail('conveyor')}</span>
-    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-b">${machineThumbnail('conveyor')}</span>
+    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-a">${machineThumbnail('tracked-conveyor')}</span>
+    <span class="stage-preview-machine stage-preview-conveyor stage-preview-conveyor-b">${machineThumbnail('tracked-conveyor')}</span>
     ${hasSpring ? `<span class="stage-preview-machine stage-preview-spring">${machineThumbnail('spring')}</span>` : ''}
     ${contract.obstacles.length > 0 ? '<span class="stage-preview-obstacle"></span>' : ''}
     <span class="stage-preview-machine stage-preview-receiver">${machineThumbnail('receiver')}</span>
@@ -2350,6 +2354,19 @@ function machineThumbnail(type: MachineType): string {
       return `<svg class="machine-thumbnail machine-thumbnail-conveyor" viewBox="0 0 96 24" aria-hidden="true">
         <rect x="1" y="1" width="94" height="22" fill="#40566b" stroke="#293139" stroke-width="2" />
         <path d="M17 5l10 7-10 7zM39 5l10 7-10 7zM61 5l10 7-10 7zM83 5l10 7-10 7z" fill="#fff" />
+      </svg>`;
+    case 'tracked-conveyor':
+      return `<svg class="machine-thumbnail machine-thumbnail-tracked-conveyor" viewBox="0 0 112 36" aria-hidden="true">
+        <g fill="#40566b" stroke="#82a5c5" stroke-width="1.5">
+          <circle cx="18" cy="18" r="9"/><circle cx="56" cy="18" r="9"/><circle cx="94" cy="18" r="9"/>
+        </g>
+        <g stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity=".8">
+          <path d="M18 11v14M11 18h14M56 11v14M49 18h14M94 11v14M87 18h14" />
+        </g>
+        <g fill="#ff7629"><circle cx="18" cy="18" r="2.4"/><circle cx="56" cy="18" r="2.4"/><circle cx="94" cy="18" r="2.4"/></g>
+        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#293139" stroke-width="9" stroke-linejoin="round" />
+        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#40566b" stroke-width="6.5" stroke-linejoin="round" />
+        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#fff" stroke-width="6.5" stroke-dasharray="8 7" stroke-linejoin="round" />
       </svg>`;
     case 'receiver':
       return `<svg class="machine-thumbnail machine-thumbnail-receiver" viewBox="0 0 72 72" aria-hidden="true">
@@ -2373,6 +2390,8 @@ function icon(name: IconName): string {
     source: '<path d="M4 5h16v14H4z"/><path d="M8 9h8M12 2v7m-3-3 3 3 3-3"/>',
     conveyor:
       '<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="7" cy="12" r="1.5"/><circle cx="17" cy="12" r="1.5"/><path d="m10 9 3 3-3 3"/>',
+    'tracked-conveyor':
+      '<rect x="2" y="6" width="20" height="12" rx="6"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/>',
     receiver: '<path d="M4 5h16v14H4z"/><path d="M8 15h8M12 2v8m-3-3 3 3 3-3"/>',
     spring: '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/>',
     play: '<path d="m8 5 11 7-11 7z"/>',
@@ -2397,7 +2416,8 @@ function icon(name: IconName): string {
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',
-    ranking: '<path d="M8 21V10h8v11M5 21h14M9 4h6l-1 4h-4z"/><path d="M8 5H5a3 3 0 0 0 3 4m8-4h3a3 3 0 0 1-3 4"/>',
+    ranking:
+      '<path d="M8 21V10h8v11M5 21h14M9 4h6l-1 4h-4z"/><path d="M8 5H5a3 3 0 0 0 3 4m8-4h3a3 3 0 0 1-3 4"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4M4 20h16"/>',
     settings:
       '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.3 3h-4.6l-.4 3a8 8 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.6-1a8 8 0 0 0 1.7 1l.4 3h4.6l.4-3a8 8 0 0 0 1.7-1l2.6 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',

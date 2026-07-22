@@ -1,24 +1,83 @@
 {
   "version": 2,
-  "updatedAt": "1970-01-01T00:00:00.000Z",
   "contracts": [
     {
-      "id": "first-flow",
+      "id": "assembly-line",
       "world": 1,
       "stage": 1,
-      "revision": 1,
+      "revision": 2,
       "order": 1,
       "title": "1-1",
-      "subtitle": "Faça a linha funcionar.",
-      "description": "Ligue a saída acima e à esquerda à entrada abaixo e à direita usando somente esteiras.",
+      "subtitle": "Ligue a primeira linha.",
+      "description": "Conduza as caixas até a entrada e colete a estrela no caminho.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
-      "availableMachines": ["conveyor"],
+      "availableMachines": [
+        "tracked-conveyor"
+      ],
       "fixedMachines": [
         {
-          "id": "first-flow-source",
+          "id": "assembly-line-source",
+          "type": "source",
+          "gridX": 4.5,
+          "gridY": 3.75,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "assembly-line-receiver",
+          "type": "receiver",
+          "gridX": 12.25,
+          "gridY": 6,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [],
+      "collectibles": [
+        {
+          "id": "assembly-line-star",
+          "type": "star",
+          "gridX": 8,
+          "gridY": 6
+        }
+      ],
+      "goal": {
+        "deliveries": 8,
+        "maxLosses": 3,
+        "pieceBudget": 4,
+        "idealTimeSeconds": 15
+      },
+      "spawnIntervalSeconds": 1.25,
+      "initialCamera": {
+        "centerX": 468,
+        "centerY": 288.65,
+        "zoom": 1.55
+      }
+    },
+    {
+      "id": "quality-curve",
+      "world": 1,
+      "stage": 2,
+      "revision": 2,
+      "order": 2,
+      "title": "2-1",
+      "subtitle": "Desenhe uma curva suave.",
+      "description": "Alcance a entrada deslocada e tente passar pelas duas estrelas.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor"
+      ],
+      "fixedMachines": [
+        {
+          "id": "quality-curve-source",
           "type": "source",
           "gridX": 4.25,
           "gridY": 4.25,
@@ -27,7 +86,7 @@
           "fixed": true
         },
         {
-          "id": "first-flow-receiver",
+          "id": "quality-curve-receiver",
           "type": "receiver",
           "gridX": 15.25,
           "gridY": 12.25,
@@ -37,94 +96,53 @@
         }
       ],
       "obstacles": [],
-      "collectibles": [],
+      "collectibles": [
+        {
+          "id": "quality-curve-star-a",
+          "type": "star",
+          "gridX": 8,
+          "gridY": 7
+        },
+        {
+          "id": "quality-curve-star-b",
+          "type": "star",
+          "gridX": 12,
+          "gridY": 9
+        }
+      ],
       "goal": {
         "deliveries": 10,
         "maxLosses": 3,
-        "pieceBudget": 8,
-        "idealTimeSeconds": 32
+        "pieceBudget": 6,
+        "idealTimeSeconds": 16
       },
-      "spawnIntervalSeconds": 1.25,
+      "spawnIntervalSeconds": 1.2,
       "initialCamera": {
-        "centerX": 720,
-        "centerY": 432,
-        "zoom": 1
+        "centerX": 479.35,
+        "centerY": 398.07,
+        "zoom": 1.4094
       }
     },
     {
-      "id": "controlled-jump",
-      "world": 1,
-      "stage": 2,
-      "revision": 1,
-      "order": 2,
-      "title": "2-1",
-      "subtitle": "Atravesse a barreira.",
-      "description": "Combine esteiras e trampolins para lançar as caixas por cima da barreira central.",
-      "grid": {
-        "columns": 30,
-        "rows": 18
-      },
-      "availableMachines": ["conveyor", "spring"],
-      "fixedMachines": [
-        {
-          "id": "controlled-jump-source",
-          "type": "source",
-          "gridX": 4.25,
-          "gridY": 4.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        },
-        {
-          "id": "controlled-jump-receiver",
-          "type": "receiver",
-          "gridX": 19.25,
-          "gridY": 13.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        }
-      ],
-      "obstacles": [
-        {
-          "id": "controlled-jump-barrier",
-          "gridX": 11,
-          "gridY": 9,
-          "columns": 3,
-          "rows": 6
-        }
-      ],
-      "collectibles": [],
-      "goal": {
-        "deliveries": 12,
-        "maxLosses": 3,
-        "pieceBudget": 8,
-        "idealTimeSeconds": 38
-      },
-      "spawnIntervalSeconds": 1.1,
-      "initialCamera": {
-        "centerX": 720,
-        "centerY": 432,
-        "zoom": 1
-      }
-    },
-    {
-      "id": "line-rhythm",
+      "id": "first-jump",
       "world": 1,
       "stage": 3,
-      "revision": 1,
+      "revision": 3,
       "order": 3,
       "title": "3-1",
-      "subtitle": "Sincronize dois fluxos.",
-      "description": "Conduza duas saídas por entre os obstáculos e alimente uma única entrada antes do tempo acabar.",
+      "subtitle": "Faça o primeiro salto.",
+      "description": "Use um trampolim para lançar as caixas por cima da parede baixa.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
-      "availableMachines": ["conveyor", "spring"],
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
       "fixedMachines": [
         {
-          "id": "line-rhythm-source-a",
+          "id": "first-jump-source",
           "type": "source",
           "gridX": 3.25,
           "gridY": 3.25,
@@ -133,7 +151,486 @@
           "fixed": true
         },
         {
-          "id": "line-rhythm-source-b",
+          "id": "first-jump-receiver",
+          "type": "receiver",
+          "gridX": 15.25,
+          "gridY": 13.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "first-jump-wall",
+          "gridX": 6,
+          "gridY": 9,
+          "columns": 2,
+          "rows": 4,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-1",
+          "gridX": 10.75,
+          "gridY": 6,
+          "columns": 1,
+          "rows": 4,
+          "angle": 0
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "first-jump-star",
+          "type": "star",
+          "gridX": 6.5,
+          "gridY": 7.5
+        }
+      ],
+      "goal": {
+        "deliveries": 10,
+        "maxLosses": 3,
+        "pieceBudget": 5,
+        "idealTimeSeconds": 30
+      },
+      "spawnIntervalSeconds": 1.15,
+      "initialCamera": {
+        "centerX": 469.37,
+        "centerY": 416.85,
+        "zoom": 1.2712
+      }
+    },
+    {
+      "id": "over-or-around",
+      "world": 1,
+      "stage": 4,
+      "revision": 3,
+      "order": 4,
+      "title": "4-1",
+      "subtitle": "Passe por cima ou dê a volta.",
+      "description": "Cruze a parede alta escolhendo entre um salto econômico e um desvio seguro.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "over-or-around-source",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 10.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "over-or-around-receiver",
+          "type": "receiver",
+          "gridX": 20.25,
+          "gridY": 12.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "over-or-around-wall",
+          "gridX": 10,
+          "gridY": 7,
+          "columns": 3,
+          "rows": 5,
+          "angle": 0
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "over-or-around-star",
+          "type": "star",
+          "gridX": 11,
+          "gridY": 5.5
+        }
+      ],
+      "goal": {
+        "deliveries": 12,
+        "maxLosses": 3,
+        "pieceBudget": 10,
+        "idealTimeSeconds": 19
+      },
+      "spawnIntervalSeconds": 1.1,
+      "initialCamera": {
+        "centerX": 565.52,
+        "centerY": 451.24,
+        "zoom": 1.05
+      }
+    },
+    {
+      "id": "calibrated-jump",
+      "world": 1,
+      "stage": 5,
+      "revision": 5,
+      "order": 5,
+      "title": "5-1",
+      "subtitle": "Acerte a janela.",
+      "description": "Calibre o salto para atravessar a abertura sem atingir o teto nem o piso.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "calibrated-jump-source",
+          "type": "source",
+          "gridX": 4,
+          "gridY": 2.5,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "calibrated-jump-receiver",
+          "type": "receiver",
+          "gridX": 6.25,
+          "gridY": 13.75,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "calibrated-jump-ceiling",
+          "gridX": 6,
+          "gridY": 3,
+          "columns": 3,
+          "rows": 3,
+          "angle": 0
+        },
+        {
+          "id": "calibrated-jump-floor",
+          "gridX": 6,
+          "gridY": 9.5,
+          "columns": 3,
+          "rows": 3,
+          "angle": 45
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "calibrated-jump-star",
+          "type": "star",
+          "gridX": 8.5,
+          "gridY": 7.5
+        },
+        {
+          "id": "star-1",
+          "type": "star",
+          "gridX": 4.5,
+          "gridY": 9.25
+        }
+      ],
+      "goal": {
+        "deliveries": 12,
+        "maxLosses": 2,
+        "pieceBudget": 5,
+        "idealTimeSeconds": 14
+      },
+      "spawnIntervalSeconds": 1.05,
+      "initialCamera": {
+        "centerX": 746.96,
+        "centerY": 431.53,
+        "zoom": 1.1275
+      }
+    },
+    {
+      "id": "star-route",
+      "world": 1,
+      "stage": 6,
+      "revision": 3,
+      "order": 6,
+      "title": "6-1",
+      "subtitle": "Arrisque pela pontuação.",
+      "description": "Entregue pela rota direta ou desvie o fluxo para coletar as três estrelas.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "star-route-source",
+          "type": "source",
+          "gridX": 18.25,
+          "gridY": 3.75,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "star-route-receiver",
+          "type": "receiver",
+          "gridX": 4.75,
+          "gridY": 11.5,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [],
+      "collectibles": [
+        {
+          "id": "star-route-star-a",
+          "type": "star",
+          "gridX": 11.25,
+          "gridY": 8.75
+        },
+        {
+          "id": "star-route-star-b",
+          "type": "star",
+          "gridX": 6.5,
+          "gridY": 10
+        },
+        {
+          "id": "star-route-star-c",
+          "type": "star",
+          "gridX": 15.5,
+          "gridY": 7
+        }
+      ],
+      "goal": {
+        "deliveries": 14,
+        "maxLosses": 3,
+        "pieceBudget": 9,
+        "idealTimeSeconds": 19
+      },
+      "spawnIntervalSeconds": 1,
+      "initialCamera": {
+        "centerX": 631.3,
+        "centerY": 392.96,
+        "zoom": 1.2712
+      }
+    },
+    {
+      "id": "meeting-lines",
+      "world": 1,
+      "stage": 7,
+      "revision": 1,
+      "order": 7,
+      "title": "7-1",
+      "subtitle": "Una os dois fluxos.",
+      "description": "Faça duas saídas compartilharem uma linha sem criar colisões ou congestionamento.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "meeting-lines-source-a",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 3.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "meeting-lines-source-b",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 10.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "meeting-lines-receiver",
+          "type": "receiver",
+          "gridX": 19.25,
+          "gridY": 13.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [],
+      "collectibles": [
+        {
+          "id": "meeting-lines-star-a",
+          "type": "star",
+          "gridX": 5.5,
+          "gridY": 7.5
+        },
+        {
+          "id": "meeting-lines-star-b",
+          "type": "star",
+          "gridX": 12,
+          "gridY": 12.5
+        }
+      ],
+      "goal": {
+        "deliveries": 16,
+        "maxLosses": 3,
+        "pieceBudget": 10,
+        "idealTimeSeconds": 34
+      },
+      "spawnIntervalSeconds": 1,
+      "initialCamera": {
+        "centerX": 528,
+        "centerY": 432,
+        "zoom": 1
+      }
+    },
+    {
+      "id": "production-rhythm",
+      "world": 1,
+      "stage": 8,
+      "revision": 4,
+      "order": 8,
+      "title": "8-1",
+      "subtitle": "Acelere a produção.",
+      "description": "Otimize uma linha aberta para cumprir a cota antes do tempo e com poucas perdas.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "production-rhythm-source-a",
+          "type": "source",
+          "gridX": 2.75,
+          "gridY": 6.5,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "production-rhythm-source-b",
+          "type": "source",
+          "gridX": 2.5,
+          "gridY": 10.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "production-rhythm-receiver",
+          "type": "receiver",
+          "gridX": 16,
+          "gridY": 9,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-7",
+          "type": "tracked-conveyor",
+          "gridX": 7,
+          "gridY": 11.75,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "obstacle-1",
+          "gridX": 2.25,
+          "gridY": 9,
+          "columns": 13,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-2",
+          "gridX": 10,
+          "gridY": 10,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 9,
+          "gridY": 7,
+          "columns": 2,
+          "rows": 1,
+          "angle": 0
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "production-rhythm-star",
+          "type": "star",
+          "gridX": 16,
+          "gridY": 7.5
+        },
+        {
+          "id": "star-1",
+          "type": "star",
+          "gridX": 16,
+          "gridY": 10.75
+        }
+      ],
+      "goal": {
+        "deliveries": 24,
+        "maxLosses": 2,
+        "pieceBudget": 11,
+        "timeLimitSeconds": 35,
+        "idealTimeSeconds": 30
+      },
+      "spawnIntervalSeconds": 0.8,
+      "initialCamera": {
+        "centerX": 484.25,
+        "centerY": 417.6,
+        "zoom": 1.6161
+      }
+    },
+    {
+      "id": "industrial-corridors",
+      "world": 1,
+      "stage": 9,
+      "revision": 1,
+      "order": 9,
+      "title": "9-1",
+      "subtitle": "Atravesse os corredores.",
+      "description": "Escolha passagens altas e baixas para conduzir dois fluxos entre os bloqueios.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "industrial-corridors-source-a",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 3.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "industrial-corridors-source-b",
           "type": "source",
           "gridX": 3.25,
           "gridY": 11.25,
@@ -142,7 +639,99 @@
           "fixed": true
         },
         {
-          "id": "line-rhythm-receiver",
+          "id": "industrial-corridors-receiver",
+          "type": "receiver",
+          "gridX": 22.25,
+          "gridY": 14.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "industrial-corridors-block-a",
+          "gridX": 9,
+          "gridY": 5,
+          "columns": 3,
+          "rows": 4,
+          "angle": 0
+        },
+        {
+          "id": "industrial-corridors-block-b",
+          "gridX": 16,
+          "gridY": 10,
+          "columns": 4,
+          "rows": 3,
+          "angle": 0
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "industrial-corridors-star-a",
+          "type": "star",
+          "gridX": 7,
+          "gridY": 7
+        },
+        {
+          "id": "industrial-corridors-star-b",
+          "type": "star",
+          "gridX": 18,
+          "gridY": 8.5
+        }
+      ],
+      "goal": {
+        "deliveries": 20,
+        "maxLosses": 2,
+        "pieceBudget": 12,
+        "timeLimitSeconds": 42,
+        "idealTimeSeconds": 36
+      },
+      "spawnIntervalSeconds": 0.85,
+      "initialCamera": {
+        "centerX": 576,
+        "centerY": 444,
+        "zoom": 1
+      }
+    },
+    {
+      "id": "final-inspection",
+      "world": 1,
+      "stage": 10,
+      "revision": 1,
+      "order": 10,
+      "title": "10-1",
+      "subtitle": "Passe pela inspeção final.",
+      "description": "Combine os dois fluxos, saltos, paredes e estrelas dentro do prazo e quase sem perdas.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "final-inspection-source-a",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 3.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "final-inspection-source-b",
+          "type": "source",
+          "gridX": 3.25,
+          "gridY": 11.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "final-inspection-receiver",
           "type": "receiver",
           "gridX": 24.25,
           "gridY": 14.25,
@@ -153,34 +742,56 @@
       ],
       "obstacles": [
         {
-          "id": "line-rhythm-obstacle-a",
+          "id": "final-inspection-block-a",
           "gridX": 10,
           "gridY": 5,
           "columns": 3,
-          "rows": 4
+          "rows": 4,
+          "angle": 0
         },
         {
-          "id": "line-rhythm-obstacle-b",
+          "id": "final-inspection-block-b",
           "gridX": 17,
           "gridY": 10,
           "columns": 4,
-          "rows": 3
+          "rows": 3,
+          "angle": 0
         }
       ],
-      "collectibles": [],
+      "collectibles": [
+        {
+          "id": "final-inspection-star-a",
+          "type": "star",
+          "gridX": 6,
+          "gridY": 8
+        },
+        {
+          "id": "final-inspection-star-b",
+          "type": "star",
+          "gridX": 14,
+          "gridY": 12.5
+        },
+        {
+          "id": "final-inspection-star-c",
+          "type": "star",
+          "gridX": 21.5,
+          "gridY": 13
+        }
+      ],
       "goal": {
         "deliveries": 25,
-        "maxLosses": 2,
+        "maxLosses": 1,
         "pieceBudget": 12,
-        "timeLimitSeconds": 45,
-        "idealTimeSeconds": 40
+        "timeLimitSeconds": 42,
+        "idealTimeSeconds": 36
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 720,
-        "centerY": 432,
+        "centerX": 672,
+        "centerY": 444,
         "zoom": 1
       }
     }
-  ]
+  ],
+  "updatedAt": "2026-07-22T22:00:49.668Z"
 }

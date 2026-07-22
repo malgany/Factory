@@ -75,6 +75,17 @@ const STAR_PICKUP_RADIUS = 30;
 const STAR_RENDER_RADIUS = COLLECTIBLE_STAR_RADIUS;
 const CONVEYOR_SPEED = 4.2;
 const SPRING_SPEED = 11.5;
+const TRACKED_CONVEYOR_ANGULAR_SPEED = 0.336;
+const TRACKED_CONVEYOR_WHEEL_RADIUS = 6.5;
+const TRACKED_CONVEYOR_TRACK_RADIUS = 8.5;
+const TRACKED_CONVEYOR_LINK_WIDTH = 7.5;
+const TRACKED_CONVEYOR_LINK_HEIGHT = 4;
+const TRACKED_CONVEYOR_LINK_COUNT = 24;
+const TRACKED_CONVEYOR_SPEED = 2.38;
+const TRACKED_CONVEYOR_STRAIGHT_LENGTH = 64;
+const TRACKED_CONVEYOR_ARC_LENGTH = Math.PI * TRACKED_CONVEYOR_TRACK_RADIUS;
+const TRACKED_CONVEYOR_TRACK_LENGTH =
+  TRACKED_CONVEYOR_STRAIGHT_LENGTH * 2 + TRACKED_CONVEYOR_ARC_LENGTH * 2;
 const FIXED_PHYSICS_STEP_MS = FIXED_PHYSICS_STEP_SECONDS * 1000;
 
 const COLORS = {
@@ -107,12 +118,27 @@ interface PhysicsMachine {
   body: MatterJS.BodyType;
 }
 
+interface TrackedConveyorRuntime {
+  machine: MachineState;
+  composite: MatterJS.CompositeType;
+  wheels: MatterJS.BodyType[];
+  links: MatterJS.BodyType[];
+  phase: number;
+  wheelAngle: number;
+}
+
+interface TrackedConveyorLinkLayout {
+  center: Point;
+  angle: number;
+}
+
 interface BoxRuntime {
   id: number;
   body: MatterJS.BodyType;
   image: Phaser.GameObjects.Image;
   bornAtSimulationMs: number;
   springReadyAt: number;
+  velocityBeforePhysics: Point;
 }
 
 interface WorldBounds {
@@ -142,6 +168,7 @@ interface DragState {
     | 'rotate'
     | 'obstacle-move'
     | 'obstacle-resize'
+    | 'obstacle-rotate'
     | 'collectible-move'
     | 'pan'
     | 'marquee';
@@ -153,6 +180,8 @@ interface DragState {
   beforeDocument?: EditorDocument;
   previewObstacle?: ObstacleDefinition;
   previewObstacles?: ObstacleDefinition[];
+  obstacleResizeHandle?: ObstacleResizeHandle;
+  obstacleResizeAnchor?: Point;
   collectibleId?: string;
   previewCollectible?: CollectibleDefinition;
   grabOffsetX?: number;
@@ -165,7 +194,7 @@ interface DragState {
 }
 
 type MachineClipboard = Pick<MachineState, 'type' | 'angle' | 'reversed' | 'fixed'>;
-type ObstacleClipboard = Pick<ObstacleDefinition, 'columns' | 'rows'>;
+type ObstacleClipboard = Pick<ObstacleDefinition, 'columns' | 'rows' | 'angle'>;
 type CollectibleClipboard = Pick<CollectibleDefinition, 'type'>;
 
 interface GroupClipboard {
@@ -179,6 +208,24 @@ interface EditorDocument {
   obstacles: ObstacleDefinition[];
   collectibles: CollectibleDefinition[];
 }
+
+type ResizeDirection = -1 | 0 | 1;
+
+interface ObstacleResizeHandle {
+  x: ResizeDirection;
+  y: ResizeDirection;
+}
+
+const OBSTACLE_RESIZE_HANDLES: readonly ObstacleResizeHandle[] = [
+  { x: -1, y: -1 },
+  { x: 0, y: -1 },
+  { x: 1, y: -1 },
+  { x: 1, y: 0 },
+  { x: 1, y: 1 },
+  { x: 0, y: 1 },
+  { x: -1, y: 1 },
+  { x: -1, y: 0 },
+];
 
 export type EditorTool = MachineType | 'obstacle' | 'star';
 
@@ -219,6 +266,7 @@ export interface FactoryDebugApi {
   selectObstacle(id: string): boolean;
   moveSelectedObstacle(gridX: number, gridY: number): boolean;
   resizeSelectedObstacle(columns: number, rows: number): boolean;
+  rotateSelectedObstacle(angle: number): boolean;
   placeCollectible(gridX: number, gridY: number): boolean;
   selectCollectible(id: string): boolean;
   moveSelectedCollectible(gridX: number, gridY: number): boolean;
@@ -263,14 +311,25 @@ function cloneEditorDocument(document: EditorDocument): EditorDocument {
   };
 }
 
+function activeMachineType(type: MachineType): MachineType {
+  return type === 'conveyor' ? 'tracked-conveyor' : type;
+}
+
+function normalizeAvailableMachineTypes(types: readonly MachineType[]): MachineType[] {
+  return [...new Set(types.map(activeMachineType))];
+}
+
 function cloneContract(contract: ContractDefinition): ContractDefinition {
   return {
     ...contract,
     grid: { ...contract.grid },
     goal: { ...contract.goal },
     initialCamera: { ...contract.initialCamera },
-    availableMachines: [...contract.availableMachines],
-    fixedMachines: cloneMachines(contract.fixedMachines),
+    availableMachines: normalizeAvailableMachineTypes(contract.availableMachines),
+    fixedMachines: cloneMachines(contract.fixedMachines).map((machine) => ({
+      ...machine,
+      type: activeMachineType(machine.type),
+    })),
     obstacles: cloneObstacles(contract.obstacles),
     collectibles: cloneCollectibles(contract.collectibles ?? []),
   };
@@ -289,11 +348,39 @@ function sameMachineState(a: MachineState, b: MachineState): boolean {
 }
 
 function drawPolygon(graphics: Phaser.GameObjects.Graphics, points: readonly Point[]): void {
-  graphics.fillPoints(
-    points.map((point) => new Phaser.Math.Vector2(point.x, point.y)),
-    true,
-    true,
-  );
+  const first = points[0];
+  if (!first || points.length < 3) return;
+  graphics.beginPath();
+  graphics.moveTo(first.x, first.y);
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    if (point) graphics.lineTo(point.x, point.y);
+  }
+  graphics.closePath();
+  graphics.fillPath();
+}
+
+function drawPolygons(
+  graphics: Phaser.GameObjects.Graphics,
+  polygons: readonly (readonly Point[])[],
+  parity?: 0 | 1,
+): void {
+  let hasPath = false;
+  graphics.beginPath();
+  for (let polygonIndex = 0; polygonIndex < polygons.length; polygonIndex += 1) {
+    if (parity !== undefined && polygonIndex % 2 !== parity) continue;
+    const points = polygons[polygonIndex]!;
+    const first = points[0];
+    if (!first || points.length < 3) continue;
+    graphics.moveTo(first.x, first.y);
+    for (let index = 1; index < points.length; index += 1) {
+      const point = points[index];
+      if (point) graphics.lineTo(point.x, point.y);
+    }
+    graphics.closePath();
+    hasPath = true;
+  }
+  if (hasPath) graphics.fillPath();
 }
 
 function linePolygon(
@@ -301,11 +388,16 @@ function linePolygon(
   points: readonly Point[],
   close = true,
 ): void {
-  graphics.strokePoints(
-    points.map((point) => new Phaser.Math.Vector2(point.x, point.y)),
-    close,
-    close,
-  );
+  const first = points[0];
+  if (!first || points.length < 2) return;
+  graphics.beginPath();
+  graphics.moveTo(first.x, first.y);
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    if (point) graphics.lineTo(point.x, point.y);
+  }
+  if (close) graphics.closePath();
+  graphics.strokePath();
 }
 
 function roundedRectanglePoints(
@@ -376,16 +468,76 @@ function drawDashedLine(
   }
 }
 
+function trackedConveyorWheelCenters(center: Point, angle: number): Point[] {
+  return [-32, 0, 32].map((offsetX) => localToWorld(center, angle, offsetX, 0));
+}
+
+function trackedConveyorLinkLayout(center: Point, machineAngle: number): TrackedConveyorLinkLayout[] {
+  return Array.from({ length: TRACKED_CONVEYOR_LINK_COUNT }, (_, index) =>
+    trackedConveyorPoseAt(
+      center,
+      machineAngle,
+      (index * TRACKED_CONVEYOR_TRACK_LENGTH) / TRACKED_CONVEYOR_LINK_COUNT,
+    ),
+  );
+}
+
+function trackedConveyorPoseAt(
+  center: Point,
+  machineAngle: number,
+  rawDistance: number,
+): TrackedConveyorLinkLayout {
+  let distance =
+    ((rawDistance % TRACKED_CONVEYOR_TRACK_LENGTH) + TRACKED_CONVEYOR_TRACK_LENGTH) %
+    TRACKED_CONVEYOR_TRACK_LENGTH;
+  let x: number;
+  let y: number;
+  let tangent: number;
+
+  if (distance < TRACKED_CONVEYOR_STRAIGHT_LENGTH) {
+    x = -32 + distance;
+    y = -TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = 0;
+  } else if (
+    (distance -= TRACKED_CONVEYOR_STRAIGHT_LENGTH) < TRACKED_CONVEYOR_ARC_LENGTH
+  ) {
+    const polar = -Math.PI / 2 + distance / TRACKED_CONVEYOR_TRACK_RADIUS;
+    x = 32 + Math.cos(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    y = Math.sin(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = polar + Math.PI / 2;
+  } else if ((distance -= TRACKED_CONVEYOR_ARC_LENGTH) < TRACKED_CONVEYOR_STRAIGHT_LENGTH) {
+    x = 32 - distance;
+    y = TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = Math.PI;
+  } else {
+    distance -= TRACKED_CONVEYOR_STRAIGHT_LENGTH;
+    const polar = Math.PI / 2 + distance / TRACKED_CONVEYOR_TRACK_RADIUS;
+    x = -32 + Math.cos(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    y = Math.sin(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = polar + Math.PI / 2;
+  }
+
+  return {
+    center: localToWorld(center, machineAngle, x, y),
+    angle: degreesToRadians(machineAngle) + tangent,
+  };
+}
+
 export class FactoryScene extends Phaser.Scene {
   private readonly history = new CommandHistory(120);
   private readonly editorHistory = new CommandHistory(120);
   private readonly eventUnsubscribers: Array<() => void> = [];
   private readonly machineBodies = new Map<string, PhysicsMachine>();
+  private readonly trackedConveyors = new Map<string, TrackedConveyorRuntime>();
   private readonly obstacleBodies: MatterJS.BodyType[] = [];
   private readonly boxes = new Map<number, BoxRuntime>();
   private readonly springCompression = new Map<string, number>();
   private readonly receiverPulse = new Map<string, number>();
   private readonly particles: Particle[] = [];
+  private sourceMachines: MachineState[] = [];
+  private conveyorMachines: MachineState[] = [];
+  private springMachines: MachineState[] = [];
+  private receiverMachines: MachineState[] = [];
 
   private gridGraphics!: Phaser.GameObjects.Graphics;
   private worldGraphics!: Phaser.GameObjects.Graphics;
@@ -443,6 +595,7 @@ export class FactoryScene extends Phaser.Scene {
   private simulationTimeMs = 0;
   private simulationVisualTimeMs = 0;
   private snapshotAccumulator = 0;
+  private lastIdleRenderSignature = '';
   private machineSequence = 0;
   private boxSequence = 0;
   private lastGridZoom = -1;
@@ -525,7 +678,17 @@ export class FactoryScene extends Phaser.Scene {
       this.status === 'running' ? deltaSeconds * this.simulationSpeed : deltaSeconds,
     );
     this.metrics.active = this.boxes.size;
-    this.renderWorld();
+    this.updateBoxVisuals();
+    if (this.worldNeedsContinuousRender()) {
+      this.renderWorld();
+      this.lastIdleRenderSignature = '';
+    } else {
+      const signature = this.idleWorldRenderSignature();
+      if (signature !== this.lastIdleRenderSignature) {
+        this.renderWorld();
+        this.lastIdleRenderSignature = signature;
+      }
+    }
 
     if (Math.abs(this.cameras.main.zoom - this.lastGridZoom) > 0.001) {
       this.drawGrid();
@@ -558,9 +721,9 @@ export class FactoryScene extends Phaser.Scene {
       mode === 'campaign'
         ? cloneContract(contractDefinition ?? getContract(contractId!))
         : undefined;
-    this.availableMachines = [
-      ...(this.contract?.availableMachines ?? SANDBOX_DEFINITION.availableMachines),
-    ];
+    this.availableMachines = normalizeAvailableMachineTypes(
+      this.contract?.availableMachines ?? SANDBOX_DEFINITION.availableMachines,
+    );
     this.obstacles = (this.contract?.obstacles ?? []).map((obstacle) => ({ ...obstacle }));
     this.collectibles = this.normalizeCollectibles(this.contract?.collectibles ?? []);
     const initialMachines =
@@ -597,7 +760,7 @@ export class FactoryScene extends Phaser.Scene {
     this.editorContract = draft;
     this.editorPersistenceLocked = false;
     this.contract = draft;
-    this.availableMachines = ['source', 'receiver', 'conveyor', 'spring'];
+    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring'];
     this.obstacles = this.normalizeObstacles(draft.obstacles);
     this.collectibles = this.normalizeCollectibles(draft.collectibles ?? []);
     this.machines = this.normalizeMachineIds(
@@ -613,7 +776,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
     this.ghostCollectible = undefined;
-    this.drag = undefined;
+    this.setDragState(undefined);
     this.simulationSpeed = 1;
     this.history.clear();
     this.editorHistory.clear();
@@ -667,7 +830,7 @@ export class FactoryScene extends Phaser.Scene {
     this.editorPreview = true;
     this.mode = 'preview';
     this.contract = cloneContract(draft);
-    this.availableMachines = [...draft.availableMachines];
+    this.availableMachines = normalizeAvailableMachineTypes(draft.availableMachines);
     this.machines = cloneMachines(draft.fixedMachines).map((machine) => ({
       ...machine,
       fixed: true,
@@ -705,7 +868,7 @@ export class FactoryScene extends Phaser.Scene {
     this.mode = 'editor';
     this.editorContract = cloneContract(state.contract);
     this.contract = this.editorContract;
-    this.availableMachines = ['source', 'receiver', 'conveyor', 'spring'];
+    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring'];
     this.applyEditorDocument(state.document, false);
     this.clearClipboard();
     this.selectedTool = undefined;
@@ -756,7 +919,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
     this.ghostCollectible = undefined;
-    this.drag = undefined;
+    this.setDragState(undefined);
     this.editorHistory.clear();
     this.history.clear();
     this.resetSimulation('build');
@@ -868,7 +1031,11 @@ export class FactoryScene extends Phaser.Scene {
   public reverseSelected(): boolean {
     if (!this.canBuild() || this.selectionCount() !== 1) return false;
     const selected = this.getSelectedMachine();
-    if (!selected || !this.canEditMachine(selected) || selected.type !== 'conveyor') {
+    if (
+      !selected ||
+      !this.canEditMachine(selected) ||
+      (selected.type !== 'conveyor' && selected.type !== 'tracked-conveyor')
+    ) {
       this.toast('Selecione uma esteira para inverter.', 'neutral');
       return false;
     }
@@ -1060,7 +1227,11 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private beginObstaclePaste(obstacle: ObstacleDefinition): void {
-    const clipboard: ObstacleClipboard = { columns: obstacle.columns, rows: obstacle.rows };
+    const clipboard: ObstacleClipboard = {
+      columns: obstacle.columns,
+      rows: obstacle.rows,
+      angle: obstacle.angle ?? 0,
+    };
     this.obstacleClipboard = clipboard;
     this.machineClipboard = undefined;
     this.collectibleClipboard = undefined;
@@ -1210,11 +1381,24 @@ export class FactoryScene extends Phaser.Scene {
     return true;
   }
 
+  private dragOccludesUi(drag: DragState | undefined): boolean {
+    return Boolean(drag && drag.kind !== 'pan' && drag.kind !== 'marquee');
+  }
+
+  private setDragState(next: DragState | undefined): void {
+    const wasOccluding = this.dragOccludesUi(this.drag);
+    const isOccluding = this.dragOccludesUi(next);
+    this.drag = next;
+    if (wasOccluding !== isOccluding) {
+      appEvents.emit('game:dragging', { active: isOccluding });
+    }
+  }
+
   private beginGroupMove(world: Point): boolean {
     const machines = this.getSelectedMachines();
     const obstacles = this.getSelectedObstacles();
     if (machines.length + obstacles.length < 2) return false;
-    this.drag = {
+    this.setDragState({
       kind: 'group-move',
       ...(this.isAuthoring()
         ? { beforeDocument: this.captureEditorDocument() }
@@ -1226,7 +1410,7 @@ export class FactoryScene extends Phaser.Scene {
       valid: true,
       lastScreenX: 0,
       lastScreenY: 0,
-    };
+    });
     return true;
   }
 
@@ -1406,6 +1590,7 @@ export class FactoryScene extends Phaser.Scene {
       gridY: Math.round(gridY),
       columns: Math.max(1, Math.round(columns)),
       rows: Math.max(1, Math.round(rows)),
+      angle: 0,
     };
     if (!this.isObstaclePlacementValid(obstacle)) {
       this.toast('Essa área está ocupada ou fora do tabuleiro.', 'danger');
@@ -1441,7 +1626,11 @@ export class FactoryScene extends Phaser.Scene {
     if (!this.isAuthoring() || !this.canBuild()) return false;
     const selected = this.getSelectedObstacle();
     if (!selected) return false;
-    const candidate = { ...selected, gridX: Math.round(gridX), gridY: Math.round(gridY) };
+    const candidate = {
+      ...selected,
+      gridX: this.snapEditorPosition(gridX),
+      gridY: this.snapEditorPosition(gridY),
+    };
     if (!this.isObstaclePlacementValid(candidate, selected.id)) return false;
     this.replaceObstacleWithHistory(selected, candidate, 'Mover bloqueador');
     return true;
@@ -1458,6 +1647,17 @@ export class FactoryScene extends Phaser.Scene {
     };
     if (!this.isObstaclePlacementValid(candidate, selected.id)) return false;
     this.replaceObstacleWithHistory(selected, candidate, 'Redimensionar bloqueador');
+    return true;
+  }
+
+  public rotateSelectedObstacle(angle: number): boolean {
+    if (!this.isAuthoring() || !this.canBuild()) return false;
+    const selected = this.getSelectedObstacle();
+    if (!selected) return false;
+    const candidate = { ...selected, angle: this.snapRotationAngle(angle) };
+    if (!this.isObstaclePlacementValid(candidate, selected.id)) return false;
+    this.replaceObstacleWithHistory(selected, candidate, 'Girar bloqueador');
+    this.audio('place');
     return true;
   }
 
@@ -1567,7 +1767,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostObstacle = undefined;
     this.ghostCollectible = undefined;
     this.clearClipboard();
-    this.drag = undefined;
+    this.setDragState(undefined);
   }
 
   private clearClipboard(): void {
@@ -1601,6 +1801,7 @@ export class FactoryScene extends Phaser.Scene {
     this.metrics = this.freshMetrics();
     this.spawnAccumulator = this.getSpawnInterval();
     this.status = 'running';
+    this.rebuildStaticBodies();
     this.clearInteractionFocus();
     this.matter.world.resume();
     this.emitSnapshot();
@@ -1615,6 +1816,7 @@ export class FactoryScene extends Phaser.Scene {
 
   public resetRun(): void {
     this.resetSimulation('build');
+    this.rebuildStaticBodies();
     this.emitSnapshot();
   }
 
@@ -1846,7 +2048,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private handleToolDrag(payload: {
-    type: MachineType;
+    type: EditorTool;
     phase: 'start' | 'move' | 'end' | 'cancel';
     clientX: number;
     clientY: number;
@@ -1862,9 +2064,16 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     if (payload.phase === 'start') {
-      this.selectTool(payload.type);
+      if (this.isAuthoring()) this.selectEditorTool(payload.type);
+      else if (payload.type !== 'obstacle' && payload.type !== 'star') this.selectTool(payload.type);
       return;
     }
+
+    const editorOnlyTool = payload.type === 'obstacle' || payload.type === 'star';
+    const dragActive = this.isAuthoring()
+      ? this.selectedEditorTool === payload.type
+      : !editorOnlyTool && this.selectedTool === payload.type;
+    if (!dragActive || !this.canBuild()) return;
 
     const bounds = this.game.canvas.getBoundingClientRect();
     const canvasX = (payload.clientX - bounds.left) * (this.game.canvas.width / bounds.width);
@@ -1874,8 +2083,39 @@ export class FactoryScene extends Phaser.Scene {
     if (payload.phase === 'move') {
       if (!this.isInsideWorld(world)) {
         this.ghostMachine = undefined;
+        this.ghostObstacle = undefined;
+        this.ghostCollectible = undefined;
         return;
       }
+
+      if (payload.type === 'obstacle') {
+        this.ghostObstacle = {
+          id: 'ghost-obstacle',
+          gridX: Math.floor(world.x / CELL_SIZE),
+          gridY: Math.floor(world.y / CELL_SIZE),
+          columns: 1,
+          rows: 1,
+        };
+        this.ghostValid = this.isObstaclePlacementValid(this.ghostObstacle);
+        this.ghostMachine = undefined;
+        this.ghostCollectible = undefined;
+        return;
+      }
+
+      if (payload.type === 'star') {
+        const grid = this.collectiblePositionFromWorld(world);
+        this.ghostCollectible = {
+          id: 'ghost-collectible',
+          type: 'star',
+          gridX: grid.x,
+          gridY: grid.y,
+        };
+        this.ghostValid = this.isCollectiblePlacementValid(this.ghostCollectible);
+        this.ghostMachine = undefined;
+        this.ghostObstacle = undefined;
+        return;
+      }
+
       const grid = this.machinePositionFromWorld(world);
       this.ghostMachine = {
         id: 'ghost',
@@ -1884,23 +2124,34 @@ export class FactoryScene extends Phaser.Scene {
         gridY: grid.y,
         angle: 0,
         reversed: false,
-        fixed: false,
+        fixed: this.isAuthoring(),
       };
       this.ghostValid =
-        this.canPlaceAnotherPiece() && this.isMachinePlacementValid(this.ghostMachine);
+        (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+        this.isMachinePlacementValid(this.ghostMachine);
+      this.ghostObstacle = undefined;
+      this.ghostCollectible = undefined;
       return;
     }
 
     if (this.isInsideWorld(world)) {
-      const grid = this.machinePositionFromWorld(world);
-      this.placeMachineAt(payload.type, grid.x, grid.y);
-    } else {
-      this.selectedTool = undefined;
-      this.selectedEditorTool = undefined;
-      this.ghostMachine = undefined;
-      this.ghostObstacle = undefined;
-      this.emitSnapshot();
+      if (payload.type === 'obstacle') {
+        this.placeObstacleAt(Math.floor(world.x / CELL_SIZE), Math.floor(world.y / CELL_SIZE));
+      } else if (payload.type === 'star') {
+        const grid = this.collectiblePositionFromWorld(world);
+        this.placeCollectibleAt(grid.x, grid.y);
+      } else {
+        const grid = this.machinePositionFromWorld(world);
+        this.placeMachineAt(payload.type, grid.x, grid.y);
+      }
     }
+
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
+    this.emitSnapshot();
   }
 
   private handlePointerDown(pointer: Phaser.Input.Pointer): void {
@@ -1916,13 +2167,13 @@ export class FactoryScene extends Phaser.Scene {
       this.clearSelection();
       this.ghostMachine = undefined;
       this.ghostObstacle = undefined;
-      this.drag = {
+      this.setDragState({
         kind: 'marquee',
         startWorld: { ...world },
         currentWorld: { ...world },
         lastScreenX: pointer.x,
         lastScreenY: pointer.y,
-      };
+      });
       this.emitSnapshot();
       return;
     }
@@ -1974,40 +2225,13 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    const hitCollectible = this.isAuthoring() ? this.findCollectibleAt(world) : undefined;
-    if (hitCollectible) {
-      this.selectedCollectibleId = hitCollectible.id;
-      this.selectedMachineId = undefined;
-      this.selectedObstacleId = undefined;
-      this.selectedTool = undefined;
-      this.selectedEditorTool = undefined;
-      this.drag = {
-        kind: 'collectible-move',
-        collectibleId: hitCollectible.id,
-        beforeDocument: this.captureEditorDocument(),
-        previewCollectible: { ...hitCollectible },
-        valid: true,
-        lastScreenX: pointer.x,
-        lastScreenY: pointer.y,
-      };
-      this.emitSnapshot();
-      return;
-    }
-
     const selectedHit = [...this.getSelectedMachines()]
       .reverse()
       .find((machine) => pointInsideMachine(world, machine, 7));
     const selectedObstacleHit = this.isAuthoring()
-      ? [...this.getSelectedObstacles()].reverse().find((obstacle) => {
-          const x = obstacle.gridX * CELL_SIZE;
-          const y = obstacle.gridY * CELL_SIZE;
-          return (
-            world.x >= x &&
-            world.x <= x + obstacle.columns * CELL_SIZE &&
-            world.y >= y &&
-            world.y <= y + obstacle.rows * CELL_SIZE
-          );
-        })
+      ? [...this.getSelectedObstacles()]
+          .reverse()
+          .find((obstacle) => this.pointInsideObstacle(world, obstacle))
       : undefined;
     if (
       this.selectionCount() > 1 &&
@@ -2028,7 +2252,7 @@ export class FactoryScene extends Phaser.Scene {
       this.isRotatable(selected) &&
       distance(world, rotationHandle(selected)) <= 18 / fromCameraZoom(this.cameras.main.zoom)
     ) {
-      this.drag = {
+      this.setDragState({
         kind: 'rotate',
         machineId: selected.id,
         before: cloneMachines(this.machines),
@@ -2036,7 +2260,7 @@ export class FactoryScene extends Phaser.Scene {
         valid: true,
         lastScreenX: pointer.x,
         lastScreenY: pointer.y,
-      };
+      });
       this.emitAngle(pointer, selected.angle, true);
       return;
     }
@@ -2046,18 +2270,126 @@ export class FactoryScene extends Phaser.Scene {
       this.selectionCount() === 1 &&
       selectedObstacle &&
       this.isAuthoring() &&
-      distance(world, this.obstacleResizeHandle(selectedObstacle)) <=
+      distance(world, this.obstacleRotationHandle(selectedObstacle)) <=
         18 / fromCameraZoom(this.cameras.main.zoom)
     ) {
-      this.drag = {
-        kind: 'obstacle-resize',
+      this.setDragState({
+        kind: 'obstacle-rotate',
         obstacleId: selectedObstacle.id,
         beforeDocument: this.captureEditorDocument(),
         previewObstacle: { ...selectedObstacle },
         valid: true,
         lastScreenX: pointer.x,
         lastScreenY: pointer.y,
-      };
+      });
+      this.emitAngle(pointer, selectedObstacle.angle ?? 0, true);
+      return;
+    }
+
+    const obstacleResizeHandle =
+      this.selectionCount() === 1 && selectedObstacle && this.isAuthoring()
+        ? this.findObstacleResizeHandle(selectedObstacle, world)
+        : undefined;
+    if (selectedObstacle && obstacleResizeHandle) {
+      this.setDragState({
+        kind: 'obstacle-resize',
+        obstacleId: selectedObstacle.id,
+        beforeDocument: this.captureEditorDocument(),
+        previewObstacle: { ...selectedObstacle },
+        obstacleResizeHandle,
+        obstacleResizeAnchor: this.obstacleResizeHandlePoint(selectedObstacle, {
+          x: -obstacleResizeHandle.x as ResizeDirection,
+          y: -obstacleResizeHandle.y as ResizeDirection,
+        }),
+        valid: true,
+        lastScreenX: pointer.x,
+        lastScreenY: pointer.y,
+      });
+      return;
+    }
+
+    // Selection affordances are drawn above collectibles, so their hit areas must follow the
+    // same visual stacking order. A collectible remains clickable wherever it extends beyond
+    // the selected item's body and controls.
+    if (this.selectionCount() === 1 && selectedHit) {
+      if (!this.canEditMachine(selectedHit)) {
+        this.selectedMachineId = undefined;
+        this.selectedObstacleId = undefined;
+        this.emitSnapshot();
+        return;
+      }
+      this.selectedMachineId = selectedHit.id;
+      this.selectedObstacleId = undefined;
+      this.selectedTool = undefined;
+      this.selectedEditorTool = undefined;
+      if (this.canBuild()) {
+        const center = machineCenter(selectedHit);
+        this.setDragState({
+          kind: 'move',
+          machineId: selectedHit.id,
+          before: cloneMachines(this.machines),
+          preview: { ...selectedHit },
+          grabOffsetX: world.x - center.x,
+          grabOffsetY: world.y - center.y,
+          valid: true,
+          lastScreenX: pointer.x,
+          lastScreenY: pointer.y,
+        });
+      }
+      this.emitSnapshot();
+      return;
+    }
+
+    if (this.selectionCount() === 1 && selectedObstacleHit) {
+      this.selectedObstacleId = selectedObstacleHit.id;
+      this.selectedMachineId = undefined;
+      this.selectedTool = undefined;
+      this.selectedEditorTool = undefined;
+      this.setDragState({
+        kind: 'obstacle-move',
+        obstacleId: selectedObstacleHit.id,
+        beforeDocument: this.captureEditorDocument(),
+        previewObstacle: { ...selectedObstacleHit },
+        grabOffsetX: world.x / CELL_SIZE - selectedObstacleHit.gridX,
+        grabOffsetY: world.y / CELL_SIZE - selectedObstacleHit.gridY,
+        valid: true,
+        lastScreenX: pointer.x,
+        lastScreenY: pointer.y,
+      });
+      this.emitSnapshot();
+      return;
+    }
+
+    const selectedCollectible = this.getSelectedCollectible();
+    const prioritizedCollectible =
+      this.selectionCount() === 1 &&
+      selectedCollectible &&
+      distance(world, this.collectibleCenter(selectedCollectible)) <=
+        (STAR_RENDER_RADIUS + 8) / fromCameraZoom(this.cameras.main.zoom)
+        ? selectedCollectible
+        : undefined;
+    const hitCollectible = this.isAuthoring()
+      ? prioritizedCollectible ?? this.findCollectibleAt(world)
+      : undefined;
+    if (hitCollectible) {
+      const center = this.collectibleCenter(hitCollectible);
+      this.selectedCollectibleId = hitCollectible.id;
+      this.selectedMachineId = undefined;
+      this.selectedObstacleId = undefined;
+      this.selectedTool = undefined;
+      this.selectedEditorTool = undefined;
+      this.setDragState({
+        kind: 'collectible-move',
+        collectibleId: hitCollectible.id,
+        beforeDocument: this.captureEditorDocument(),
+        previewCollectible: { ...hitCollectible },
+        grabOffsetX: world.x - center.x,
+        grabOffsetY: world.y - center.y,
+        valid: true,
+        lastScreenX: pointer.x,
+        lastScreenY: pointer.y,
+      });
+      this.emitSnapshot();
       return;
     }
 
@@ -2073,15 +2405,18 @@ export class FactoryScene extends Phaser.Scene {
       this.selectedTool = undefined;
       this.selectedEditorTool = undefined;
       if (this.canEditMachine(hit) && this.canBuild()) {
-        this.drag = {
+        const center = machineCenter(hit);
+        this.setDragState({
           kind: 'move',
           machineId: hit.id,
           before: cloneMachines(this.machines),
           preview: { ...hit },
+          grabOffsetX: world.x - center.x,
+          grabOffsetY: world.y - center.y,
           valid: true,
           lastScreenX: pointer.x,
           lastScreenY: pointer.y,
-        };
+        });
       }
       this.emitSnapshot();
       return;
@@ -2092,7 +2427,7 @@ export class FactoryScene extends Phaser.Scene {
       this.selectedMachineId = undefined;
       this.selectedTool = undefined;
       this.selectedEditorTool = undefined;
-      this.drag = {
+      this.setDragState({
         kind: 'obstacle-move',
         obstacleId: hitObstacle.id,
         beforeDocument: this.captureEditorDocument(),
@@ -2102,7 +2437,7 @@ export class FactoryScene extends Phaser.Scene {
         valid: true,
         lastScreenX: pointer.x,
         lastScreenY: pointer.y,
-      };
+      });
       this.emitSnapshot();
       return;
     }
@@ -2110,11 +2445,11 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
     this.selectedCollectibleId = undefined;
-    this.drag = {
+    this.setDragState({
       kind: 'pan',
       lastScreenX: pointer.x,
       lastScreenY: pointer.y,
-    };
+    });
     this.emitSnapshot();
   }
 
@@ -2145,7 +2480,10 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     if (this.drag?.kind === 'move' && this.drag.preview && pointer.isDown) {
-      const grid = this.machinePositionFromWorld(world);
+      const grid = this.machinePositionFromWorld({
+        x: world.x - (this.drag.grabOffsetX ?? 0),
+        y: world.y - (this.drag.grabOffsetY ?? 0),
+      });
       this.drag.preview = { ...this.drag.preview, gridX: grid.x, gridY: grid.y };
       this.drag.valid = this.isMachinePlacementValid(this.drag.preview, this.drag.machineId);
       return;
@@ -2163,8 +2501,12 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     if (this.drag?.kind === 'obstacle-move' && this.drag.previewObstacle && pointer.isDown) {
-      const gridX = Math.round(world.x / CELL_SIZE - (this.drag.grabOffsetX ?? 0));
-      const gridY = Math.round(world.y / CELL_SIZE - (this.drag.grabOffsetY ?? 0));
+      const gridX = this.snapEditorPosition(
+        world.x / CELL_SIZE - (this.drag.grabOffsetX ?? 0),
+      );
+      const gridY = this.snapEditorPosition(
+        world.y / CELL_SIZE - (this.drag.grabOffsetY ?? 0),
+      );
       this.drag.previewObstacle = { ...this.drag.previewObstacle, gridX, gridY };
       this.drag.valid = this.isObstaclePlacementValid(
         this.drag.previewObstacle,
@@ -2173,13 +2515,52 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
-    if (this.drag?.kind === 'obstacle-resize' && this.drag.previewObstacle && pointer.isDown) {
-      const columns = Math.max(
-        1,
-        Math.round(world.x / CELL_SIZE - this.drag.previewObstacle.gridX),
+    if (this.drag?.kind === 'obstacle-rotate' && this.drag.previewObstacle && pointer.isDown) {
+      const center = this.obstacleCenter(this.drag.previewObstacle);
+      const angle = this.snapRotationAngle(
+        Phaser.Math.RadToDeg(Math.atan2(world.y - center.y, world.x - center.x)) + 90,
       );
-      const rows = Math.max(1, Math.round(world.y / CELL_SIZE - this.drag.previewObstacle.gridY));
-      this.drag.previewObstacle = { ...this.drag.previewObstacle, columns, rows };
+      this.drag.previewObstacle = { ...this.drag.previewObstacle, angle };
+      this.drag.valid = this.isObstaclePlacementValid(
+        this.drag.previewObstacle,
+        this.drag.obstacleId,
+      );
+      this.emitAngle(pointer, angle, true);
+      return;
+    }
+
+    if (
+      this.drag?.kind === 'obstacle-resize' &&
+      this.drag.previewObstacle &&
+      this.drag.obstacleResizeHandle &&
+      this.drag.obstacleResizeAnchor &&
+      pointer.isDown
+    ) {
+      const handle = this.drag.obstacleResizeHandle;
+      const anchor = this.drag.obstacleResizeAnchor;
+      const angle = this.drag.previewObstacle.angle ?? 0;
+      const localPointer = worldToLocal(anchor, angle, world);
+      const columns =
+        handle.x === 0
+          ? this.drag.previewObstacle.columns
+          : Math.max(1, Math.round((localPointer.x * handle.x) / CELL_SIZE));
+      const rows =
+        handle.y === 0
+          ? this.drag.previewObstacle.rows
+          : Math.max(1, Math.round((localPointer.y * handle.y) / CELL_SIZE));
+      const center = localToWorld(
+        anchor,
+        angle,
+        (handle.x * columns * CELL_SIZE) / 2,
+        (handle.y * rows * CELL_SIZE) / 2,
+      );
+      this.drag.previewObstacle = {
+        ...this.drag.previewObstacle,
+        gridX: this.snapEditorPosition(center.x / CELL_SIZE - columns / 2),
+        gridY: this.snapEditorPosition(center.y / CELL_SIZE - rows / 2),
+        columns,
+        rows,
+      };
       this.drag.valid = this.isObstaclePlacementValid(
         this.drag.previewObstacle,
         this.drag.obstacleId,
@@ -2192,7 +2573,10 @@ export class FactoryScene extends Phaser.Scene {
       this.drag.previewCollectible &&
       pointer.isDown
     ) {
-      const grid = this.collectiblePositionFromWorld(world);
+      const grid = this.collectiblePositionFromWorld({
+        x: world.x - (this.drag.grabOffsetX ?? 0),
+        y: world.y - (this.drag.grabOffsetY ?? 0),
+      });
       this.drag.previewCollectible = {
         ...this.drag.previewCollectible,
         gridX: grid.x,
@@ -2311,12 +2695,12 @@ export class FactoryScene extends Phaser.Scene {
 
   private handlePointerUp(pointer: Phaser.Input.Pointer): void {
     if (this.editorPersistenceLocked && this.isAuthoring()) {
-      this.drag = undefined;
+      this.setDragState(undefined);
       return;
     }
 
     const drag = this.drag;
-    this.drag = undefined;
+    this.setDragState(undefined);
     if (!drag) return;
 
     if (drag.kind === 'marquee' && drag.startWorld && drag.currentWorld) {
@@ -2366,9 +2750,14 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     if (drag.kind === 'rotate') this.emitAngle(pointer, drag.preview?.angle ?? 0, false);
+    if (drag.kind === 'obstacle-rotate') {
+      this.emitAngle(pointer, drag.previewObstacle?.angle ?? 0, false);
+    }
 
     if (
-      (drag.kind === 'obstacle-move' || drag.kind === 'obstacle-resize') &&
+      (drag.kind === 'obstacle-move' ||
+        drag.kind === 'obstacle-resize' ||
+        drag.kind === 'obstacle-rotate') &&
       drag.previewObstacle &&
       drag.beforeDocument
     ) {
@@ -2388,7 +2777,12 @@ export class FactoryScene extends Phaser.Scene {
       this.applyEditorDocument(after, false);
       this.activeHistory().record(
         createSnapshotCommand({
-          label: drag.kind === 'obstacle-resize' ? 'Redimensionar bloqueador' : 'Mover bloqueador',
+          label:
+            drag.kind === 'obstacle-resize'
+              ? 'Redimensionar bloqueador'
+              : drag.kind === 'obstacle-rotate'
+                ? 'Girar bloqueador'
+                : 'Mover bloqueador',
           before: drag.beforeDocument,
           after,
           apply: (snapshot) => this.applyEditorDocument(snapshot),
@@ -2462,7 +2856,7 @@ export class FactoryScene extends Phaser.Scene {
     const interval = this.getSpawnInterval();
     if (this.spawnAccumulator < interval || this.boxes.size >= 32) return;
     this.spawnAccumulator %= interval;
-    for (const source of this.machines.filter((machine) => machine.type === 'source')) {
+    for (const source of this.sourceMachines) {
       this.spawnBox(source);
     }
   }
@@ -2473,6 +2867,10 @@ export class FactoryScene extends Phaser.Scene {
     this.spawnAccumulator += FIXED_PHYSICS_STEP_SECONDS;
     this.updateSources();
     this.updateConveyors();
+    this.updateTrackedConveyors();
+    for (const box of this.boxes.values()) {
+      box.velocityBeforePhysics = { ...box.body.velocity };
+    }
     this.matter.world.step(FIXED_PHYSICS_STEP_MS);
     this.updateCollectibles();
     this.updateSprings();
@@ -2512,14 +2910,14 @@ export class FactoryScene extends Phaser.Scene {
       image,
       bornAtSimulationMs: this.simulationVisualTimeMs,
       springReadyAt: 0,
+      velocityBeforePhysics: { ...body.velocity },
     });
     this.audio('spawn');
   }
 
   private updateConveyors(): void {
-    const conveyors = this.machines.filter((machine) => machine.type === 'conveyor');
     for (const box of this.boxes.values()) {
-      for (const conveyor of conveyors) {
+      for (const conveyor of this.conveyorMachines) {
         const center = machineCenter(conveyor);
         const local = worldToLocal(center, conveyor.angle, box.body.position);
         const dimensions = MACHINE_PHYSICS_DIMENSIONS.conveyor;
@@ -2538,13 +2936,43 @@ export class FactoryScene extends Phaser.Scene {
     }
   }
 
+  private updateTrackedConveyors(): void {
+    for (const runtime of this.trackedConveyors.values()) {
+      const direction = runtime.machine.reversed ? -1 : 1;
+      runtime.phase =
+        (runtime.phase + TRACKED_CONVEYOR_SPEED * direction + TRACKED_CONVEYOR_TRACK_LENGTH) %
+        TRACKED_CONVEYOR_TRACK_LENGTH;
+      runtime.wheelAngle += TRACKED_CONVEYOR_ANGULAR_SPEED * direction;
+      const center = machineCenter(runtime.machine);
+      for (let index = 0; index < runtime.links.length; index += 1) {
+        const link = runtime.links[index]!;
+        const pose = trackedConveyorPoseAt(
+          center,
+          runtime.machine.angle,
+          (index * TRACKED_CONVEYOR_TRACK_LENGTH) / TRACKED_CONVEYOR_LINK_COUNT + runtime.phase,
+        );
+        let targetAngle = pose.angle;
+        while (targetAngle - link.angle > Math.PI) targetAngle -= Math.PI * 2;
+        while (targetAngle - link.angle < -Math.PI) targetAngle += Math.PI * 2;
+        // Guided static bodies act as a stable kinematic chain. Passing updateVelocity=true
+        // gives Matter the surface velocity it needs to resolve friction against boxes.
+        this.matter.body.setPosition(link, pose.center, true);
+        this.matter.body.setAngle(link, targetAngle, true);
+      }
+      for (const wheel of runtime.wheels) {
+        this.matter.body.setAngle(wheel, runtime.wheelAngle, true);
+      }
+    }
+  }
+
   private updateSprings(): void {
-    const springs = this.machines.filter((machine) => machine.type === 'spring');
     for (const box of this.boxes.values()) {
       if (this.simulationTimeMs < box.springReadyAt) continue;
-      for (const spring of springs) {
+      for (const spring of this.springMachines) {
         const center = machineCenter(spring);
         const dimensions = MACHINE_DIMENSIONS.spring;
+        const localBox = worldToLocal(center, spring.angle, box.body.position);
+        const face = localBox.y <= 0 ? 'top' : 'bottom';
         if (!boxTouchesOrientedSurface(
           box.body.position,
           Phaser.Math.RadToDeg(box.body.angle),
@@ -2553,20 +2981,29 @@ export class FactoryScene extends Phaser.Scene {
           spring.angle,
           dimensions.width,
           dimensions.height,
+          1,
+          face,
         )) {
           continue;
         }
 
         const radians = degreesToRadians(spring.angle);
         const up = { x: Math.sin(radians), y: -Math.cos(radians) };
-        const approachSpeed = box.body.velocity.x * up.x + box.body.velocity.y * up.y;
+        const normalDirection = face === 'top' ? 1 : -1;
+        const normal = {
+          x: up.x * normalDirection,
+          y: up.y * normalDirection,
+        };
+        const incomingVelocity = box.velocityBeforePhysics;
+        const approachSpeed =
+          incomingVelocity.x * normal.x + incomingVelocity.y * normal.y;
         if (approachSpeed > 1.5) continue;
         this.matter.body.setVelocity(
           box.body,
-          springVelocity(box.body.velocity, spring.angle, SPRING_SPEED),
+          springVelocity(incomingVelocity, spring.angle, SPRING_SPEED, normalDirection),
         );
         box.springReadyAt = this.simulationTimeMs + 360;
-        this.springCompression.set(spring.id, 1);
+        this.springCompression.set(spring.id, normalDirection);
         this.spawnBurst(box.body.position.x, box.body.position.y, COLORS.blueLight, 5);
         this.audio('bounce');
         break;
@@ -2594,10 +3031,9 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private updateReceivers(): void {
-    const receivers = this.machines.filter((machine) => machine.type === 'receiver');
     const delivered: BoxRuntime[] = [];
     for (const box of this.boxes.values()) {
-      for (const receiver of receivers) {
+      for (const receiver of this.receiverMachines) {
         const dimensions = MACHINE_PHYSICS_DIMENSIONS.receiver;
         if (
           pointInsideOrientedSensor(
@@ -2686,9 +3122,9 @@ export class FactoryScene extends Phaser.Scene {
       else this.collectibleDisappear.set(id, next);
     }
     for (const [id, compression] of this.springCompression) {
-      const next = Math.max(0, compression - deltaSeconds * 4.8);
-      if (next === 0) this.springCompression.delete(id);
-      else this.springCompression.set(id, next);
+      const nextMagnitude = Math.max(0, Math.abs(compression) - deltaSeconds * 4.8);
+      if (nextMagnitude === 0) this.springCompression.delete(id);
+      else this.springCompression.set(id, Math.sign(compression) * nextMagnitude);
     }
     for (const [id, pulse] of this.receiverPulse) {
       const next = Math.max(0, pulse - deltaSeconds * 2.4);
@@ -2704,6 +3140,54 @@ export class FactoryScene extends Phaser.Scene {
       particle.velocityY += 320 * deltaSeconds;
       if (particle.life <= 0) this.particles.splice(index, 1);
     }
+  }
+
+  private worldNeedsContinuousRender(): boolean {
+    return Boolean(
+      this.status === 'running' ||
+      this.drag ||
+      this.ghostMachine ||
+      this.ghostObstacle ||
+      this.ghostCollectible ||
+      this.ghostGroupMachines.length > 0 ||
+      this.ghostGroupObstacles.length > 0 ||
+      this.springCompression.size > 0 ||
+      this.receiverPulse.size > 0 ||
+      this.collectibleDisappear.size > 0 ||
+      this.particles.length > 0
+    );
+  }
+
+  private idleWorldRenderSignature(): string {
+    const camera = this.cameras.main;
+    const machines = this.machines
+      .map(
+        ({ id, type, gridX, gridY, angle, reversed, fixed }) =>
+          `${id}:${type}:${gridX}:${gridY}:${angle}:${Number(reversed)}:${Number(fixed)}`,
+      )
+      .join(';');
+    const obstacles = this.obstacles
+      .map(({ id, gridX, gridY, columns, rows }) => `${id}:${gridX}:${gridY}:${columns}:${rows}`)
+      .join(';');
+    const collectibles = this.collectibles
+      .map(({ id, type, gridX, gridY }) => `${id}:${type}:${gridX}:${gridY}`)
+      .join(';');
+    const boxes = [...this.boxes.values()]
+      .map(({ id, body }) => `${id}:${body.position.x}:${body.position.y}:${body.angle}`)
+      .join(';');
+
+    return [
+      this.status,
+      camera.zoom,
+      this.metrics.delivered,
+      machines,
+      obstacles,
+      collectibles,
+      boxes,
+      [...this.selectedMachineIds].join(','),
+      [...this.selectedObstacleIds].join(','),
+      this.selectedCollectibleId ?? '',
+    ].join('|');
   }
 
   private renderWorld(): void {
@@ -2756,8 +3240,6 @@ export class FactoryScene extends Phaser.Scene {
         this.drag.valid === false ? 0.45 : 1,
       );
     }
-    for (const box of this.boxes.values()) this.drawBox(box);
-
     const effects = this.effectsGraphics;
     effects.clear();
     for (const particle of this.particles) {
@@ -2866,14 +3348,12 @@ export class FactoryScene extends Phaser.Scene {
     alpha = 1,
   ): void {
     const center = this.collectibleCenter(collectible);
-    const phase = this.time.now * 0.0042 + this.collectiblePhase(collectible.id);
-    const facing = Math.cos(phase);
+    const facing = this.isAuthoring()
+      ? 1
+      : Math.cos(this.time.now * 0.0042 + this.collectiblePhase(collectible.id));
     const widthScale = 0.2 + Math.abs(facing) * 0.8;
     const radius = STAR_RENDER_RADIUS * Math.max(0, scale);
     if (radius <= 0.1 || alpha <= 0.01) return;
-
-    graphics.fillStyle(COLORS.graphite, alpha * 0.22);
-    graphics.fillEllipse(center.x + 2, center.y + radius * 0.78, radius * 1.55, radius * 0.42);
 
     const points: Point[] = [];
     for (let index = 0; index < 10; index += 1) {
@@ -2926,20 +3406,25 @@ export class FactoryScene extends Phaser.Scene {
     alpha = 1,
     valid = true,
   ): void {
-    const x = obstacle.gridX * CELL_SIZE;
-    const y = obstacle.gridY * CELL_SIZE;
     const width = obstacle.columns * CELL_SIZE;
     const height = obstacle.rows * CELL_SIZE;
+    const center = this.obstacleCenter(obstacle);
+    const angle = obstacle.angle ?? 0;
+    const polygon = rectangleCorners(center, width, height, angle);
     graphics.fillStyle(valid ? COLORS.obstacle : COLORS.red, alpha);
-    graphics.fillRect(x, y, width, height);
-    graphics.fillStyle(COLORS.graphiteSoft, 0.12 * alpha);
-    for (let offset = -height; offset < width; offset += 24) {
-      const startX = Math.max(x, x + offset);
-      const startY = Math.max(y, y - offset);
-      const endX = Math.min(x + width, x + offset + height);
-      const endY = Math.min(y + height, y + width - offset);
-      graphics.lineStyle(3, COLORS.graphiteSoft, 0.13 * alpha);
-      graphics.lineBetween(startX, startY, endX, endY);
+    drawPolygon(graphics, polygon);
+    graphics.lineStyle(2, valid ? COLORS.graphiteSoft : COLORS.red, 0.38 * alpha);
+    linePolygon(graphics, polygon);
+    graphics.lineStyle(3, COLORS.graphiteSoft, 0.13 * alpha);
+    const minimumOffset = -width / 2 - height / 2;
+    const maximumOffset = width / 2 + height / 2;
+    for (let offset = minimumOffset; offset <= maximumOffset; offset += 24) {
+      const minimumY = Math.max(-height / 2, -width / 2 - offset);
+      const maximumY = Math.min(height / 2, width / 2 - offset);
+      if (minimumY >= maximumY) continue;
+      const start = localToWorld(center, angle, offset + minimumY, minimumY);
+      const end = localToWorld(center, angle, offset + maximumY, maximumY);
+      graphics.lineBetween(start.x, start.y, end.x, end.y);
     }
   }
 
@@ -2957,6 +3442,9 @@ export class FactoryScene extends Phaser.Scene {
         break;
       case 'conveyor':
         this.drawConveyor(graphics, machine, center, alpha, color);
+        break;
+      case 'tracked-conveyor':
+        this.drawTrackedConveyor(graphics, machine, center, alpha, valid);
         break;
       case 'receiver':
         this.drawReceiver(graphics, machine, center, alpha, valid);
@@ -3242,6 +3730,109 @@ export class FactoryScene extends Phaser.Scene {
     }
   }
 
+  private drawTrackedConveyor(
+    graphics: Phaser.GameObjects.Graphics,
+    machine: MachineState,
+    center: Point,
+    alpha: number,
+    valid: boolean,
+  ): void {
+    const dimensions = MACHINE_DIMENSIONS['tracked-conveyor'];
+    const runtime = this.trackedConveyors.get(machine.id);
+    const drawRuntime = Boolean(
+      runtime &&
+      runtime.machine.gridX === machine.gridX &&
+      runtime.machine.gridY === machine.gridY &&
+      runtime.machine.angle === machine.angle,
+    );
+
+    if (!valid) {
+      const footprint = roundedRectanglePoints(
+        center,
+        dimensions.width,
+        dimensions.height,
+        10,
+        machine.angle,
+      );
+      graphics.fillStyle(COLORS.red, alpha * 0.18);
+      drawPolygon(graphics, footprint);
+      graphics.lineStyle(2, COLORS.red, alpha * 0.9);
+      linePolygon(graphics, footprint);
+    }
+
+    const wheelCenters = trackedConveyorWheelCenters(center, machine.angle);
+    const wheelAngles = wheelCenters.map(() =>
+      drawRuntime ? runtime!.wheelAngle : degreesToRadians(machine.angle),
+    );
+
+    for (let index = 0; index < wheelCenters.length; index += 1) {
+      const wheelCenter = wheelCenters[index]!;
+      const wheelAngle = wheelAngles[index]!;
+      graphics.fillStyle(valid ? COLORS.conveyor : COLORS.red, alpha);
+      graphics.fillCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
+      graphics.lineStyle(1.5, valid ? COLORS.blueLight : COLORS.graphite, alpha * 0.95);
+      graphics.strokeCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
+      graphics.lineStyle(1.2, valid ? COLORS.white : COLORS.graphite, alpha * 0.72);
+      for (const spokeOffset of [0, Math.PI / 2]) {
+        const spokeAngle = wheelAngle + spokeOffset;
+        const dx = Math.cos(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
+        const dy = Math.sin(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
+        graphics.lineBetween(
+          wheelCenter.x - dx,
+          wheelCenter.y - dy,
+          wheelCenter.x + dx,
+          wheelCenter.y + dy,
+        );
+      }
+      graphics.fillStyle(valid ? COLORS.orange : COLORS.graphite, alpha);
+      graphics.fillCircle(wheelCenter.x, wheelCenter.y, 1.8);
+    }
+
+    const links = Array.from(
+      { length: TRACKED_CONVEYOR_LINK_COUNT },
+      (_, index) => {
+        const link = trackedConveyorPoseAt(
+          center,
+          machine.angle,
+          (index * TRACKED_CONVEYOR_TRACK_LENGTH) / TRACKED_CONVEYOR_LINK_COUNT +
+            (drawRuntime ? runtime!.phase : 0),
+        );
+        return rectangleCorners(
+          link.center,
+          TRACKED_CONVEYOR_LINK_WIDTH,
+          TRACKED_CONVEYOR_LINK_HEIGHT,
+          Phaser.Math.RadToDeg(link.angle),
+        );
+      },
+    );
+    if (valid) {
+      graphics.fillStyle(COLORS.white, alpha);
+      drawPolygons(graphics, links, 0);
+      graphics.fillStyle(COLORS.conveyor, alpha);
+      drawPolygons(graphics, links, 1);
+      const outlineHeight = TRACKED_CONVEYOR_TRACK_RADIUS * 2 + TRACKED_CONVEYOR_LINK_HEIGHT;
+      const outlineWidth =
+        TRACKED_CONVEYOR_STRAIGHT_LENGTH +
+        TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
+        TRACKED_CONVEYOR_LINK_HEIGHT;
+      graphics.lineStyle(0.9, COLORS.graphite, alpha * 0.86);
+      linePolygon(
+        graphics,
+        roundedRectanglePoints(
+          center,
+          outlineWidth,
+          outlineHeight,
+          outlineHeight / 2,
+          machine.angle,
+          5,
+        ),
+      );
+    } else {
+      graphics.fillStyle(COLORS.red, alpha);
+      drawPolygons(graphics, links);
+    }
+  }
+
   private drawSpring(
     graphics: Phaser.GameObjects.Graphics,
     machine: MachineState,
@@ -3254,9 +3845,11 @@ export class FactoryScene extends Phaser.Scene {
     const baseColor = color === COLORS.red ? COLORS.red : COLORS.wood;
     const springColor = color === COLORS.red ? COLORS.red : COLORS.springGreen;
     const plateHeight = 8;
-    const baseY = dimensions.height / 2 - plateHeight / 2;
-    const topY = -dimensions.height / 2 + plateHeight / 2 + compression * 7;
-    const lowerSpringY = dimensions.height / 2 - plateHeight;
+    const topCompression = Math.max(0, compression) * 7;
+    const bottomCompression = Math.max(0, -compression) * 7;
+    const baseY = dimensions.height / 2 - plateHeight / 2 - bottomCompression;
+    const topY = -dimensions.height / 2 + plateHeight / 2 + topCompression;
+    const lowerSpringY = baseY - plateHeight / 2;
     const upperSpringY = topY + plateHeight / 2;
     graphics.fillStyle(baseColor, alpha);
     drawPolygon(
@@ -3303,6 +3896,10 @@ export class FactoryScene extends Phaser.Scene {
       .setPosition(box.body.position.x, box.body.position.y)
       .setRotation(box.body.angle)
       .setDisplaySize(width * BOX_TEXTURE_SCALE_X, height * BOX_TEXTURE_SCALE_Y);
+  }
+
+  private updateBoxVisuals(): void {
+    for (const box of this.boxes.values()) this.drawBox(box);
   }
 
   private drawSelection(
@@ -3367,30 +3964,73 @@ export class FactoryScene extends Phaser.Scene {
     if (!this.isAuthoring()) return;
     const logicalZoom = fromCameraZoom(this.cameras.main.zoom);
     const color = valid ? COLORS.orange : COLORS.red;
-    const x = obstacle.gridX * CELL_SIZE;
-    const y = obstacle.gridY * CELL_SIZE;
     const width = obstacle.columns * CELL_SIZE;
     const height = obstacle.rows * CELL_SIZE;
+    const center = this.obstacleCenter(obstacle);
+    const angle = obstacle.angle ?? 0;
     graphics.lineStyle(3 / logicalZoom, color, 1);
-    graphics.strokeRect(
-      x - 4 / logicalZoom,
-      y - 4 / logicalZoom,
-      width + 8 / logicalZoom,
-      height + 8 / logicalZoom,
+    linePolygon(
+      graphics,
+      rectangleCorners(
+        center,
+        width + 8 / logicalZoom,
+        height + 8 / logicalZoom,
+        angle,
+      ),
     );
     if (!showHandle) return;
-    const handle = this.obstacleResizeHandle(obstacle);
-    const size = 13 / logicalZoom;
-    graphics.fillStyle(COLORS.white, 1);
-    graphics.fillRect(handle.x - size, handle.y - size, size * 2, size * 2);
-    graphics.lineStyle(3 / logicalZoom, color, 1);
-    graphics.strokeRect(handle.x - size, handle.y - size, size * 2, size * 2);
-    graphics.lineBetween(
-      handle.x - size * 0.5,
-      handle.y + size * 0.5,
-      handle.x + size * 0.5,
-      handle.y - size * 0.5,
+
+    const rotationHandle = this.obstacleRotationHandle(obstacle);
+    const rotationEdge = localToWorld(
+      center,
+      angle,
+      0,
+      -height / 2 - 4 / logicalZoom,
     );
+    graphics.lineStyle(2 / logicalZoom, color, 0.82);
+    graphics.lineBetween(rotationEdge.x, rotationEdge.y, rotationHandle.x, rotationHandle.y);
+    graphics.fillStyle(COLORS.white, 1);
+    graphics.fillCircle(rotationHandle.x, rotationHandle.y, 11 / logicalZoom);
+    graphics.lineStyle(3 / logicalZoom, color, 1);
+    graphics.strokeCircle(rotationHandle.x, rotationHandle.y, 11 / logicalZoom);
+    const glyphRadius = 5 / logicalZoom;
+    const glyphStart = Phaser.Math.DegToRad(-45);
+    const glyphEnd = Phaser.Math.DegToRad(255);
+    graphics.beginPath();
+    graphics.arc(
+      rotationHandle.x,
+      rotationHandle.y,
+      glyphRadius,
+      glyphStart,
+      glyphEnd,
+      false,
+    );
+    graphics.strokePath();
+    const arrowTip = {
+      x: rotationHandle.x + Math.cos(glyphEnd) * glyphRadius,
+      y: rotationHandle.y + Math.sin(glyphEnd) * glyphRadius,
+    };
+    graphics.lineBetween(
+      arrowTip.x,
+      arrowTip.y,
+      arrowTip.x - 4.5 / logicalZoom,
+      arrowTip.y - 1 / logicalZoom,
+    );
+    graphics.lineBetween(
+      arrowTip.x,
+      arrowTip.y,
+      arrowTip.x - 1 / logicalZoom,
+      arrowTip.y + 4.5 / logicalZoom,
+    );
+
+    for (const handle of OBSTACLE_RESIZE_HANDLES) {
+      const point = this.obstacleResizeHandlePoint(obstacle, handle);
+      const radius = 5.5 / logicalZoom;
+      graphics.fillStyle(COLORS.white, 1);
+      graphics.fillCircle(point.x, point.y, radius);
+      graphics.lineStyle(2.5 / logicalZoom, color, 1);
+      graphics.strokeCircle(point.x, point.y, radius);
+    }
   }
 
   private drawMarquee(graphics: Phaser.GameObjects.Graphics, start: Point, end: Point): void {
@@ -3410,26 +4050,116 @@ export class FactoryScene extends Phaser.Scene {
     drawDashedLine(graphics, { x: minX, y: maxY }, { x: minX, y: minY }, dashLength, gapLength);
   }
 
+  private createTrackedConveyorRuntime(machine: MachineState): TrackedConveyorRuntime {
+    const center = machineCenter(machine);
+    const composite = this.matter.composite.create({
+      label: `tracked-conveyor:${machine.id}`,
+    });
+    const wheelCenters = trackedConveyorWheelCenters(center, machine.angle);
+    const wheels = wheelCenters.map((wheelCenter, index) => {
+      const wheel = this.matter.bodies.circle(
+        wheelCenter.x,
+        wheelCenter.y,
+        TRACKED_CONVEYOR_WHEEL_RADIUS,
+        {
+          label: `tracked-conveyor-wheel:${machine.id}:${index}`,
+          isStatic: true,
+          friction: 1,
+          frictionStatic: 5,
+          restitution: 0,
+          slop: 0.02,
+        },
+      );
+      this.matter.body.setAngle(wheel, degreesToRadians(machine.angle));
+      wheel.plugin = {
+        ...wheel.plugin,
+        factoryMachineId: machine.id,
+        factoryType: machine.type,
+        factoryTrackedWheel: index,
+      };
+      this.matter.composite.add(composite, wheel);
+      return wheel;
+    });
+
+    const links = trackedConveyorLinkLayout(center, machine.angle).map((layout, index) => {
+      const link = this.matter.bodies.rectangle(
+        layout.center.x,
+        layout.center.y,
+        TRACKED_CONVEYOR_LINK_WIDTH,
+        TRACKED_CONVEYOR_LINK_HEIGHT,
+        {
+          label: `tracked-conveyor-link:${machine.id}:${index}`,
+          isStatic: true,
+          friction: 1,
+          frictionStatic: 5,
+          restitution: 0,
+          slop: 0.015,
+          chamfer: { radius: 1.2 },
+        },
+      );
+      this.matter.body.setAngle(link, layout.angle);
+      link.plugin = {
+        ...link.plugin,
+        factoryMachineId: machine.id,
+        factoryType: machine.type,
+        factoryTrackedLink: index,
+      };
+      this.matter.composite.add(composite, link);
+      return link;
+    });
+
+    this.matter.world.add(composite);
+    return {
+      machine,
+      composite,
+      wheels,
+      links,
+      phase: 0,
+      wheelAngle: degreesToRadians(machine.angle),
+    };
+  }
+
   private rebuildStaticBodies(): void {
     for (const runtime of this.machineBodies.values()) this.matter.world.remove(runtime.body, true);
     this.machineBodies.clear();
+    for (const runtime of this.trackedConveyors.values()) {
+      this.matter.world.remove(runtime.composite, true);
+    }
+    this.trackedConveyors.clear();
     for (const body of this.obstacleBodies) this.matter.world.remove(body, true);
     this.obstacleBodies.length = 0;
+    this.sourceMachines = this.machines.filter((machine) => machine.type === 'source');
+    this.conveyorMachines = this.machines.filter((machine) => machine.type === 'conveyor');
+    this.springMachines = this.machines.filter((machine) => machine.type === 'spring');
+    this.receiverMachines = this.machines.filter((machine) => machine.type === 'receiver');
+
+    // Build mode uses geometric hit tests, so Matter bodies can be created lazily when the
+    // simulation starts. This avoids rebuilding hundreds of track links after every edit.
+    if (this.status === 'build' && this.boxes.size === 0) {
+      this.matter.world.pause();
+      return;
+    }
 
     for (const obstacle of this.obstacles) {
       const width = obstacle.columns * CELL_SIZE;
       const height = obstacle.rows * CELL_SIZE;
+      const center = this.obstacleCenter(obstacle);
       const body = this.matter.add.rectangle(
-        obstacle.gridX * CELL_SIZE + width / 2,
-        obstacle.gridY * CELL_SIZE + height / 2,
+        center.x,
+        center.y,
         width,
         height,
         { isStatic: true, label: `obstacle:${obstacle.id}`, friction: 0.6 },
       );
+      this.matter.body.setAngle(body, degreesToRadians(obstacle.angle ?? 0));
       this.obstacleBodies.push(body);
     }
 
     for (const machine of this.machines) {
+      if (machine.type === 'tracked-conveyor') {
+        this.trackedConveyors.set(machine.id, this.createTrackedConveyorRuntime(machine));
+        continue;
+      }
       const center = machineCenter(machine);
       const dimensions = MACHINE_PHYSICS_DIMENSIONS[machine.type];
       const body = this.matter.add.rectangle(
@@ -3474,17 +4204,7 @@ export class FactoryScene extends Phaser.Scene {
       if (polygonsOverlap(polygon, machinePolygon(machine))) return false;
     }
     for (const obstacle of obstacles) {
-      const width = obstacle.columns * CELL_SIZE;
-      const height = obstacle.rows * CELL_SIZE;
-      const obstaclePolygon = rectangleCorners(
-        {
-          x: obstacle.gridX * CELL_SIZE + width / 2,
-          y: obstacle.gridY * CELL_SIZE + height / 2,
-        },
-        width,
-        height,
-      );
-      if (polygonsOverlap(polygon, obstaclePolygon)) return false;
+      if (polygonsOverlap(polygon, this.obstaclePolygon(obstacle))) return false;
     }
     return true;
   }
@@ -3496,21 +4216,28 @@ export class FactoryScene extends Phaser.Scene {
     machines = this.machines,
   ): boolean {
     if (
-      !Number.isInteger(candidate.gridX) ||
-      !Number.isInteger(candidate.gridY) ||
+      !Number.isFinite(candidate.gridX) ||
+      !Number.isFinite(candidate.gridY) ||
+      Math.abs(candidate.gridX * 4 - Math.round(candidate.gridX * 4)) > 0.000_001 ||
+      Math.abs(candidate.gridY * 4 - Math.round(candidate.gridY * 4)) > 0.000_001 ||
       !Number.isInteger(candidate.columns) ||
       !Number.isInteger(candidate.rows) ||
       candidate.columns < 1 ||
       candidate.rows < 1 ||
-      candidate.gridX < PLAY_AREA_MIN_COLUMN ||
-      candidate.gridY < PLAY_AREA_MIN_ROW ||
-      candidate.gridX + candidate.columns > PLAY_AREA_MAX_COLUMN ||
-      candidate.gridY + candidate.rows > PLAY_AREA_MAX_ROW
+      (candidate.angle !== undefined && !Number.isFinite(candidate.angle))
     ) {
       return false;
     }
 
     const polygon = this.obstaclePolygon(candidate);
+    if (
+      !polygonWithinBounds(polygon, PLAY_AREA_WIDTH, PLAY_AREA_HEIGHT, 0, {
+        x: PLAY_AREA_MIN_X,
+        y: PLAY_AREA_MIN_Y,
+      })
+    ) {
+      return false;
+    }
     for (const obstacle of obstacles) {
       if (obstacle.id === ignoredId) continue;
       if (polygonsOverlap(polygon, this.obstaclePolygon(obstacle))) return false;
@@ -3555,13 +4282,18 @@ export class FactoryScene extends Phaser.Scene {
     const width = obstacle.columns * CELL_SIZE;
     const height = obstacle.rows * CELL_SIZE;
     return rectangleCorners(
-      {
-        x: obstacle.gridX * CELL_SIZE + width / 2,
-        y: obstacle.gridY * CELL_SIZE + height / 2,
-      },
+      this.obstacleCenter(obstacle),
       width,
       height,
+      obstacle.angle ?? 0,
     );
+  }
+
+  private obstacleCenter(obstacle: ObstacleDefinition): Point {
+    return {
+      x: (obstacle.gridX + obstacle.columns / 2) * CELL_SIZE,
+      y: (obstacle.gridY + obstacle.rows / 2) * CELL_SIZE,
+    };
   }
 
   private executeSnapshotCommand(
@@ -3783,16 +4515,9 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private findObstacleAt(point: Point): ObstacleDefinition | undefined {
-    return [...this.obstacles].reverse().find((obstacle) => {
-      const x = obstacle.gridX * CELL_SIZE;
-      const y = obstacle.gridY * CELL_SIZE;
-      return (
-        point.x >= x &&
-        point.x <= x + obstacle.columns * CELL_SIZE &&
-        point.y >= y &&
-        point.y <= y + obstacle.rows * CELL_SIZE
-      );
-    });
+    return [...this.obstacles]
+      .reverse()
+      .find((obstacle) => this.pointInsideObstacle(point, obstacle));
   }
 
   private findCollectibleAt(point: Point): CollectibleDefinition | undefined {
@@ -3802,11 +4527,43 @@ export class FactoryScene extends Phaser.Scene {
       .find((collectible) => distance(point, this.collectibleCenter(collectible)) <= hitRadius);
   }
 
-  private obstacleResizeHandle(obstacle: ObstacleDefinition): Point {
-    return {
-      x: (obstacle.gridX + obstacle.columns) * CELL_SIZE,
-      y: (obstacle.gridY + obstacle.rows) * CELL_SIZE,
-    };
+  private pointInsideObstacle(point: Point, obstacle: ObstacleDefinition): boolean {
+    const local = worldToLocal(this.obstacleCenter(obstacle), obstacle.angle ?? 0, point);
+    return (
+      Math.abs(local.x) <= (obstacle.columns * CELL_SIZE) / 2 &&
+      Math.abs(local.y) <= (obstacle.rows * CELL_SIZE) / 2
+    );
+  }
+
+  private obstacleResizeHandlePoint(
+    obstacle: ObstacleDefinition,
+    handle: ObstacleResizeHandle,
+  ): Point {
+    return localToWorld(
+      this.obstacleCenter(obstacle),
+      obstacle.angle ?? 0,
+      (handle.x * obstacle.columns * CELL_SIZE) / 2,
+      (handle.y * obstacle.rows * CELL_SIZE) / 2,
+    );
+  }
+
+  private obstacleRotationHandle(obstacle: ObstacleDefinition): Point {
+    return localToWorld(
+      this.obstacleCenter(obstacle),
+      obstacle.angle ?? 0,
+      0,
+      -(obstacle.rows * CELL_SIZE) / 2 - 38,
+    );
+  }
+
+  private findObstacleResizeHandle(
+    obstacle: ObstacleDefinition,
+    point: Point,
+  ): ObstacleResizeHandle | undefined {
+    const radius = 16 / fromCameraZoom(this.cameras.main.zoom);
+    return OBSTACLE_RESIZE_HANDLES.find(
+      (handle) => distance(point, this.obstacleResizeHandlePoint(obstacle, handle)) <= radius,
+    );
   }
 
   private sameObstacleState(a: ObstacleDefinition, b: ObstacleDefinition): boolean {
@@ -3815,7 +4572,8 @@ export class FactoryScene extends Phaser.Scene {
       a.gridX === b.gridX &&
       a.gridY === b.gridY &&
       a.columns === b.columns &&
-      a.rows === b.rows
+      a.rows === b.rows &&
+      normalizeAngle(a.angle ?? 0) === normalizeAngle(b.angle ?? 0)
     );
   }
 
@@ -3833,7 +4591,14 @@ export class FactoryScene extends Phaser.Scene {
 
   private rotateSelectedBy(delta: number): void {
     const selected = this.getSelectedMachine();
-    if (selected) this.rotateSelectedTo(selected.angle + delta);
+    if (selected) {
+      this.rotateSelectedTo(selected.angle + delta);
+      return;
+    }
+    const selectedObstacle = this.getSelectedObstacle();
+    if (selectedObstacle) {
+      this.rotateSelectedObstacle((selectedObstacle.angle ?? 0) + delta);
+    }
   }
 
   private toggleGrid(): void {
@@ -3910,6 +4675,7 @@ export class FactoryScene extends Phaser.Scene {
   private isRotatable(machine: MachineState): boolean {
     return (
       machine.type === 'conveyor' ||
+      machine.type === 'tracked-conveyor' ||
       machine.type === 'spring' ||
       (this.isAuthoring() && (machine.type === 'source' || machine.type === 'receiver'))
     );
@@ -3926,7 +4692,7 @@ export class FactoryScene extends Phaser.Scene {
   private setEditorPersistenceLocked(locked: boolean): void {
     this.editorPersistenceLocked = locked && this.isAuthoring();
     if (this.editorPersistenceLocked) {
-      this.drag = undefined;
+      this.setDragState(undefined);
       this.selectedTool = undefined;
       this.selectedEditorTool = undefined;
       this.ghostMachine = undefined;
@@ -4031,10 +4797,11 @@ export class FactoryScene extends Phaser.Scene {
       return {
         ...obstacle,
         id,
-        gridX: Math.round(obstacle.gridX),
-        gridY: Math.round(obstacle.gridY),
+        gridX: this.snapEditorPosition(obstacle.gridX),
+        gridY: this.snapEditorPosition(obstacle.gridY),
         columns: Math.max(1, Math.round(obstacle.columns)),
         rows: Math.max(1, Math.round(obstacle.rows)),
+        angle: normalizeAngle(obstacle.angle ?? 0),
       };
     });
   }
@@ -4058,6 +4825,7 @@ export class FactoryScene extends Phaser.Scene {
       return {
         ...machine,
         id,
+        type: activeMachineType(machine.type),
         angle: normalizeAngle(machine.angle),
         fixed: preserveFixed ? machine.fixed : false,
       };
@@ -4299,6 +5067,7 @@ export class FactoryScene extends Phaser.Scene {
       selectObstacle: (id) => this.selectObstacle(id),
       moveSelectedObstacle: (gridX, gridY) => this.moveSelectedObstacle(gridX, gridY),
       resizeSelectedObstacle: (columns, rows) => this.resizeSelectedObstacle(columns, rows),
+      rotateSelectedObstacle: (angle) => this.rotateSelectedObstacle(angle),
       placeCollectible: (gridX, gridY) => this.placeCollectibleAt(gridX, gridY),
       selectCollectible: (id) => this.selectCollectible(id),
       moveSelectedCollectible: (gridX, gridY) =>
@@ -4319,6 +5088,7 @@ export class FactoryScene extends Phaser.Scene {
           this.simulateFixedStep();
         }
         this.metrics.active = this.boxes.size;
+        this.updateBoxVisuals();
         this.renderWorld();
         this.emitSnapshot();
         return this.getSnapshot();

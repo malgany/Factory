@@ -18,7 +18,7 @@ test('a entrada recebe a caixa assim que os contornos visuais se encostam', asyn
       subtitle: '',
       description: '',
       grid: { columns: 30, rows: 18 },
-      availableMachines: ['conveyor'],
+      availableMachines: ['tracked-conveyor'],
       fixedMachines: [
         {
           id: 'hitbox-source',

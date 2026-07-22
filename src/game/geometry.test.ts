@@ -17,6 +17,7 @@ describe('geometria das máquinas', () => {
       width: CELL_SIZE * 2,
       height: CELL_SIZE / 2,
     });
+    expect(MACHINE_DIMENSIONS['tracked-conveyor']).toEqual(MACHINE_DIMENSIONS.conveyor);
   });
 
   it('mantém o trampolim em um por meio quadrado', () => {
@@ -36,6 +37,9 @@ describe('geometria das máquinas', () => {
       width: MACHINE_DIMENSIONS.conveyor.width - 4,
       height: MACHINE_DIMENSIONS.conveyor.height - 2,
     });
+    expect(MACHINE_PHYSICS_DIMENSIONS['tracked-conveyor']).toEqual(
+      MACHINE_PHYSICS_DIMENSIONS.conveyor,
+    );
     expect(MACHINE_PHYSICS_DIMENSIONS.spring).toEqual(MACHINE_DIMENSIONS.spring);
   });
 });

@@ -32,7 +32,7 @@ function seededCatalog(): ContractCatalogFile {
   };
 }
 
-function customDefinition(stage = 4): NewContractDefinition {
+function customDefinition(stage = 5): NewContractDefinition {
   const definition: NewContractDefinition = {
     ...structuredClone(CONTRACTS[0]!),
     world: 1,
@@ -46,8 +46,17 @@ function customDefinition(stage = 4): NewContractDefinition {
 }
 
 describe('catálogo JSON de contratos', () => {
+  it('mantém válidas todas as dez fases cadastradas', () => {
+    expect(CONTRACTS).toHaveLength(10);
+    for (const contract of CONTRACTS) {
+      expect(validateContractDefinition(contract), contract.id).toEqual({ valid: true, issues: [] });
+    }
+  });
+
   it('mantém slots estáveis ao editar, criar e excluir uma fase', () => {
-    let catalog = saveContractToCatalog(seededCatalog(), {
+    const initial = seededCatalog();
+    initial.contracts = initial.contracts.slice(0, 4);
+    let catalog = saveContractToCatalog(initial, {
       ...structuredClone(CONTRACTS[0]!),
       description: 'Descrição editada',
     });
@@ -55,17 +64,17 @@ describe('catálogo JSON de contratos', () => {
       ...customDefinition(),
       id: 'custom-fixture',
     }).catalog;
-    catalog = deleteContractFromCatalog(catalog, 'controlled-jump');
+    catalog = deleteContractFromCatalog(catalog, 'quality-curve');
 
     const contracts = mergeContractCatalog(catalog);
-    expect(contracts.map(({ order }) => order)).toEqual([1, 3, 4]);
+    expect(contracts.map(({ order }) => order)).toEqual([1, 3, 4, 5]);
     expect(contracts[0]).toMatchObject({
-      id: 'first-flow',
+      id: 'assembly-line',
       title: '1-1',
-      revision: 2,
+      revision: CONTRACTS[0]!.revision + 1,
       description: 'Descrição editada',
     });
-    expect(contracts.at(-1)).toMatchObject({ id: 'custom-fixture', title: '4-1' });
+    expect(contracts.at(-1)).toMatchObject({ id: 'custom-fixture', title: '5-1' });
   });
 
   it('gera IDs estáveis e permite excluir até a última fase', () => {
@@ -73,7 +82,7 @@ describe('catálogo JSON de contratos', () => {
       'custom-00000000-0000-4000-8000-000000000000',
     );
     const only = { ...seededCatalog(), contracts: [structuredClone(CONTRACTS[0]!)] };
-    expect(deleteContractFromCatalog(only, 'first-flow').contracts).toEqual([]);
+    expect(deleteContractFromCatalog(only, 'assembly-line').contracts).toEqual([]);
   });
 
   it('aceita catálogo vazio e rejeita JSON corrompido sem dados parciais', () => {
@@ -100,6 +109,7 @@ describe('catálogo JSON de contratos', () => {
 
   it('migra catálogo v1 para mundo 1 preservando IDs e tempo ideal', () => {
     const legacy = structuredClone(seededCatalog()) as unknown as Record<string, unknown>;
+    const legacyIdealTimeSeconds = CONTRACTS[1]!.goal.idealTimeSeconds;
     legacy.version = 1;
     const contracts = legacy.contracts as Array<Record<string, unknown>>;
     for (const contract of contracts) {
@@ -117,14 +127,14 @@ describe('catálogo JSON de contratos', () => {
     expect(migrated.ok).toBe(true);
     expect(migrated.value.version).toBe(2);
     expect(migrated.value.contracts[1]).toMatchObject({
-      id: 'controlled-jump',
+      id: 'quality-curve',
       world: 1,
       stage: 2,
       revision: 1,
       order: 2,
       title: '2-1',
       collectibles: [],
-      goal: { idealTimeSeconds: 38 },
+      goal: { idealTimeSeconds: legacyIdealTimeSeconds },
     });
   });
 
@@ -172,7 +182,10 @@ describe('catálogo JSON de contratos', () => {
 
   it('não cria uma fase quando os dez slots do mundo já estão ocupados', () => {
     const catalog = seededCatalog();
-    for (let stage = 4; stage <= 10; stage += 1) {
+    for (let stage = 1; stage <= 10; stage += 1) {
+      if (catalog.contracts.some((contract) => contract.world === 1 && contract.stage === stage)) {
+        continue;
+      }
       catalog.contracts.push({
         ...structuredClone(CONTRACTS[0]!),
         id: `full-world-${stage}`,
@@ -253,6 +266,7 @@ describe('catálogo JSON de contratos', () => {
         gridY: GRID_ROWS + 8,
         columns: 2,
         rows: 2,
+        angle: 45,
       },
     ];
 

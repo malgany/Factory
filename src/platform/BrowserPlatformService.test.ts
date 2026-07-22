@@ -48,7 +48,7 @@ describe('BrowserPlatformService', () => {
     const loaded = await new BrowserPlatformService().loadContractCatalog();
 
     expect(loaded.ok).toBe(true);
-    expect(loaded.value.contracts).toHaveLength(3);
+    expect(loaded.value.contracts).toHaveLength(CONTRACTS.length);
     expect(fetchMock).toHaveBeenCalledWith(CONTRACT_CATALOG_URL, { cache: 'no-store' });
     expect(localStorage.getItem('factory-flow.contracts.v1')).toBe('{legado}');
   });

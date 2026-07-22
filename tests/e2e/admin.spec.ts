@@ -3,7 +3,12 @@ import { expect, test, type Page } from '@playwright/test';
 const PROGRESS_KEY = 'factory-flow.progress.v1';
 const LEGACY_CATALOG_KEY = 'factory-flow.contracts.v1';
 
-type AdminMachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
+type AdminMachineType =
+  | 'source'
+  | 'conveyor'
+  | 'tracked-conveyor'
+  | 'receiver'
+  | 'spring';
 
 interface AdminCamera {
   centerX: number;
@@ -32,6 +37,7 @@ interface AdminObstacle {
   gridY: number;
   columns: number;
   rows: number;
+  angle?: number;
 }
 
 interface AdminContract {
@@ -124,7 +130,7 @@ function makeContract(
     subtitle: `Subtítulo de ${title}`,
     description: `Descrição de ${title}`,
     grid: { columns: 30, rows: 18 },
-    availableMachines: ['conveyor', 'spring'],
+    availableMachines: ['tracked-conveyor', 'spring'],
     fixedMachines: [
       {
         id: `${id}-source`,
@@ -693,7 +699,7 @@ test('bloqueia autoria e saída do editor enquanto o POST está pendente', async
     const debug = (window as AdminWindow).__FACTORY_DEBUG__!;
     debug.setCamera(1200, 650, 2);
     return {
-      placed: debug.placeMachine('conveyor', 8.25, 8.25),
+      placed: debug.placeMachine('tracked-conveyor', 8.25, 8.25),
       camera: (() => {
         const camera = debug.getCamera();
         return { centerX: camera.centerX, centerY: camera.centerY, zoom: camera.zoom };

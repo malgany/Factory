@@ -1,5 +1,87 @@
 import { expect, test } from '@playwright/test';
 
+test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('#admin-toggle').click();
+  await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
+  await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+
+  const before = await page.evaluate(() => ({
+    machines: window.__FACTORY_DEBUG__!.getMachines().length,
+    obstacles: window.__FACTORY_DEBUG__!.getObstacles().length,
+    collectibles: window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.length ?? 0,
+  }));
+
+  const canvas = page.locator('#game-container canvas');
+  const canvasBounds = await canvas.boundingBox();
+  if (!canvasBounds) throw new Error('Canvas sem dimensões');
+
+  const machineTool = page.locator('[data-editor-tool="tracked-conveyor"]');
+  await machineTool.click();
+  await page.mouse.click(
+    canvasBounds.x + canvasBounds.width * 0.32,
+    canvasBounds.y + canvasBounds.height * 0.32,
+  );
+  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length)).toBe(
+    before.machines,
+  );
+  await expect(machineTool).not.toHaveClass(/is-active/);
+
+  const dragToolTo = async (selector: string, xRatio: number, yRatio: number): Promise<void> => {
+    const toolBounds = await page.locator(selector).boundingBox();
+    if (!toolBounds) throw new Error(`Ferramenta ${selector} sem dimensões`);
+    await page.mouse.move(
+      toolBounds.x + toolBounds.width / 2,
+      toolBounds.y + toolBounds.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      canvasBounds.x + canvasBounds.width * xRatio,
+      canvasBounds.y + canvasBounds.height * yRatio,
+      { steps: 12 },
+    );
+    await page.mouse.up();
+    await expect(page.locator('.factory-app')).not.toHaveClass(/is-dragging-object/);
+  };
+
+  await dragToolTo('[data-editor-tool="tracked-conveyor"]', 0.3, 0.34);
+
+  const editorConveyorId = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__!;
+    const conveyor = debug.getMachines().find(({ type }) => type === 'tracked-conveyor');
+    if (!conveyor || !debug.selectMachine(conveyor.id)) {
+      throw new Error('Editor conveyor could not be selected');
+    }
+    return conveyor.id;
+  });
+  await expect(page.locator('[data-action="reverse"]')).not.toHaveClass(/is-hidden/);
+  await page.locator('[data-action="reverse"]').click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (id) =>
+          window.__FACTORY_DEBUG__!.getMachines().find((machine) => machine.id === id)?.reversed,
+        editorConveyorId,
+      ),
+    )
+    .toBe(true);
+
+  await dragToolTo('[data-editor-tool="obstacle"]', 0.5, 0.44);
+  await dragToolTo('[data-editor-tool="star"]', 0.68, 0.34);
+
+  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length)).toBe(
+    before.machines + 1,
+  );
+  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles().length)).toBe(
+    before.obstacles + 1,
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.length ?? 0))
+    .toBe(before.collectibles + 1);
+});
+
 test('editor keeps authored scenario fixed and restores it after a disposable preview', async ({
   page,
 }) => {
@@ -19,7 +101,7 @@ test('editor keeps authored scenario fixed and restores it after a disposable pr
       subtitle: 'Draft',
       description: 'Checks authoring state isolation.',
       grid: { columns: 30, rows: 18 },
-      availableMachines: ['conveyor'],
+      availableMachines: ['tracked-conveyor'],
       fixedMachines: [
         {
           id: 'source-test',
@@ -51,7 +133,7 @@ test('editor keeps authored scenario fixed and restores it after a disposable pr
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });
 
-    const placedMachine = debug.placeMachine('conveyor', 6.5, 6.5, 0);
+    const placedMachine = debug.placeMachine('tracked-conveyor', 6.5, 6.5, 0);
     const placedObstacle = debug.placeObstacle(10, 8, 2, 2);
     const obstacle = debug.getObstacles()[0];
     if (!obstacle) throw new Error('Obstacle was not created');
@@ -69,7 +151,7 @@ test('editor keeps authored scenario fixed and restores it after a disposable pr
     const previewMode = debug.getSnapshot().mode;
     debug.selectMachine('source-test');
     const deletedFixedEndpoint = debug.deleteSelected();
-    const placedPlayerMachine = debug.placeMachine('conveyor', 14.5, 10.5, 0);
+    const placedPlayerMachine = debug.placeMachine('tracked-conveyor', 14.5, 10.5, 0);
     const previewMachineCount = debug.getMachines().length;
     debug.run();
     debug.completeContract();
@@ -141,7 +223,7 @@ test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ 
       subtitle: 'Draft',
       description: 'Checks mixed group operations.',
       grid: { columns: 30, rows: 18 },
-      availableMachines: ['conveyor'],
+      availableMachines: ['tracked-conveyor'],
       fixedMachines: [],
       obstacles: [],
       goal: { deliveries: 1, maxLosses: 3, pieceBudget: 6, parPieces: 2 },
@@ -156,7 +238,9 @@ test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ 
     const gameContainer = document.querySelector<HTMLElement>('#game-container');
     gameContainer?.removeAttribute('inert');
     gameContainer?.setAttribute('aria-hidden', 'false');
-    if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
+    if (!debug.placeMachine('tracked-conveyor', 6, 6, 25)) {
+      throw new Error('Machine not placed');
+    }
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {
       throw new Error('Mixed selection was not created');
@@ -225,7 +309,7 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
       subtitle: 'Draft',
       description: 'Checks mixed group dragging.',
       grid: { columns: 30, rows: 18 },
-      availableMachines: ['conveyor'],
+      availableMachines: ['tracked-conveyor'],
       fixedMachines: [],
       obstacles: [],
       goal: { deliveries: 1, maxLosses: 3, pieceBudget: 6, parPieces: 2 },
@@ -240,7 +324,9 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
     const gameContainer = document.querySelector<HTMLElement>('#game-container');
     gameContainer?.removeAttribute('inert');
     gameContainer?.setAttribute('aria-hidden', 'false');
-    if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
+    if (!debug.placeMachine('tracked-conveyor', 6, 6, 25)) {
+      throw new Error('Machine not placed');
+    }
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {
       throw new Error('Mixed selection was not created');
@@ -307,7 +393,7 @@ test('editor collectible is non-solid, collected once and restored on restart', 
       subtitle: '',
       description: '',
       grid: { columns: 30, rows: 18 },
-      availableMachines: ['conveyor'],
+      availableMachines: ['tracked-conveyor'],
       fixedMachines: [
         {
           id: 'star-source',
@@ -385,4 +471,165 @@ test('editor collectible is non-solid, collected once and restored on restart', 
     pickupAfterReset: 1,
     restoredAfterPreview: { type: 'star', gridX: 5.5, gridY: 6.75 },
   });
+});
+
+test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('#admin-toggle').click();
+  await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
+  await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+
+  await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__!;
+    if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle could not be placed');
+    const obstacle = debug.getObstacles()[0];
+    if (!obstacle || !debug.selectObstacle(obstacle.id)) {
+      throw new Error('Obstacle could not be selected');
+    }
+  });
+
+  const canvas = page.locator('#game-container canvas');
+  const bounds = await canvas.boundingBox();
+  const camera = await page.evaluate(() => window.__FACTORY_DEBUG__!.getCamera());
+  if (!bounds) throw new Error('Canvas has no bounds');
+  const screenPoint = (worldX: number, worldY: number) => ({
+    x: bounds.x + (worldX - camera.scrollX) * camera.zoom,
+    y: bounds.y + (worldY - camera.scrollY) * camera.zoom,
+  });
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 10 });
+    await page.mouse.up();
+  };
+
+  const initialCenter = { x: 11 * 48, y: 7 * 48 };
+  await drag(
+    screenPoint(initialCenter.x, initialCenter.y - 48 - 38),
+    screenPoint(initialCenter.x + 86, initialCenter.y),
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]?.angle))
+    .toBe(90);
+
+  // At 90 degrees, the local right-side handle is visually below the obstacle.
+  await drag(
+    screenPoint(initialCenter.x, initialCenter.y + 48),
+    screenPoint(initialCenter.x, initialCenter.y + 96),
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]))
+    .toMatchObject({ gridX: 9.5, gridY: 6.5, columns: 3, rows: 2, angle: 90 });
+
+  // The rotated bottom-right corner grows both axes while its opposite corner stays anchored.
+  await drag(screenPoint(480, 432), screenPoint(432, 480));
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles()[0]))
+    .toMatchObject({ gridX: 8.5, gridY: 6.5, columns: 4, rows: 3, angle: 90 });
+
+  const rejectedOverlap = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__!;
+    const first = debug.getObstacles()[0]!;
+    if (!debug.placeObstacle(13, 6, 2, 2)) throw new Error('Second obstacle could not be placed');
+    if (!debug.selectObstacle(first.id)) throw new Error('First obstacle could not be selected');
+    return debug.resizeSelectedObstacle(8, 3);
+  });
+  expect(rejectedOverlap).toBe(false);
+});
+
+test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e controles', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('#admin-toggle').click();
+  await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
+  await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+
+  const ids = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__!;
+    const existingStars = new Set(debug.getCollectibles().map(({ id }) => id));
+    if (!debug.placeMachine('spring', 10, 10, 0)) throw new Error('Spring could not be placed');
+    const spring = debug.getMachines().find(({ type }) => type === 'spring');
+    if (!spring) throw new Error('Spring was not found');
+
+    // The first star overlaps the rotation handle (the handle is two pixels below its center).
+    if (!debug.placeCollectible(10, 9)) throw new Error('Handle star could not be placed');
+    const handleStar = debug.getCollectibles().find(({ id }) => !existingStars.has(id));
+    if (!handleStar) throw new Error('Handle star was not found');
+
+    if (!debug.placeCollectible(10, 10)) throw new Error('Center star could not be placed');
+    const centerStar = debug
+      .getCollectibles()
+      .find(({ id }) => !existingStars.has(id) && id !== handleStar.id);
+    if (!centerStar) throw new Error('Center star was not found');
+    if (!debug.selectMachine(spring.id)) throw new Error('Spring could not be selected');
+    return { spring: spring.id, handleStar: handleStar.id, centerStar: centerStar.id };
+  });
+
+  const canvas = page.locator('#game-container canvas');
+  const bounds = await canvas.boundingBox();
+  const camera = await page.evaluate(() => window.__FACTORY_DEBUG__!.getCamera());
+  if (!bounds) throw new Error('Canvas has no bounds');
+  const screenPoint = (worldX: number, worldY: number) => ({
+    x: bounds.x + (worldX - camera.scrollX) * camera.zoom,
+    y: bounds.y + (worldY - camera.scrollY) * camera.zoom,
+  });
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 8 });
+    await page.mouse.up();
+  };
+
+  // The selected spring's rotation handle wins over the star drawn behind it.
+  await drag(screenPoint(504, 458), screenPoint(590, 504));
+  await expect
+    .poll(() =>
+      page.evaluate((testIds) => {
+        const debug = window.__FACTORY_DEBUG__!;
+        return {
+          angle: debug.getMachines().find(({ id }) => id === testIds.spring)?.angle,
+          handleStar: debug.getCollectibles().find(({ id }) => id === testIds.handleStar),
+        };
+      }, ids),
+    )
+    .toMatchObject({ angle: 90, handleStar: { gridX: 10, gridY: 9 } });
+
+  // The selected spring's body also wins over the star centered behind it.
+  await drag(screenPoint(504, 504), screenPoint(552, 504));
+  await expect
+    .poll(() =>
+      page.evaluate((testIds) => {
+        const debug = window.__FACTORY_DEBUG__!;
+        return {
+          spring: debug.getMachines().find(({ id }) => id === testIds.spring),
+          centerStar: debug.getCollectibles().find(({ id }) => id === testIds.centerStar),
+        };
+      }, ids),
+    )
+    .toMatchObject({
+      spring: { gridX: 11, gridY: 10, angle: 90 },
+      centerStar: { gridX: 10, gridY: 10 },
+  });
+
+  // Once the star is outside the selected object and its controls, it remains directly draggable.
+  await drag(screenPoint(516, 504), screenPoint(516, 552));
+  await expect
+    .poll(() =>
+      page.evaluate((testIds) => {
+        const debug = window.__FACTORY_DEBUG__!;
+        return {
+          spring: debug.getMachines().find(({ id }) => id === testIds.spring),
+          centerStar: debug.getCollectibles().find(({ id }) => id === testIds.centerStar),
+        };
+      }, ids),
+    )
+    .toMatchObject({
+      spring: { gridX: 11, gridY: 10, angle: 90 },
+      centerStar: { gridX: 10, gridY: 11 },
+    });
 });

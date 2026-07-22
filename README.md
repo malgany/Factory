@@ -4,13 +4,20 @@ Puzzle desktop de automação física construído com Vite, TypeScript strict, P
 
 Em cada contrato, o jogador monta uma linha com a física pausada, inicia a simulação e
 ajusta o projeto até conduzir as caixas laranjas das saídas às entradas. A campanha
-possui três fases progressivas e o modo livre fica disponível desde o início.
+possui dez fases progressivas no primeiro mundo e o modo livre fica disponível desde o início.
 
 ## Conteúdo
 
-- **Primeiro Fluxo:** conecte uma saída a uma entrada usando até oito esteiras.
-- **Salto Controlado:** atravesse uma barreira combinando esteiras e trampolins.
-- **Linha de Ritmo:** sincronize duas saídas e entregue 25 caixas em 45 segundos.
+- **Linha de montagem:** aprenda a montar uma linha curta e colete a primeira estrela.
+- **Curva de qualidade:** incline as esteiras para alcançar uma entrada deslocada.
+- **Primeiro salto:** use um trampolim para atravessar uma parede baixa.
+- **Por cima ou por volta:** escolha entre um salto econômico e um desvio seguro.
+- **Salto calibrado:** atravesse uma abertura entre o teto e o piso.
+- **Rota das estrelas:** compare uma rota segura com um desvio de maior pontuação.
+- **Encontro de linhas:** una duas saídas sem congestionar a produção.
+- **Ritmo de produção:** cumpra uma cota alta antes do tempo acabar.
+- **Corredores industriais:** conduza dois fluxos entre bloqueios.
+- **Inspeção final:** combine fluxos, saltos, paredes, estrelas, tempo e perdas.
 - **Modo Livre:** use saída, esteira, entrada e trampolim sem limite de peças ou tempo.
 
 O progresso, os melhores resultados, o volume e o layout do modo livre são salvos no

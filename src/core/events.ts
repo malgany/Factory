@@ -13,6 +13,7 @@ export interface AppEvents {
   'game:ready': undefined;
   'game:snapshot': GameSnapshot;
   'game:angle': { angle: number; clientX: number; clientY: number; visible: boolean };
+  'game:dragging': { active: boolean };
   'game:camera': { zoom: number; scrollX: number; scrollY: number };
   'game:toast': { message: string; tone: 'neutral' | 'success' | 'danger' };
   'game:result': { contractId: ContractId; snapshot: GameSnapshot };
@@ -48,7 +49,7 @@ export interface AppEvents {
   'ui:admin-delete-contract': { contractId: ContractId };
   'ui:tool': { type: MachineType };
   'ui:tool-drag': {
-    type: MachineType;
+    type: MachineType | 'obstacle' | 'star';
     phase: 'start' | 'move' | 'end' | 'cancel';
     clientX: number;
     clientY: number;

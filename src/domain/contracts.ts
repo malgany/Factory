@@ -35,7 +35,7 @@ export const SANDBOX_DEFINITION: SandboxDefinition = {
   title: 'Modo Livre',
   description: 'Construa sem orçamento, cronômetro ou condição de vitória.',
   grid: DEFAULT_GRID,
-  availableMachines: ['source', 'conveyor', 'receiver', 'spring'],
+  availableMachines: ['source', 'tracked-conveyor', 'receiver', 'spring'],
   fixedMachines: [],
 };
 

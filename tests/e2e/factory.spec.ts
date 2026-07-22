@@ -4,7 +4,7 @@ const STORAGE_KEY = 'factory-flow.progress.v1';
 
 interface MachineDebugState {
   id: string;
-  type: 'source' | 'conveyor' | 'receiver' | 'spring';
+  type: 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -42,6 +42,7 @@ type DebugWindow = Window & {
   __FACTORY_DEBUG__?: {
     getSnapshot(): Omit<FactoryDebugState, 'machines' | 'camera' | 'worldBounds'>;
     getMachines(): MachineDebugState[];
+    getBoxes(): Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
     getCamera(): FactoryDebugState['camera'];
     getWorldBounds(): FactoryDebugState['worldBounds'];
     placeMachine(
@@ -55,6 +56,8 @@ type DebugWindow = Window & {
     reverseSelected(): boolean;
     copySelected(): boolean;
     cutSelected(): boolean;
+    setMachines(machines: MachineDebugState[]): void;
+    advance(seconds: number): FactoryDebugState;
     completeContract(): void;
   };
 };
@@ -111,12 +114,20 @@ async function placeAtCanvasCenter(
   tool: MachineDebugState['type'],
 ): Promise<MachineDebugState> {
   const before = await debugState(page);
-  await page.locator(`[data-tool="${tool}"]`).click();
-
+  const toolButton = page.locator(`[data-tool="${tool}"]`);
+  const toolBounds = await toolButton.boundingBox();
   const canvas = page.locator('#game-container canvas');
   const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error('Canvas has no bounding box');
-  await page.mouse.click(bounds.x + bounds.width * 0.55, bounds.y + bounds.height * 0.42);
+  if (!toolBounds || !bounds) throw new Error('Tool or canvas has no bounding box');
+  await page.mouse.move(
+    toolBounds.x + toolBounds.width / 2,
+    toolBounds.y + toolBounds.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width * 0.55, bounds.y + bounds.height * 0.42, {
+    steps: 12,
+  });
+  await page.mouse.up();
 
   await expect
     .poll(async () => (await debugState(page)).machines.length)
@@ -128,6 +139,76 @@ async function placeAtCanvasCenter(
   if (!machine) throw new Error(`No newly placed ${tool} was found`);
   return machine;
 }
+
+test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const before = await debugState(page);
+  await page.locator('[data-tool="spring"]').click();
+  const bounds = await page.locator('#game-container canvas').boundingBox();
+  if (!bounds) throw new Error('Canvas has no bounding box');
+  await page.mouse.click(bounds.x + bounds.width * 0.48, bounds.y + bounds.height * 0.4);
+
+  await expect.poll(async () => (await debugState(page)).machines.length).toBe(
+    before.machines.length,
+  );
+  await expect(page.locator('[data-tool="spring"]')).not.toHaveClass(/is-active/);
+
+  const spring = await placeAtCanvasCenter(page, 'spring');
+  expect(spring.type).toBe('spring');
+});
+
+test('inverte uma única esteira e oculta a ação para outros itens e grupos', async ({
+  page,
+}) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const conveyorId = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !debug.placeMachine('tracked-conveyor', 8, 6, 30)) {
+      throw new Error('Could not place tracked conveyor');
+    }
+    const conveyor = debug.getMachines().find(({ type }) => type === 'tracked-conveyor');
+    if (!conveyor || !debug.selectMachine(conveyor.id)) {
+      throw new Error('Could not select tracked conveyor');
+    }
+    return conveyor.id;
+  });
+
+  const reverse = page.locator('[data-action="reverse"]');
+  await expect(reverse).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-action="mirror-horizontal"]')).toHaveCount(0);
+  await expect(page.locator('[data-action="mirror-vertical"]')).toHaveCount(0);
+
+  await reverse.click();
+  await expect
+    .poll(async () =>
+      page.evaluate((id) => {
+        const machine = (window as DebugWindow).__FACTORY_DEBUG__
+          ?.getMachines()
+          .find((candidate) => candidate.id === id);
+        return machine && { angle: machine.angle, reversed: machine.reversed };
+      }, conveyorId),
+    )
+    .toEqual({ angle: 30, reversed: true });
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('spring', 12, 6, 0)) throw new Error('Could not place spring');
+  });
+  await expect(reverse).toHaveClass(/is-hidden/);
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    if (debug.selectArea(7 * 48, 5 * 48, 14 * 48, 8 * 48) !== 2) {
+      throw new Error('Could not create conveyor group');
+    }
+  });
+  await expect(reverse).toHaveClass(/is-hidden/);
+});
 
 test('bloqueia a interface até a cena do Phaser ficar pronta', async ({ page }) => {
   let releaseTexture = (): void => undefined;
@@ -728,7 +809,15 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
   await startSandbox(page);
 
   await expect(page.locator('[data-tool]')).toHaveCount(4);
-  const conveyor = await placeAtCanvasCenter(page, 'conveyor');
+  await expect(page.locator('[data-tool]').first().locator('.tool-glyph')).toHaveCSS(
+    'background-color',
+    'rgba(0, 0, 0, 0)',
+  );
+  await expect(page.locator('[data-tool]').first().locator('.tool-glyph')).toHaveCSS(
+    'border-top-width',
+    '0px',
+  );
+  const conveyor = await placeAtCanvasCenter(page, 'tracked-conveyor');
   await expect(page.locator('#selection-panel')).toHaveCount(0);
   await expect(page.locator('[data-action="delete"]')).toBeEnabled();
 
@@ -744,10 +833,22 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
     bounds.y +
     (bounds.height - 18 * 48 * camera.zoom) / 2 +
     (conveyor.gridY + 0.5) * 48 * camera.zoom;
-  await page.mouse.move(startX, startY);
+  const shell = page.locator('.factory-app');
+  const buildDock = page.locator('.build-dock');
+  const selectionDock = page.locator('#selection-dock');
+  await expect(selectionDock).not.toHaveClass(/is-hidden/);
+  const grabX = startX + 30 * camera.zoom;
+  const grabY = startY + 6 * camera.zoom;
+  await page.mouse.move(grabX, grabY);
   await page.mouse.down();
-  await page.mouse.move(startX + 24 * camera.zoom, startY + 12 * camera.zoom, { steps: 8 });
+  await page.mouse.move(grabX + 24 * camera.zoom, grabY + 12 * camera.zoom, { steps: 8 });
+  await expect(shell).toHaveClass(/is-dragging-object/);
+  await expect(buildDock).toHaveCSS('opacity', '0');
+  await expect(selectionDock).toHaveCSS('opacity', '0');
   await page.mouse.up();
+  await expect(shell).toHaveClass(/is-dragging-object/);
+  await page.waitForTimeout(220);
+  await expect(shell).not.toHaveClass(/is-dragging-object/);
   await expect
     .poll(async () => (await debugState(page)).machines.find(({ id }) => id === conveyor.id)?.gridX)
     .toBe(conveyor.gridX + 0.5);
@@ -782,13 +883,155 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
     .toBe(true);
 });
 
+test('esteira física transporta caixas com os colisores móveis', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const boxes = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    if (!debug.placeMachine('source', 10, 3)) throw new Error('Source not placed');
+    if (!debug.placeMachine('tracked-conveyor', 10, 5)) {
+      throw new Error('Tracked conveyor not placed');
+    }
+    debug.advance(3);
+    return debug.getBoxes();
+  });
+
+  const conveyorCenterX = (10 + 0.5) * 48;
+  expect(boxes.some(({ x }) => x > conveyorCenterX + 40)).toBe(true);
+});
+
+test('trampolim aplica o impulso fixo nas duas faces', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const result = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    const source: MachineDebugState = {
+      id: 'two-sided-spring-source',
+      type: 'source',
+      gridX: 10,
+      gridY: 9,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    };
+    const upperSpring: MachineDebugState = {
+      id: 'two-sided-spring-upper',
+      type: 'spring',
+      gridX: 10,
+      gridY: 7,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    };
+    const lowerSpring: MachineDebugState = {
+      id: 'two-sided-spring-lower',
+      type: 'spring',
+      gridX: 10,
+      gridY: 12,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    };
+    debug.setMachines([source, upperSpring, lowerSpring]);
+    debug.advance(1 / 60);
+    if (debug.getBoxes().length !== 1) throw new Error('Initial box was not spawned');
+    debug.setMachines([upperSpring, lowerSpring]);
+
+    let previousVelocityY = debug.getBoxes()[0]!.velocityY;
+    let upwardImpulse = 0;
+    let bottomFaceImpulse = 0;
+    for (let sample = 0; sample < 600; sample += 1) {
+      debug.advance(1 / 60);
+      const box = debug.getBoxes()[0];
+      if (!box) break;
+      if (box.velocityY < -10) upwardImpulse = Math.max(upwardImpulse, -box.velocityY);
+      if (upwardImpulse > 0 && previousVelocityY < -1 && box.velocityY > 10) {
+        bottomFaceImpulse = Math.max(bottomFaceImpulse, box.velocityY);
+      }
+      previousVelocityY = box.velocityY;
+    }
+    return { upwardImpulse, bottomFaceImpulse };
+  });
+
+  expect(result.upwardImpulse).toBeCloseTo(11.5, 1);
+  expect(result.bottomFaceImpulse).toBeCloseTo(11.5, 1);
+});
+
+test('cena prepara e avança 40 esteiras físicas sem travar', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const benchmark = await page.evaluate(async () => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    const measureFrames = async (frameCount: number) => {
+      const samples: number[] = [];
+      let previousFrame = performance.now();
+      for (let index = 0; index < frameCount; index += 1) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const currentFrame = performance.now();
+        samples.push(currentFrame - previousFrame);
+        previousFrame = currentFrame;
+      }
+      const sorted = [...samples].sort((a, b) => a - b);
+      return {
+        mean: samples.reduce((total, duration) => total + duration, 0) / samples.length,
+        p95: sorted[Math.floor(sorted.length * 0.95)]!,
+      };
+    };
+    const baselineFrames = await measureFrames(30);
+    const machines: MachineDebugState[] = Array.from({ length: 40 }, (_, index) => ({
+      id: `scale-track-${index}`,
+      type: 'tracked-conveyor',
+      gridX: 1 + (index % 10) * 3,
+      gridY: 1 + Math.floor(index / 10) * 3,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    }));
+
+    const buildStartedAt = performance.now();
+    debug.setMachines(machines);
+    const buildMilliseconds = performance.now() - buildStartedAt;
+    const initializationStartedAt = performance.now();
+    debug.advance(1 / 60);
+    const initializationMilliseconds = performance.now() - initializationStartedAt;
+    const simulationStartedAt = performance.now();
+    const snapshot = debug.advance(0.25);
+    const simulationMilliseconds = performance.now() - simulationStartedAt;
+    const runningFrames = await measureFrames(90);
+    return {
+      baselineFrames,
+      buildMilliseconds,
+      initializationMilliseconds,
+      simulationMilliseconds,
+      machineCount: debug.getMachines().length,
+      elapsedSeconds: snapshot.metrics.elapsedSeconds,
+      meanFrameMilliseconds: runningFrames.mean,
+      p95FrameMilliseconds: runningFrames.p95,
+    };
+  });
+
+  expect(benchmark.machineCount).toBe(40);
+  expect(benchmark.elapsedSeconds).toBeCloseTo(16 / 60, 4);
+  expect(benchmark.buildMilliseconds).toBeLessThan(2_500);
+  expect(benchmark.initializationMilliseconds).toBeLessThan(2_500);
+  expect(benchmark.simulationMilliseconds).toBeLessThan(2_500);
+  expect(benchmark.meanFrameMilliseconds).toBeLessThan(benchmark.baselineFrames.mean * 2);
+  expect(benchmark.p95FrameMilliseconds).toBeLessThan(benchmark.baselineFrames.p95 * 2);
+});
+
 test('copiar e recortar preservam a configuração da máquina selecionada', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
   const original = await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug || !debug.placeMachine('conveyor', 8, 6, 35)) {
+    if (!debug || !debug.placeMachine('tracked-conveyor', 8, 6, 35)) {
       throw new Error('Could not create the source conveyor');
     }
     const machine = debug
@@ -866,11 +1109,11 @@ test('seleção por área copia, recorta e exclui grupos como uma unidade', asyn
   const originals = await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Factory debug API was not installed');
-    if (!debug.placeMachine('conveyor', 8, 6, 35) || !debug.reverseSelected()) {
+    if (!debug.placeMachine('tracked-conveyor', 8, 6, 35) || !debug.reverseSelected()) {
       throw new Error('Could not create the configured conveyor');
     }
     if (!debug.placeMachine('spring', 11, 8, 0)) throw new Error('Could not create spring');
-    if (!debug.placeMachine('conveyor', 14, 6, 90)) {
+    if (!debug.placeMachine('tracked-conveyor', 14, 6, 90)) {
       throw new Error('Could not create the second conveyor');
     }
     return debug.getMachines();
@@ -954,9 +1197,13 @@ test('arrasta todos os itens de uma seleção múltipla como um único grupo', a
   const originals = await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Factory debug API was not installed');
-    if (!debug.placeMachine('conveyor', 8, 6, 25)) throw new Error('Conveyor not placed');
+    if (!debug.placeMachine('tracked-conveyor', 8, 6, 25)) {
+      throw new Error('Conveyor not placed');
+    }
     if (!debug.placeMachine('spring', 11, 8, 0)) throw new Error('Spring not placed');
-    if (!debug.placeMachine('conveyor', 14, 6, 90)) throw new Error('Conveyor not placed');
+    if (!debug.placeMachine('tracked-conveyor', 14, 6, 90)) {
+      throw new Error('Conveyor not placed');
+    }
     return debug.getMachines();
   });
 
@@ -1005,9 +1252,9 @@ test('descarta todo o movimento coletivo quando um item do grupo colide', async 
   const originals = await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Factory debug API was not installed');
-    if (!debug.placeMachine('conveyor', 8, 6)) throw new Error('Conveyor not placed');
-    if (!debug.placeMachine('conveyor', 12, 6)) throw new Error('Conveyor not placed');
-    if (!debug.placeMachine('conveyor', 18, 6)) throw new Error('Target not placed');
+    if (!debug.placeMachine('tracked-conveyor', 8, 6)) throw new Error('Conveyor not placed');
+    if (!debug.placeMachine('tracked-conveyor', 12, 6)) throw new Error('Conveyor not placed');
+    if (!debug.placeMachine('tracked-conveyor', 18, 6)) throw new Error('Target not placed');
     return debug.getMachines();
   });
 
@@ -1043,7 +1290,7 @@ test('grade alterna encaixe de posição e rotação', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
-  const conveyor = await placeAtCanvasCenter(page, 'conveyor');
+  const conveyor = await placeAtCanvasCenter(page, 'tracked-conveyor');
   expect(conveyor.gridX * 4).toBeCloseTo(Math.round(conveyor.gridX * 4), 5);
   expect(conveyor.gridY * 4).toBeCloseTo(Math.round(conveyor.gridY * 4), 5);
 
@@ -1328,7 +1575,7 @@ test('repetir retorna à construção sem iniciar outra simulação', async ({ p
   );
 });
 
-test('conclui os três contratos, registra o ranking e restaura o progresso', async ({ page }) => {
+test('conclui os três primeiros contratos, registra o ranking e restaura o progresso', async ({ page }) => {
   test.setTimeout(45_000);
   await openApp(page);
   await openPlayMenu(page);
@@ -1361,8 +1608,8 @@ test('conclui os três contratos, registra o ranking e restaura o progresso', as
 
   await page.locator('[data-action="result-menu"]').click();
   await openPlayMenu(page);
-  await expect(page.locator('#campaign-progress')).toContainText('3 de 3');
-  await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(3);
+  await expect(page.locator('#campaign-progress')).toContainText('3 de 10');
+  await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(4);
 
   const stored = await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
   expect(stored).not.toBeNull();
@@ -1380,15 +1627,14 @@ test('conclui os três contratos, registra o ranking e restaura o progresso', as
     >;
   };
   expect(storedProgress.version).toBe(3);
-  expect(storedProgress.unlockedContracts).toEqual([
-    'first-flow',
-    'controlled-jump',
-    'line-rhythm',
-  ]);
+  expect(storedProgress.unlockedContracts).toHaveLength(4);
+  expect(storedProgress.unlockedContracts).toEqual(
+    expect.arrayContaining(['assembly-line', 'quality-curve', 'first-jump']),
+  );
   expect(Object.keys(storedProgress.rankings)).toEqual([
-    'first-flow',
-    'controlled-jump',
-    'line-rhythm',
+    'assembly-line',
+    'quality-curve',
+    'first-jump',
   ]);
   for (const [contractId, ranking] of Object.entries(storedProgress.rankings)) {
     expect(ranking).toHaveLength(1);
@@ -1403,14 +1649,14 @@ test('conclui os três contratos, registra o ranking e restaura o progresso', as
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
   await openPlayMenu(page);
-  await expect(page.locator('#campaign-progress')).toContainText('3 de 3');
-  await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(3);
+  await expect(page.locator('#campaign-progress')).toContainText('3 de 10');
+  await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(4);
   await expect(page.locator('#contract-list .contract-card.is-complete')).toHaveCount(3);
   await expect(page.locator('.campaign-stage-marker.is-complete')).toHaveCount(3);
 });
 
-test('restaura o layout persistido do sandbox', async ({ page }) => {
-  const sandboxMachine = {
+test('restaura o layout persistido do sandbox e migra a esteira antiga', async ({ page }) => {
+  const legacySandboxMachine = {
     id: 'saved-conveyor',
     type: 'conveyor' as const,
     gridX: 12,
@@ -1426,14 +1672,14 @@ test('restaura o layout persistido do sandbox', async ({ page }) => {
         key,
         JSON.stringify({
           version: 3,
-          unlockedContracts: ['first-flow'],
+          unlockedContracts: ['assembly-line'],
           rankings: {},
           settings: { muted: true, volume: 0.35 },
           sandbox: { machines: [machine], updatedAt: '2026-07-19T12:00:00.000Z' },
         }),
       );
     },
-    { key: STORAGE_KEY, machine: sandboxMachine },
+    { key: STORAGE_KEY, machine: legacySandboxMachine },
   );
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
@@ -1441,8 +1687,10 @@ test('restaura o layout persistido do sandbox', async ({ page }) => {
   await startSandbox(page);
 
   await expect
-    .poll(async () => (await debugState(page)).machines.find(({ id }) => id === sandboxMachine.id))
-    .toMatchObject(sandboxMachine);
+    .poll(async () =>
+      (await debugState(page)).machines.find(({ id }) => id === legacySandboxMachine.id),
+    )
+    .toMatchObject({ ...legacySandboxMachine, type: 'tracked-conveyor' });
   await expect(page.locator('#pause-modal [data-action="mute"]')).toHaveAttribute(
     'aria-label',
     'Ativar som',
@@ -1469,8 +1717,8 @@ test('mundo expandido aceita e persiste construcoes fora do quadro inicial', asy
     return {
       negative: debug.placeMachine('source', -10, 8),
       beyondOriginal: debug.placeMachine('receiver', 40, 8),
-      outsideLeft: debug.placeMachine('conveyor', -121, 0),
-      outsideRight: debug.placeMachine('conveyor', 150, 0),
+      outsideLeft: debug.placeMachine('tracked-conveyor', -121, 0),
+      outsideRight: debug.placeMachine('tracked-conveyor', 150, 0),
     };
   });
 

@@ -7,12 +7,10 @@ import {
   degreesToRadians,
   localToWorld,
   rectangleCorners,
-  worldToLocal,
   type Point,
 } from './geometry';
 import {
   boxTouchesOrientedSurface,
-  conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   springVelocity,
 } from './physicsModel';
@@ -32,10 +30,23 @@ const SPRING_ANGLE = 22;
 const SPRING_COOLDOWN_MS = 360;
 const CONVEYOR_CENTER: Point = { x: 80, y: 52 };
 const SPRING_CENTER: Point = { x: 160, y: 98 };
+const TRACKED_CONVEYOR_ANGULAR_SPEED = 0.336;
+const TRACKED_CONVEYOR_WHEEL_RADIUS = 6.5;
+const TRACKED_CONVEYOR_TRACK_RADIUS = 8.5;
+const TRACKED_CONVEYOR_LINK_WIDTH = 7.5;
+const TRACKED_CONVEYOR_LINK_HEIGHT = 4;
+const TRACKED_CONVEYOR_LINK_COUNT = 24;
+const TRACKED_CONVEYOR_SPEED = 2.38;
+const TRACKED_CONVEYOR_STRAIGHT_LENGTH = 64;
+const TRACKED_CONVEYOR_ARC_LENGTH = Math.PI * TRACKED_CONVEYOR_TRACK_RADIUS;
+const TRACKED_CONVEYOR_TRACK_LENGTH =
+  TRACKED_CONVEYOR_STRAIGHT_LENGTH * 2 + TRACKED_CONVEYOR_ARC_LENGTH * 2;
 
 const COLORS = {
   graphite: 0x293139,
   conveyor: 0x40566b,
+  blueLight: 0x82a5c5,
+  orange: 0xff7629,
   springGreen: 0x43a96b,
   wood: 0xb47a48,
   white: 0xffffff,
@@ -52,17 +63,27 @@ interface MenuDemoRenderSize {
   height: number;
 }
 
+interface TrackedConveyorPose {
+  center: Point;
+  angle: number;
+}
+
 export interface MenuDemoController {
   setActive(active: boolean): void;
   destroy(): void;
 }
 
 function drawPolygon(graphics: Phaser.GameObjects.Graphics, points: readonly Point[]): void {
-  graphics.fillPoints(
-    points.map((point) => new Phaser.Math.Vector2(point.x, point.y)),
-    true,
-    true,
-  );
+  const first = points[0];
+  if (!first || points.length < 3) return;
+  graphics.beginPath();
+  graphics.moveTo(first.x, first.y);
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    if (point) graphics.lineTo(point.x, point.y);
+  }
+  graphics.closePath();
+  graphics.fillPath();
 }
 
 function linePolygon(
@@ -70,11 +91,59 @@ function linePolygon(
   points: readonly Point[],
   close = true,
 ): void {
-  graphics.strokePoints(
-    points.map((point) => new Phaser.Math.Vector2(point.x, point.y)),
-    close,
-    close,
+  const first = points[0];
+  if (!first || points.length < 2) return;
+  graphics.beginPath();
+  graphics.moveTo(first.x, first.y);
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    if (point) graphics.lineTo(point.x, point.y);
+  }
+  if (close) graphics.closePath();
+  graphics.strokePath();
+}
+
+function trackedConveyorWheelCenters(): Point[] {
+  return [-32, 0, 32].map((offsetX) =>
+    localToWorld(CONVEYOR_CENTER, 0, offsetX, 0),
   );
+}
+
+function trackedConveyorPoseAt(rawDistance: number): TrackedConveyorPose {
+  let distance =
+    ((rawDistance % TRACKED_CONVEYOR_TRACK_LENGTH) + TRACKED_CONVEYOR_TRACK_LENGTH) %
+    TRACKED_CONVEYOR_TRACK_LENGTH;
+  let x: number;
+  let y: number;
+  let tangent: number;
+
+  if (distance < TRACKED_CONVEYOR_STRAIGHT_LENGTH) {
+    x = -32 + distance;
+    y = -TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = 0;
+  } else if (
+    (distance -= TRACKED_CONVEYOR_STRAIGHT_LENGTH) < TRACKED_CONVEYOR_ARC_LENGTH
+  ) {
+    const polar = -Math.PI / 2 + distance / TRACKED_CONVEYOR_TRACK_RADIUS;
+    x = 32 + Math.cos(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    y = Math.sin(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = polar + Math.PI / 2;
+  } else if ((distance -= TRACKED_CONVEYOR_ARC_LENGTH) < TRACKED_CONVEYOR_STRAIGHT_LENGTH) {
+    x = 32 - distance;
+    y = TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = Math.PI;
+  } else {
+    distance -= TRACKED_CONVEYOR_STRAIGHT_LENGTH;
+    const polar = Math.PI / 2 + distance / TRACKED_CONVEYOR_TRACK_RADIUS;
+    x = -32 + Math.cos(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    y = Math.sin(polar) * TRACKED_CONVEYOR_TRACK_RADIUS;
+    tangent = polar + Math.PI / 2;
+  }
+
+  return {
+    center: localToWorld(CONVEYOR_CENTER, 0, x, y),
+    angle: tangent,
+  };
 }
 
 export class MenuDemoScene extends Phaser.Scene {
@@ -82,12 +151,14 @@ export class MenuDemoScene extends Phaser.Scene {
   private renderSize: MenuDemoRenderSize;
   private graphics?: Phaser.GameObjects.Graphics;
   private springBody?: MatterJS.BodyType;
+  private readonly trackedWheels: MatterJS.BodyType[] = [];
+  private readonly trackedLinks: MatterJS.BodyType[] = [];
+  private trackedPhase = 0;
   private box?: MenuBoxRuntime;
   private requestedActive = true;
   private created = false;
   private physicsAccumulator = 0;
   private simulationTimeMs = 0;
-  private simulationVisualTimeMs = 0;
   private lastSpawnWallTime = Number.NEGATIVE_INFINITY;
   private springCompression = 0;
   private visibleTop = 0;
@@ -127,7 +198,6 @@ export class MenuDemoScene extends Phaser.Scene {
 
     const scaledDelta = Math.min(delta, 250) * PHYSICS_SPEED;
     this.physicsAccumulator += scaledDelta;
-    this.simulationVisualTimeMs += scaledDelta;
     while (this.physicsAccumulator >= FIXED_PHYSICS_STEP_MS && this.requestedActive) {
       this.simulateFixedStep();
       this.physicsAccumulator -= FIXED_PHYSICS_STEP_MS;
@@ -179,20 +249,40 @@ export class MenuDemoScene extends Phaser.Scene {
   }
 
   private createStaticBodies(): void {
-    const conveyorDimensions = MACHINE_PHYSICS_DIMENSIONS.conveyor;
-    this.matter.add.rectangle(
-      CONVEYOR_CENTER.x,
-      CONVEYOR_CENTER.y,
-      conveyorDimensions.width,
-      conveyorDimensions.height,
-      {
-        isStatic: true,
-        label: 'menu-demo-conveyor',
-        friction: 0.05,
-        restitution: 0,
-        chamfer: { radius: 3 },
-      },
-    );
+    for (const [index, center] of trackedConveyorWheelCenters().entries()) {
+      this.trackedWheels.push(
+        this.matter.add.circle(center.x, center.y, TRACKED_CONVEYOR_WHEEL_RADIUS, {
+          isStatic: true,
+          label: `menu-demo-tracked-wheel:${index}`,
+          friction: 1,
+          frictionStatic: 5,
+          restitution: 0,
+          slop: 0.02,
+        }),
+      );
+    }
+    for (let index = 0; index < TRACKED_CONVEYOR_LINK_COUNT; index += 1) {
+      const pose = trackedConveyorPoseAt(
+        (index * TRACKED_CONVEYOR_TRACK_LENGTH) / TRACKED_CONVEYOR_LINK_COUNT,
+      );
+      const link = this.matter.add.rectangle(
+        pose.center.x,
+        pose.center.y,
+        TRACKED_CONVEYOR_LINK_WIDTH,
+        TRACKED_CONVEYOR_LINK_HEIGHT,
+        {
+          isStatic: true,
+          label: `menu-demo-tracked-link:${index}`,
+          friction: 1,
+          frictionStatic: 5,
+          restitution: 0,
+          slop: 0.015,
+          chamfer: { radius: 1.2 },
+        },
+      );
+      this.matter.body.setAngle(link, pose.angle);
+      this.trackedLinks.push(link);
+    }
 
     const springDimensions = MACHINE_PHYSICS_DIMENSIONS.spring;
     this.springBody = this.matter.add.rectangle(
@@ -217,7 +307,7 @@ export class MenuDemoScene extends Phaser.Scene {
     // `visibleTop` changes with the menu's aspect ratio, so a fixed world Y can
     // otherwise put part of the box on screen as soon as it is created.
     const spawnY = this.visibleTop - BOX_SIZE;
-    const body = this.matter.add.rectangle(50, spawnY, BOX_SIZE, BOX_SIZE, {
+    const body = this.matter.add.rectangle(CONVEYOR_CENTER.x, spawnY, BOX_SIZE, BOX_SIZE, {
       label: 'menu-demo-factory-box',
       restitution: 0.08,
       friction: 0.24,
@@ -235,7 +325,7 @@ export class MenuDemoScene extends Phaser.Scene {
 
   private simulateFixedStep(): void {
     this.simulationTimeMs += FIXED_PHYSICS_STEP_MS;
-    this.updateConveyor();
+    this.updateTrackedConveyor();
     this.matter.world.step(FIXED_PHYSICS_STEP_MS);
     this.updateSpring();
     this.removeBoxWhenOffscreen();
@@ -243,19 +333,24 @@ export class MenuDemoScene extends Phaser.Scene {
     this.parent.dataset.simulationSteps = String(this.simulationSteps);
   }
 
-  private updateConveyor(): void {
-    const box = this.box;
-    if (!box) return;
-    const local = worldToLocal(CONVEYOR_CENTER, 0, box.body.position);
-    const dimensions = MACHINE_PHYSICS_DIMENSIONS.conveyor;
-    if (
-      Math.abs(local.x) > dimensions.width / 2 + BOX_SIZE / 2 ||
-      local.y < -BOX_SIZE - dimensions.height / 2 ||
-      local.y > dimensions.height / 2 + 5
-    ) {
-      return;
+  private updateTrackedConveyor(): void {
+    this.trackedPhase =
+      (this.trackedPhase + TRACKED_CONVEYOR_SPEED) % TRACKED_CONVEYOR_TRACK_LENGTH;
+    for (let index = 0; index < this.trackedLinks.length; index += 1) {
+      const link = this.trackedLinks[index]!;
+      const pose = trackedConveyorPoseAt(
+        (index * TRACKED_CONVEYOR_TRACK_LENGTH) / TRACKED_CONVEYOR_LINK_COUNT +
+          this.trackedPhase,
+      );
+      let targetAngle = pose.angle;
+      while (targetAngle - link.angle > Math.PI) targetAngle -= Math.PI * 2;
+      while (targetAngle - link.angle < -Math.PI) targetAngle += Math.PI * 2;
+      this.matter.body.setPosition(link, pose.center, true);
+      this.matter.body.setAngle(link, targetAngle, true);
     }
-    this.matter.body.setVelocity(box.body, conveyorVelocity(box.body.velocity, 0, false));
+    for (const wheel of this.trackedWheels) {
+      this.matter.body.setAngle(wheel, wheel.angle + TRACKED_CONVEYOR_ANGULAR_SPEED, true);
+    }
   }
 
   private updateSpring(): void {
@@ -316,7 +411,7 @@ export class MenuDemoScene extends Phaser.Scene {
     const graphics = this.graphics;
     if (!graphics) return;
     graphics.clear();
-    this.drawConveyor(graphics);
+    this.drawTrackedConveyor(graphics);
     this.drawSpring(graphics);
 
     const box = this.box;
@@ -327,21 +422,37 @@ export class MenuDemoScene extends Phaser.Scene {
       .setDisplaySize(BOX_SIZE * BOX_TEXTURE_SCALE_X, BOX_SIZE * BOX_TEXTURE_SCALE_Y);
   }
 
-  private drawConveyor(graphics: Phaser.GameObjects.Graphics): void {
-    const dimensions = MACHINE_DIMENSIONS.conveyor;
-    graphics.fillStyle(COLORS.conveyor, 1);
-    drawPolygon(graphics, rectangleCorners(CONVEYOR_CENTER, dimensions.width, dimensions.height));
-    graphics.lineStyle(2, COLORS.graphite, 0.55);
-    linePolygon(graphics, rectangleCorners(CONVEYOR_CENTER, dimensions.width, dimensions.height));
+  private drawTrackedConveyor(graphics: Phaser.GameObjects.Graphics): void {
+    for (const wheel of this.trackedWheels) {
+      graphics.fillStyle(COLORS.conveyor, 1);
+      graphics.fillCircle(wheel.position.x, wheel.position.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
+      graphics.lineStyle(1.5, COLORS.blueLight, 0.95);
+      graphics.strokeCircle(wheel.position.x, wheel.position.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
+      graphics.lineStyle(1.2, COLORS.white, 0.72);
+      for (const spokeOffset of [0, Math.PI / 2]) {
+        const spokeAngle = wheel.angle + spokeOffset;
+        const dx = Math.cos(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
+        const dy = Math.sin(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
+        graphics.lineBetween(
+          wheel.position.x - dx,
+          wheel.position.y - dy,
+          wheel.position.x + dx,
+          wheel.position.y + dy,
+        );
+      }
+      graphics.fillStyle(COLORS.orange, 1);
+      graphics.fillCircle(wheel.position.x, wheel.position.y, 1.8);
+    }
 
-    const phase = (((this.simulationVisualTimeMs * 0.055) % 24) + 24) % 24;
-    graphics.fillStyle(COLORS.white, 0.94);
-    for (let offset = -60 + phase; offset <= 60; offset += 24) {
-      if (Math.abs(offset) > dimensions.width / 2 - 7) continue;
-      const tip = localToWorld(CONVEYOR_CENTER, 0, offset + 6, 0);
-      const upper = localToWorld(CONVEYOR_CENTER, 0, offset - 5, -7);
-      const lower = localToWorld(CONVEYOR_CENTER, 0, offset - 5, 7);
-      drawPolygon(graphics, [tip, upper, lower]);
+    for (let index = 0; index < this.trackedLinks.length; index += 1) {
+      const link = this.trackedLinks[index];
+      if (!link) continue;
+      const points = link.vertices ?? [];
+      if (points.length < 3) continue;
+      graphics.fillStyle(index % 2 === 0 ? COLORS.white : COLORS.conveyor, 1);
+      drawPolygon(graphics, points);
+      graphics.lineStyle(0.8, COLORS.graphite, 0.82);
+      linePolygon(graphics, points);
     }
   }
 
@@ -403,7 +514,9 @@ function getMenuDemoRenderSize(parent: HTMLElement): MenuDemoRenderSize {
 
 export function createMenuDemo(parent: HTMLElement): MenuDemoController {
   parent.dataset.physicsSpeed = String(PHYSICS_SPEED);
-  parent.dataset.conveyorGridWidth = String(MACHINE_DIMENSIONS.conveyor.width / MENU_GRID_SIZE);
+  parent.dataset.conveyorGridWidth = String(
+    MACHINE_DIMENSIONS['tracked-conveyor'].width / MENU_GRID_SIZE,
+  );
   parent.dataset.springGridWidth = String(MACHINE_DIMENSIONS.spring.width / MENU_GRID_SIZE);
   parent.dataset.boxGridWidth = String(BOX_SIZE / MENU_GRID_SIZE);
   parent.dataset.offscreenCleanupMargin = String(OFFSCREEN_CLEANUP_MARGIN);

@@ -39,14 +39,22 @@ export function conveyorVelocity(
   };
 }
 
-export function springVelocity(velocity: Point, angle: number, speed = 11.5): Point {
+export function springVelocity(
+  velocity: Point,
+  angle: number,
+  speed = 11.5,
+  normalDirection: 1 | -1 = 1,
+): Point {
   const radians = degreesToRadians(angle);
-  const up = { x: Math.sin(radians), y: -Math.cos(radians) };
+  const normal = {
+    x: Math.sin(radians) * normalDirection,
+    y: -Math.cos(radians) * normalDirection,
+  };
   const tangent = { x: Math.cos(radians), y: Math.sin(radians) };
   const tangentialSpeed = velocity.x * tangent.x + velocity.y * tangent.y;
   return {
-    x: up.x * speed + tangent.x * tangentialSpeed * 0.45,
-    y: up.y * speed + tangent.y * tangentialSpeed * 0.45,
+    x: normal.x * speed + tangent.x * tangentialSpeed * 0.45,
+    y: normal.y * speed + tangent.y * tangentialSpeed * 0.45,
   };
 }
 
@@ -64,17 +72,19 @@ export function boxTouchesOrientedSurface(
   surfaceWidth: number,
   surfaceHeight: number,
   tolerance = 1,
+  face: 'top' | 'bottom' = 'top',
 ): boolean {
   const local = worldToLocal(surfaceCenter, surfaceAngle, boxCenter);
   const relativeAngle = degreesToRadians(boxAngle - surfaceAngle);
   const projectedHalfSize =
     (boxSize / 2) * (Math.abs(Math.cos(relativeAngle)) + Math.abs(Math.sin(relativeAngle)));
-  const surfaceTop = -surfaceHeight / 2;
+  const surfaceFace = (face === 'top' ? -1 : 1) * (surfaceHeight / 2);
+  const onFaceSide = face === 'top' ? local.y <= 0 : local.y >= 0;
 
   return (
+    onFaceSide &&
     Math.abs(local.x) <= surfaceWidth / 2 + projectedHalfSize + tolerance &&
-    local.y >= surfaceTop - projectedHalfSize - tolerance &&
-    local.y <= surfaceTop + projectedHalfSize + tolerance
+    Math.abs(local.y - surfaceFace) <= projectedHalfSize + tolerance
   );
 }
 

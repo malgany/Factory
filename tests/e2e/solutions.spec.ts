@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 interface SolutionMachine {
   id: string;
-  type: 'conveyor' | 'spring';
+  type: 'tracked-conveyor' | 'spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -10,22 +10,25 @@ interface SolutionMachine {
   fixed: false;
 }
 
-async function runSolution(
-  page: Page,
-  contractId: 'first-flow' | 'controlled-jump' | 'line-rhythm',
-  machines: SolutionMachine[],
-  seconds: number,
-): Promise<{
+interface SolutionResult {
   status: string;
   delivered: number;
   lost: number;
   pieces: number;
   elapsedSeconds: number;
+  collectedStars: number;
   trace: Array<{
     time: number;
     boxes: Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
   }>;
-}> {
+}
+
+async function runSolution(
+  page: Page,
+  contractId: string,
+  machines: SolutionMachine[],
+  seconds: number,
+): Promise<SolutionResult> {
   await page.goto('/');
   await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
   return page.evaluate(
@@ -35,10 +38,7 @@ async function runSolution(
       debug.startMode('campaign', id);
       debug.setMachines(layout);
       debug.run();
-      const trace: Array<{
-        time: number;
-        boxes: Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
-      }> = [];
+      const trace: SolutionResult['trace'] = [];
       let snapshot = debug.getSnapshot();
       for (let time = 2; time <= duration && snapshot.status === 'running'; time += 2) {
         snapshot = debug.advance(Math.min(2, duration - time + 2));
@@ -61,6 +61,7 @@ async function runSolution(
         lost: snapshot.metrics.lost,
         pieces: debug.getMachines().filter((machine) => !machine.fixed).length,
         elapsedSeconds: snapshot.metrics.elapsedSeconds,
+        collectedStars: snapshot.metrics.collectedStars,
         trace,
       };
     },
@@ -68,13 +69,19 @@ async function runSolution(
   );
 }
 
-const conveyor = (id: string, gridX: number, gridY: number, angle: number): SolutionMachine => ({
+const conveyor = (
+  id: string,
+  gridX: number,
+  gridY: number,
+  angle: number,
+  reversed = false,
+): SolutionMachine => ({
   id,
-  type: 'conveyor',
+  type: 'tracked-conveyor',
   gridX,
   gridY,
   angle,
-  reversed: false,
+  reversed,
   fixed: false,
 });
 
@@ -88,7 +95,29 @@ const spring = (id: string, gridX: number, gridY: number, angle: number): Soluti
   fixed: false,
 });
 
-test('Primeiro Fluxo possui uma solução física dentro do orçamento', async ({ page }) => {
+function expectSolved(
+  result: SolutionResult,
+  goal: { deliveries: number; maxLosses: number; pieceBudget: number; timeLimit?: number },
+): void {
+  expect(result.status, JSON.stringify(result)).toBe('success');
+  expect(result.delivered).toBeGreaterThanOrEqual(goal.deliveries);
+  expect(result.lost).toBeLessThanOrEqual(goal.maxLosses);
+  expect(result.pieces).toBeLessThanOrEqual(goal.pieceBudget);
+  if (goal.timeLimit !== undefined) {
+    expect(result.elapsedSeconds).toBeLessThanOrEqual(goal.timeLimit);
+  }
+}
+
+test('1-1 Linha de montagem possui solução e coleta a estrela', async ({ page }) => {
+  const layout = [5, 7, 9, 11].map((x, index) =>
+    conveyor(`solution-${index + 1}`, x, 6, 0),
+  );
+  const result = await runSolution(page, 'assembly-line', layout, 25);
+  expectSolved(result, { deliveries: 8, maxLosses: 3, pieceBudget: 4 });
+  expect(result.collectedStars).toBe(1);
+});
+
+test('2-1 Curva de qualidade possui solução e coleta as estrelas', async ({ page }) => {
   const layout = [
     conveyor('solution-1', 4, 6, 27),
     conveyor('solution-2', 6, 7, 27),
@@ -97,52 +126,115 @@ test('Primeiro Fluxo possui uma solução física dentro do orçamento', async (
     conveyor('solution-5', 12, 10, 27),
     conveyor('solution-6', 14, 11, 27),
   ];
-
-  const result = await runSolution(page, 'first-flow', layout, 35);
-  expect(result.status, JSON.stringify(result)).toBe('success');
-  expect(result.delivered).toBeGreaterThanOrEqual(10);
-  expect(result.lost).toBeLessThanOrEqual(3);
-  expect(result.pieces).toBeLessThanOrEqual(8);
+  const result = await runSolution(page, 'quality-curve', layout, 35);
+  expectSolved(result, { deliveries: 10, maxLosses: 3, pieceBudget: 6 });
+  expect(result.collectedStars).toBe(2);
 });
 
-test('Salto Controlado possui uma solução com trampolim dentro do orçamento', async ({ page }) => {
+test('3-1 Primeiro salto possui solução com trampolim', async ({ page }) => {
   const layout = [
-    conveyor('solution-1', 4, 6, 0),
-    conveyor('solution-2', 6, 6, 0),
-    conveyor('solution-3', 8, 6, 0),
-    spring('solution-4', 10, 6, 0),
-    conveyor('solution-5', 12, 7, 27),
-    conveyor('solution-6', 14, 8, 27),
-    conveyor('solution-7', 16, 9, 27),
-    conveyor('solution-8', 18, 10, 65),
+    spring('solution-1', 3.25, 8, 65),
+    conveyor('solution-2', 8.5, 13.5, 0),
+    conveyor('solution-3', 10.5, 13.5, 0),
+    conveyor('solution-4', 12.5, 13.5, 0),
+    conveyor('solution-5', 14, 13.5, 0),
   ];
-
-  const result = await runSolution(page, 'controlled-jump', layout, 40);
-  expect(result.status, JSON.stringify(result)).toBe('success');
-  expect(result.delivered).toBeGreaterThanOrEqual(12);
-  expect(result.lost).toBeLessThanOrEqual(3);
-  expect(result.pieces).toBeLessThanOrEqual(8);
+  const result = await runSolution(page, 'first-jump', layout, 35);
+  expectSolved(result, { deliveries: 10, maxLosses: 3, pieceBudget: 5 });
+  expect(result.collectedStars).toBe(1);
 });
 
-test('Linha de Ritmo possui uma solução física dentro de 45 segundos', async ({ page }) => {
+test('4-1 Por cima ou por volta possui solução pelo desvio', async ({ page }) => {
   const layout = [
-    conveyor('solution-1', 3.25, 5.25, 0),
-    conveyor('solution-2', 5.25, 5.25, 0),
-    spring('solution-3', 7, 5.5, 65),
-    conveyor('solution-4', 3.5, 13.5, 0),
-    conveyor('solution-5', 5.5, 13.5, 0),
-    spring('solution-6', 7.25, 14.25, 50),
-    conveyor('solution-7', 15.25, 14.25, 0),
-    conveyor('solution-8', 17.25, 14.25, 0),
-    conveyor('solution-9', 19.25, 14.25, 0),
-    conveyor('solution-10', 21.25, 14.25, 0),
-    conveyor('solution-11', 23.25, 14.25, 0),
+    conveyor('solution-1', 3, 12, 0),
+    conveyor('solution-2', 5, 12, 0),
+    conveyor('solution-3', 7, 12, 0),
+    conveyor('solution-4', 8.5, 12.5, 27),
+    conveyor('solution-5', 10, 13.5, 0),
+    conveyor('solution-6', 12, 13.5, 0),
+    conveyor('solution-7', 14, 13.5, 0),
+    conveyor('solution-8', 16, 13.5, 0),
+    conveyor('solution-9', 18, 13.5, 0),
   ];
+  const result = await runSolution(page, 'over-or-around', layout, 40);
+  expectSolved(result, { deliveries: 12, maxLosses: 3, pieceBudget: 10 });
+});
 
-  const result = await runSolution(page, 'line-rhythm', layout, 45);
-  expect(result.status, JSON.stringify(result)).toBe('success');
-  expect(result.delivered).toBeGreaterThanOrEqual(25);
-  expect(result.lost).toBeLessThanOrEqual(2);
-  expect(result.pieces).toBeLessThanOrEqual(12);
-  expect(result.elapsedSeconds).toBeLessThanOrEqual(45);
+test('5-1 Salto calibrado possui solução pela janela', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    conveyor('solution-2', 9.5, 13.5, 0),
+    conveyor('solution-3', 11.5, 13.5, 0),
+    conveyor('solution-4', 13.5, 13.5, 0),
+    conveyor('solution-5', 15.5, 13.5, 0),
+  ];
+  const result = await runSolution(page, 'calibrated-jump', layout, 42);
+  expectSolved(result, { deliveries: 12, maxLosses: 2, pieceBudget: 5 });
+  expect(result.collectedStars).toBe(1);
+});
+
+test('6-1 Rota das estrelas possui uma rota principal segura', async ({ page }) => {
+  const layout = [4, 6, 8, 10, 12, 14, 16, 18].map((x, index) =>
+    conveyor(`solution-${index + 1}`, x, 13.5, 0),
+  );
+  const result = await runSolution(page, 'star-route', layout, 40);
+  expectSolved(result, { deliveries: 14, maxLosses: 3, pieceBudget: 9 });
+  expect(result.collectedStars).toBe(1);
+});
+
+test('6-1 Rota das estrelas possui um desvio que coleta os três bônus', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    ...[8.5, 10.5, 12.5, 14.5, 16.5, 18.5].map((x, index) =>
+      conveyor(`solution-${index + 2}`, x, 13.5, 0),
+    ),
+  ];
+  const result = await runSolution(page, 'star-route', layout, 40);
+  expectSolved(result, { deliveries: 14, maxLosses: 3, pieceBudget: 9 });
+  expect(result.collectedStars).toBe(3);
+});
+
+test('7-1 Encontro de linhas possui solução para os dois fluxos', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5].map((x, index) =>
+      conveyor(`solution-${index + 2}`, x, 13.5, 0),
+    ),
+  ];
+  const result = await runSolution(page, 'meeting-lines', layout, 40);
+  expectSolved(result, { deliveries: 16, maxLosses: 3, pieceBudget: 10 });
+});
+
+test('8-1 Ritmo de produção cumpre a cota antes do tempo', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5, 19.5].map((x, index) =>
+      conveyor(`solution-${index + 2}`, x, 13.5, 0),
+    ),
+  ];
+  const result = await runSolution(page, 'production-rhythm', layout, 35);
+  expectSolved(result, { deliveries: 24, maxLosses: 2, pieceBudget: 11, timeLimit: 35 });
+});
+
+test('9-1 Corredores industriais possui solução entre os bloqueios', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5, 19.5, 21.5].map((x, index) =>
+      conveyor(`solution-${index + 2}`, x, 14.5, 0),
+    ),
+  ];
+  const result = await runSolution(page, 'industrial-corridors', layout, 42);
+  expectSolved(result, { deliveries: 20, maxLosses: 2, pieceBudget: 12, timeLimit: 42 });
+});
+
+test('10-1 Inspeção final combina os dois fluxos dentro do prazo', async ({ page }) => {
+  const layout = [
+    spring('solution-1', 3.25, 8, 65),
+    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5, 19.5, 21.5].map((x, index) =>
+      conveyor(`solution-${index + 2}`, x, 13.5, 0),
+    ),
+    conveyor('solution-12', 23, 13.75, 15),
+  ];
+  const result = await runSolution(page, 'final-inspection', layout, 42);
+  expectSolved(result, { deliveries: 25, maxLosses: 1, pieceBudget: 12, timeLimit: 42 });
 });

@@ -13,6 +13,7 @@ export interface MachineDimensions {
 export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   source: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
   conveyor: { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
+  'tracked-conveyor': { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
   receiver: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
   spring: { width: CELL_SIZE, height: CELL_SIZE / 2 },
 };
@@ -25,6 +26,7 @@ export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
 export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   source: MACHINE_DIMENSIONS.source,
   conveyor: { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
+  'tracked-conveyor': { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
   receiver: MACHINE_DIMENSIONS.receiver,
   spring: MACHINE_DIMENSIONS.spring,
 };

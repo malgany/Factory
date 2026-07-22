@@ -33,11 +33,28 @@ describe('modelo físico determinístico', () => {
   });
 
   it('orienta o impulso do trampolim pelo ângulo central', () => {
-    const impulse = springVelocity({ x: 0, y: 0 }, 45);
+    const downward = localToWorld({ x: 0, y: 0 }, 45, 0, 12);
+    const impulse = springVelocity(downward, 45);
 
     expect(impulse.x).toBeGreaterThan(0);
     expect(impulse.y).toBeLessThan(0);
     expect(Math.abs(impulse.x)).toBeCloseTo(Math.abs(impulse.y), 8);
+  });
+
+  it('mantém o impulso padrão independentemente da força recebida', () => {
+    const slowImpact = springVelocity({ x: 0, y: 1 }, 0);
+    const fastImpact = springVelocity({ x: 0, y: 20 }, 0);
+
+    expect(slowImpact.y).toBe(-11.5);
+    expect(fastImpact.y).toBe(-11.5);
+  });
+
+  it('aplica o mesmo impulso para fora nas duas faces', () => {
+    const topFace = springVelocity({ x: 0, y: 5 }, 0, 11.5, 1);
+    const bottomFace = springVelocity({ x: 0, y: -5 }, 0, 11.5, -1);
+
+    expect(topFace).toEqual({ x: 0, y: -11.5 });
+    expect(bottomFace).toEqual({ x: 0, y: 11.5 });
   });
 
   it('só aciona o trampolim quando a caixa alcança a superfície', () => {
@@ -62,6 +79,12 @@ describe('modelo físico determinístico', () => {
       0,
       -surfaceHeight / 2 - boxSize,
     );
+    const touchingBottom = localToWorld(
+      surfaceCenter,
+      surfaceAngle,
+      0,
+      surfaceHeight / 2 + projectedHalfSize,
+    );
 
     expect(
       boxTouchesOrientedSurface(
@@ -83,6 +106,19 @@ describe('modelo físico determinístico', () => {
         surfaceAngle,
         surfaceWidth,
         surfaceHeight,
+      ),
+    ).toBe(true);
+    expect(
+      boxTouchesOrientedSurface(
+        touchingBottom,
+        boxAngle,
+        boxSize,
+        surfaceCenter,
+        surfaceAngle,
+        surfaceWidth,
+        surfaceHeight,
+        1,
+        'bottom',
       ),
     ).toBe(true);
   });

@@ -8,7 +8,12 @@ export const PLAY_AREA_MAX_COLUMN = GRID_COLUMNS * (PLAY_AREA_MARGIN_STAGES + 1)
 export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
 export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
-export type MachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
+export type MachineType =
+  | 'source'
+  | 'conveyor'
+  | 'tracked-conveyor'
+  | 'receiver'
+  | 'spring';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
 export type ContractId = string;
@@ -40,6 +45,7 @@ export interface ObstacleDefinition {
   gridY: number;
   columns: number;
   rows: number;
+  angle?: number;
 }
 
 export interface CollectibleDefinition {
