@@ -1,4 +1,5 @@
 export const CELL_SIZE = 48;
+export const COLLECTIBLE_STAR_RADIUS = 22;
 export const GRID_COLUMNS = 30;
 export const GRID_ROWS = 18;
 export const PLAY_AREA_MARGIN_STAGES = 4;
@@ -11,6 +12,7 @@ export type MachineType = 'source' | 'conveyor' | 'receiver' | 'spring';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
 export type ContractId = string;
+export type ContractStage = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
 export interface GridPoint {
   x: number;
@@ -40,13 +42,19 @@ export interface ObstacleDefinition {
   rows: number;
 }
 
+export interface CollectibleDefinition {
+  type: 'star';
+  id: string;
+  gridX: number;
+  gridY: number;
+}
+
 export interface ContractGoal {
   deliveries: number;
   maxLosses: number;
   pieceBudget: number;
   timeLimitSeconds?: number;
-  parPieces: number;
-  parTimeSeconds?: number;
+  idealTimeSeconds?: number;
 }
 
 export interface ContractCamera {
@@ -57,6 +65,9 @@ export interface ContractCamera {
 
 export interface ContractDefinition {
   id: ContractId;
+  world: number;
+  stage: ContractStage;
+  revision: number;
   order: number;
   title: string;
   subtitle: string;
@@ -65,6 +76,7 @@ export interface ContractDefinition {
   availableMachines: MachineType[];
   fixedMachines: MachineState[];
   obstacles: ObstacleDefinition[];
+  collectibles: CollectibleDefinition[];
   goal: ContractGoal;
   spawnIntervalSeconds: number;
   initialCamera: ContractCamera;
@@ -76,12 +88,24 @@ export interface RunMetrics {
   active: number;
   elapsedSeconds: number;
   placedPieces: number;
+  collectedStars: number;
+}
+
+export interface ScoreBreakdown {
+  deliveryPoints: number;
+  timeBonus: number;
+  efficiencyBonus: number;
+  starBonus: number;
+  lossPenalty: number;
 }
 
 export interface ContractResult {
   contractId: ContractId;
-  stars: number;
+  contractRevision: number;
+  score: number;
+  breakdown: ScoreBreakdown;
   metrics: RunMetrics;
+  completedAt: string;
 }
 
 export interface SandboxSave {
@@ -90,9 +114,9 @@ export interface SandboxSave {
 }
 
 export interface ProgressSave {
-  version: 2;
+  version: 3;
   unlockedContracts: ContractId[];
-  bestResults: Partial<Record<ContractId, ContractResult>>;
+  rankings: Partial<Record<ContractId, ContractResult[]>>;
   settings: {
     muted: boolean;
     volume: number;
@@ -101,7 +125,7 @@ export interface ProgressSave {
 }
 
 export interface ContractCatalogFile {
-  version: 1;
+  version: 2;
   contracts: ContractDefinition[];
   updatedAt: string;
 }

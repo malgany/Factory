@@ -1,8 +1,11 @@
 import { appEvents } from '../core/events';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
+import factoryCampaignEnvironmentUrl from '../assets/factory-campaign-environment.webp?url';
+import { createContractResult } from '../domain/rules';
 import type {
   ContractDefinition,
   ContractId,
+  ContractResult,
   GameSnapshot,
   MachineState,
   MachineType,
@@ -59,6 +62,7 @@ type IconName =
   | 'clear'
   | 'lock'
   | 'star'
+  | 'ranking'
   | 'edit'
   | 'settings'
   | 'close'
@@ -67,7 +71,7 @@ type IconName =
   | 'test'
   | 'plus';
 
-type AdminTool = MachineType | 'obstacle';
+type AdminTool = MachineType | 'obstacle' | 'star';
 export type CatalogSavingContext = 'editor' | 'operation';
 
 const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
@@ -81,6 +85,42 @@ const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
 const MINIMUM_LOADING_DURATION_MS = 360;
 const MENU_CAMERA_DURATION_MS = 650;
 const MENU_CAMERA_FALLBACK_MS = MENU_CAMERA_DURATION_MS + 100;
+const CAMPAIGN_WORLD = 1;
+const CAMPAIGN_WORLDS = [{ value: 1, label: 'Mundo 1' }] as const;
+const CAMPAIGN_STAGE_POSITIONS = [
+  { stage: 1, x: 132, y: 724 },
+  { stage: 2, x: 336, y: 655 },
+  { stage: 3, x: 500, y: 742 },
+  { stage: 4, x: 604, y: 593 },
+  { stage: 5, x: 792, y: 672 },
+  { stage: 6, x: 968, y: 602 },
+  { stage: 7, x: 1124, y: 694 },
+  { stage: 8, x: 1240, y: 552 },
+  { stage: 9, x: 1428, y: 574 },
+  { stage: 10, x: 1580, y: 652 },
+] as const;
+
+function campaignRouteLinks(lockedStages: ReadonlySet<number>): string {
+  const links = CAMPAIGN_STAGE_POSITIONS.slice(0, -1)
+    .map((stage, index) => {
+      const nextStage = CAMPAIGN_STAGE_POSITIONS[index + 1]!;
+      return `
+        <g class="campaign-route-link${lockedStages.has(nextStage.stage) ? ' is-locked' : ''}">
+          <line class="campaign-route-link-shadow" x1="${stage.x}" y1="${stage.y}" x2="${nextStage.x}" y2="${nextStage.y}" pathLength="3"></line>
+          <line class="campaign-route-link-dashes" x1="${stage.x}" y1="${stage.y}" x2="${nextStage.x}" y2="${nextStage.y}" pathLength="3"></line>
+        </g>`;
+    })
+    .join('');
+
+  return `
+    <svg class="campaign-route-overlay" viewBox="0 0 1672 941" aria-hidden="true" focusable="false">
+      ${links}
+    </svg>`;
+}
+
+function contractLabel(contract: Pick<ContractDefinition, 'stage' | 'world'>): string {
+  return `${contract.stage}-${contract.world}`;
+}
 
 export class AppUI {
   readonly gameContainerId = 'game-container';
@@ -100,6 +140,7 @@ export class AppUI {
   private catalogSaving = false;
   private catalogSavingContext?: CatalogSavingContext;
   private resultContractId?: ContractId;
+  private selectedCampaignContractId?: ContractId;
   private pendingAdminAction?: { contractId: ContractId };
   private gameReady = false;
   private readonly loadingStartedAt = performance.now();
@@ -211,8 +252,11 @@ export class AppUI {
   }
 
   showMenu(view: MenuView = 'home'): void {
-    this.element('#menu-screen').classList.remove('is-hidden');
+    const menu = this.element('#menu-screen');
+    menu.classList.remove('is-hidden');
+    menu.removeAttribute('inert');
     this.element('#result-modal').classList.add('is-hidden');
+    this.element('#ranking-modal').classList.add('is-hidden');
     this.closePauseMenu();
     this.setMenuView(view);
     this.root.classList.add('is-menu-open');
@@ -235,7 +279,9 @@ export class AppUI {
     if (view === 'options') this.setOptionsCategory('audio-video');
     const cameraMove =
       (previousView === 'home' && view === 'options') ||
-      (previousView === 'options' && view === 'home');
+      (previousView === 'options' && view === 'home') ||
+      (previousView === 'home' && view === 'play') ||
+      (previousView === 'play' && view === 'home');
     const shouldAnimate =
       cameraMove &&
       !menu.classList.contains('is-hidden') &&
@@ -296,7 +342,9 @@ export class AppUI {
     menu.querySelectorAll<HTMLElement>('[data-menu-panel]').forEach((panel) => {
       const panelView = panel.dataset.menuPanel as MenuView;
       const visuallyHidden =
-        panelView === 'play' ? view !== 'play' : panelView === 'home' && view === 'play';
+        panelView === 'play'
+          ? view !== 'play' && !transitioning
+          : panelView === 'home' && view === 'play' && !transitioning;
       const unavailable = transitioning || panelView !== view;
       panel.classList.toggle('is-hidden', visuallyHidden);
       panel.toggleAttribute('inert', unavailable);
@@ -322,6 +370,13 @@ export class AppUI {
 
   private focusMenuView(view: MenuView, previousView: MenuView): void {
     if (view === 'play' && !this.adminEnabled) {
+      this.root
+        .querySelector<HTMLButtonElement>('.campaign-map-back-button')
+        ?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (view === 'play' && this.adminEnabled) {
       const dots = [...this.root.querySelectorAll<HTMLButtonElement>('[data-contract-dot]')];
       const selectedIndex = Math.max(
         0,
@@ -458,21 +513,26 @@ export class AppUI {
               <button class="icon-button" data-action="editor-configure" type="button" aria-label="Fechar configurações">${icon('close')}</button>
             </div>
             <form id="editor-contract-form" autocomplete="off">
-              <label class="field field-wide"><span>Título *</span><input name="title" maxlength="64" required /></label>
-              <label class="field field-wide"><span>Subtítulo</span><input name="subtitle" maxlength="96" /></label>
-              <label class="field field-wide"><span>Descrição</span><textarea name="description" rows="3" maxlength="240"></textarea></label>
-              <fieldset class="field-group">
-                <legend>Objetivo</legend>
-                <label class="field"><span>Entregas *</span><input name="deliveries" type="number" min="1" step="1" required /></label>
-                <label class="field"><span>Perdas máximas *</span><input name="maxLosses" type="number" min="0" step="1" required /></label>
-                <label class="field"><span>Orçamento *</span><input name="pieceBudget" type="number" min="0" step="1" required /></label>
-                <label class="field"><span>Tempo limite (s)</span><input name="timeLimitSeconds" type="number" min="0.1" step="any" placeholder="Sem limite" /></label>
+              <fieldset class="field-group phase-identity-fields">
+                <legend>Identificação</legend>
+                <label class="field"><span>Mundo *</span><select name="world" required>${CAMPAIGN_WORLDS.map(({ value, label }) => `<option value="${value}">${label}</option>`).join('')}</select></label>
+                <label class="field"><span>Fase *</span><select name="stage" required>${Array.from({ length: 10 }, (_, index) => `<option value="${index + 1}">${index + 1}</option>`).join('')}</select></label>
+                <output class="phase-identity-preview field-wide" data-stage-label>1-1</output>
               </fieldset>
               <fieldset class="field-group">
-                <legend>Referência de estrelas</legend>
-                <label class="field"><span>Peças de referência *</span><input name="parPieces" type="number" min="0" step="1" required /></label>
-                <label class="field"><span>Tempo de referência (s)</span><input name="parTimeSeconds" type="number" min="0.1" step="any" placeholder="Sem referência" /></label>
-                <label class="field field-wide"><span>Intervalo de geração (s) *</span><input name="spawnIntervalSeconds" type="number" min="0.1" step="any" required /></label>
+                <legend>Objetivo</legend>
+                <label class="field"><span>Meta de entregas *</span><input name="deliveries" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Perdas máximas *</span><input name="maxLosses" type="number" min="0" step="1" required /></label>
+                <label class="field"><span>Limite de peças *</span><input name="pieceBudget" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Tempo limite (s)</span><input name="timeLimitSeconds" type="number" min="1" step="1" inputmode="numeric" placeholder="Sem limite" /></label>
+              </fieldset>
+              <fieldset class="field-group">
+                <legend>Ritmo e pontuação</legend>
+                <label class="field field-wide"><span>Tempo ideal (s)</span><input name="idealTimeSeconds" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="Automático" /></label>
+                <label class="field field-wide spawn-interval-field">
+                  <span>Intervalo de geração <output data-spawn-interval-output>1,25 s</output></span>
+                  <input name="spawnIntervalSeconds" type="range" min="0.8" max="10" step="0.05" value="1.25" required />
+                </label>
               </fieldset>
               <fieldset class="field-group tool-availability">
                 <legend>Ferramentas do jogador</legend>
@@ -501,28 +561,51 @@ export class AppUI {
                   </nav>
                 </section>
 
-                <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-labelledby="play-menu-title" aria-hidden="true" inert>
-                  <button class="menu-back-button campaign-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal"><span aria-hidden="true">←</span><span>Voltar</span></button>
-                  <header class="campaign-heading">
-                    <span class="eyebrow">JOGAR</span>
-                    <h2 id="play-menu-title">Escolha uma fase</h2>
-                    <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
-                  </header>
-                  <div class="contract-browser campaign-browser">
-                    <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
-                    <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
-                    <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
-                    <div class="campaign-actions">
-                      <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
-                        <span class="create-contract-mark">${icon('plus')}</span>
-                        <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
-                        <span class="card-arrow" aria-hidden="true">→</span>
-                      </button>
-                      <button class="sandbox-card" data-start-sandbox>
-                        <span class="sandbox-mark">∞</span>
-                        <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
-                        <span class="card-arrow" aria-hidden="true">→</span>
-                      </button>
+                <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-label="Jogar" aria-hidden="true" inert>
+                  <div class="campaign-map-stage">
+                    <div class="campaign-map-art" id="campaign-map-art">
+                      <img class="campaign-map-image" src="${factoryCampaignEnvironmentUrl}" alt="Cenário industrial da campanha" draggable="false" />
+                      <div id="campaign-route-root" class="campaign-route-root"></div>
+                      <div id="campaign-stage-nodes" class="campaign-stage-nodes" role="group" aria-label="Fases do Mundo 1"></div>
+                    </div>
+                    <div class="campaign-map-brand" role="img" aria-label="Factory">Factory<span aria-hidden="true">.</span></div>
+                    <button class="options-back-button campaign-map-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal">
+                      ${icon('back')}
+                    </button>
+                    <section id="campaign-stage-actions" class="campaign-stage-actions is-hidden" aria-live="polite">
+                      <div>
+                        <span class="eyebrow">MUNDO 1</span>
+                        <strong data-campaign-stage-label>1-1</strong>
+                        <small data-campaign-best-score>Sem pontuação</small>
+                      </div>
+                      <button class="soft-button" data-action="campaign-ranking" type="button">${icon('ranking')} Ranking</button>
+                      <button class="primary-action" data-action="campaign-play" type="button">${icon('play')} Jogar</button>
+                    </section>
+                  </div>
+
+                  <div class="campaign-legacy-content">
+                    <button class="menu-back-button campaign-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal"><span aria-hidden="true">←</span><span>Voltar</span></button>
+                    <header class="campaign-heading">
+                      <span class="eyebrow">JOGAR</span>
+                      <h2 id="play-menu-title">Escolha uma fase</h2>
+                      <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
+                    </header>
+                    <div class="contract-browser campaign-browser">
+                      <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
+                      <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
+                      <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
+                      <div class="campaign-actions">
+                        <button id="create-contract-button" class="create-contract-card is-hidden" data-action="admin-create" type="button">
+                          <span class="create-contract-mark">${icon('plus')}</span>
+                          <span><strong>Criar nova fase</strong><small>Adicione o próximo contrato da campanha.</small></span>
+                          <span class="card-arrow" aria-hidden="true">→</span>
+                        </button>
+                        <button class="sandbox-card" data-start-sandbox>
+                          <span class="sandbox-mark">∞</span>
+                          <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
+                          <span class="card-arrow" aria-hidden="true">→</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </section>
@@ -651,19 +734,42 @@ export class AppUI {
           <div class="result-card">
             <span class="eyebrow accent" id="result-kicker">CONTRATO CONCLUÍDO</span>
             <h2 id="result-title">Fluxo estabelecido</h2>
-            <div id="result-stars" class="result-stars" aria-label="0 estrelas"></div>
+            <div class="result-score" aria-live="polite">
+              <span>PONTUAÇÃO</span>
+              <strong data-result-score>0</strong>
+              <small data-result-ranking>Fora do ranking</small>
+            </div>
             <p id="result-summary">A linha encontrou seu ritmo.</p>
             <div class="result-metrics">
               ${resultMetric('Entregues', '0', 'delivered')}
               ${resultMetric('Perdidas', '0', 'lost')}
               ${resultMetric('Tempo', '00:00', 'elapsed')}
               ${resultMetric('Peças', '0', 'pieces')}
+              ${resultMetric('Estrelas', '0', 'collected-stars')}
             </div>
+            <dl class="score-breakdown is-hidden" id="score-breakdown">
+              <div><dt>Entregas</dt><dd data-score-part="deliveries">+0</dd></div>
+              <div><dt>Velocidade</dt><dd data-score-part="time">+0</dd></div>
+              <div><dt>Eficiência</dt><dd data-score-part="efficiency">+0</dd></div>
+              <div><dt>Estrelas</dt><dd data-score-part="stars">+0</dd></div>
+              <div class="is-penalty"><dt>Perdas</dt><dd data-score-part="losses">−0</dd></div>
+            </dl>
             <div class="result-actions">
               <button class="soft-button" data-action="result-menu">Menu</button>
               <button class="soft-button" data-action="replay">Repetir</button>
               <button class="primary-action" data-action="next">Próximo contrato <span>→</span></button>
             </div>
+          </div>
+        </section>
+
+        <section id="ranking-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="ranking-title">
+          <div class="modal-scrim" data-action="campaign-ranking-close"></div>
+          <div class="ranking-card">
+            <header>
+              <div><span class="eyebrow accent">TOP 10 LOCAL</span><h2 id="ranking-title">Ranking da fase 1-1</h2></div>
+              <button class="icon-button" data-action="campaign-ranking-close" type="button" aria-label="Fechar ranking">${icon('close')}</button>
+            </header>
+            <div id="ranking-list" class="ranking-list"></div>
           </div>
         </section>
         <section id="editor-confirm-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="editor-confirm-title">
@@ -773,6 +879,42 @@ export class AppUI {
     });
 
     this.root.addEventListener(
+      'keydown',
+      (event) => {
+        const rankingModal = this.element('#ranking-modal');
+        const resultModal = this.element('#result-modal');
+        const activeModal = !rankingModal.classList.contains('is-hidden')
+          ? rankingModal
+          : !resultModal.classList.contains('is-hidden')
+            ? resultModal
+            : undefined;
+        if (!activeModal) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          if (activeModal === rankingModal) this.closeCampaignRanking();
+          else this.handleAction('result-menu');
+          return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusable = [
+          ...activeModal.querySelectorAll<HTMLElement>('button:not(:disabled):not(.is-hidden)'),
+        ].filter((control) => !control.closest('.is-hidden'));
+        if (focusable.length === 0) return;
+        const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+        const nextIndex = event.shiftKey
+          ? currentIndex <= 0
+            ? focusable.length - 1
+            : currentIndex - 1
+          : currentIndex < 0 || currentIndex === focusable.length - 1
+            ? 0
+            : currentIndex + 1;
+        event.preventDefault();
+        focusable[nextIndex]?.focus({ preventScroll: true });
+      },
+      { signal: this.domEvents.signal },
+    );
+
+    this.root.addEventListener(
       'input',
       (event) => {
         const input = event.target as HTMLInputElement;
@@ -808,7 +950,38 @@ export class AppUI {
       appEvents.on('game:angle', (payload) => this.renderAngle(payload)),
       appEvents.on('game:toast', ({ message, tone }) => this.showToast(message, tone)),
       appEvents.on('game:audio', ({ kind }) => this.audio.play(kind)),
-      appEvents.on('game:result', (result) => this.renderResult(result)),
+      appEvents.on('game:result', ({ contractId, snapshot }) => {
+        if (snapshot.status === 'success' && snapshot.mode === 'campaign') return;
+        const contract =
+          this.contracts.find(({ id }) => id === contractId) ?? this.editorContract;
+        const result =
+          snapshot.status === 'success' && contract
+            ? createContractResult(contract, snapshot.metrics)
+            : undefined;
+        this.renderResult({ contractId, snapshot, result });
+      }),
+      appEvents.on(
+        'game:result-recorded', ({ result, snapshot, rankingPosition, isNewRecord }) => {
+          const contract = this.contracts.find(({ id }) => id === result.contractId);
+          const next = contract
+            ? this.contracts.find(
+                (candidate) =>
+                  candidate.world === contract.world && candidate.stage === contract.stage + 1,
+              )
+            : undefined;
+          if (next && this.progress.unlockedContracts.includes(next.id)) {
+            this.selectedCampaignContractId = next.id;
+            this.renderCampaignMap();
+          }
+          this.renderResult({
+            contractId: result.contractId,
+            snapshot,
+            result,
+            rankingPosition,
+            isNewRecord,
+          });
+        },
+      ),
       appEvents.on('game:editor-changed', ({ contract, dirty }) => {
         if (!this.editorContract) return;
         this.editorContract = structuredClone(contract);
@@ -880,6 +1053,15 @@ export class AppUI {
       case 'menu-home':
         this.setMenuView('home');
         break;
+      case 'campaign-play':
+        this.startSelectedCampaign();
+        break;
+      case 'campaign-ranking':
+        this.openCampaignRanking();
+        break;
+      case 'campaign-ranking-close':
+        this.closeCampaignRanking();
+        break;
       case 'options-audio-video':
         this.setOptionsCategory('audio-video');
         break;
@@ -933,10 +1115,12 @@ export class AppUI {
         break;
       case 'replay':
         this.element('#result-modal').classList.add('is-hidden');
+        this.updateGameUiAvailability();
         appEvents.emit('ui:replay', undefined);
         break;
       case 'next':
         this.element('#result-modal').classList.add('is-hidden');
+        this.updateGameUiAvailability();
         this.startNextContract();
         break;
       case 'toggle-admin':
@@ -1022,6 +1206,7 @@ export class AppUI {
   }
 
   private renderMenuCards(): void {
+    this.renderCampaignMap();
     const list = this.element('#contract-list');
     const pagination = this.element('#contract-pagination');
     list.innerHTML = '';
@@ -1048,7 +1233,7 @@ export class AppUI {
       return;
     }
     const completed = this.contracts.filter(
-      (contract) => this.progress.bestResults[contract.id],
+      (contract) => (this.progress.rankings[contract.id]?.length ?? 0) > 0,
     ).length;
     this.element('#campaign-progress').textContent =
       `${completed} de ${this.contracts.length} concluídos`;
@@ -1062,14 +1247,15 @@ export class AppUI {
 
     this.contracts.forEach((contract, index) => {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
-      const best = this.progress.bestResults[contract.id];
+      const best = this.progress.rankings[contract.id]?.[0];
+      const label = contractLabel(contract);
       const button = document.createElement('button');
       button.className = `contract-card stage-contract-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
       button.disabled = !unlocked;
       button.dataset.contractIndex = String(index);
       button.setAttribute(
         'aria-label',
-        unlocked ? `Abrir ${contract.title}` : `${contract.title}, bloqueado`,
+        unlocked ? `Abrir fase ${label}` : `Fase ${label}, bloqueada`,
       );
       button.innerHTML = `
         <span class="stage-card-preview" aria-hidden="true">
@@ -1077,10 +1263,8 @@ export class AppUI {
           ${unlocked ? '' : `<span class="stage-card-lock">${icon('lock')}</span>`}
         </span>
         <span class="stage-card-details">
-          <span class="stage-card-kicker">FASE ${String(contract.order).padStart(2, '0')}</span>
-          <span class="contract-title-row"><strong>${escapeHTML(contract.title)}</strong>${best ? stars(best.stars, true) : ''}</span>
-          <small class="stage-card-subtitle">${escapeHTML(contract.subtitle)}</small>
-          <span class="stage-card-description">${escapeHTML(contract.description)}</span>
+          <span class="stage-card-kicker">MUNDO ${contract.world}</span>
+          <span class="contract-title-row"><strong>${label}</strong>${best ? `<i>${formatScore(best.score)} pts</i>` : ''}</span>
           <span class="contract-tags">
             <i>${contract.goal.deliveries} caixas</i>
             <i>${contract.goal.pieceBudget} peças</i>
@@ -1109,8 +1293,8 @@ export class AppUI {
       dot.setAttribute(
         'aria-label',
         unlocked
-          ? `Ver fase ${contract.order}: ${contract.title}`
-          : `Ver fase ${contract.order}: ${contract.title}, bloqueada`,
+          ? `Ver fase ${label}`
+          : `Ver fase ${label}, bloqueada`,
       );
       dot.innerHTML = unlocked
         ? `<span>${String(contract.order).padStart(2, '0')}</span>`
@@ -1127,6 +1311,152 @@ export class AppUI {
       );
     }
     this.renderCatalogSavingState();
+  }
+
+  private renderCampaignMap(): void {
+    const contractsByStage = new Map(
+      this.contracts
+        .filter((contract) => contract.world === CAMPAIGN_WORLD)
+        .map((contract) => [contract.stage, contract] as const),
+    );
+    const unlockedContracts = this.contracts.filter(
+      (contract) =>
+        contract.world === CAMPAIGN_WORLD &&
+        this.progress.unlockedContracts.includes(contract.id),
+    );
+    const currentSelection = unlockedContracts.find(
+      (contract) => contract.id === this.selectedCampaignContractId,
+    );
+    if (!currentSelection) {
+      const firstIncomplete = unlockedContracts.find(
+        (contract) => (this.progress.rankings[contract.id]?.length ?? 0) === 0,
+      );
+      this.selectedCampaignContractId =
+        firstIncomplete?.id ?? unlockedContracts.at(-1)?.id ?? unlockedContracts[0]?.id;
+    }
+
+    const lockedStages = new Set<number>();
+    for (const position of CAMPAIGN_STAGE_POSITIONS) {
+      const contract = contractsByStage.get(position.stage);
+      if (!contract || !this.progress.unlockedContracts.includes(contract.id)) {
+        lockedStages.add(position.stage);
+      }
+    }
+    this.element('#campaign-route-root').innerHTML = campaignRouteLinks(lockedStages);
+
+    const nodes = this.element('#campaign-stage-nodes');
+    nodes.innerHTML = CAMPAIGN_STAGE_POSITIONS.map((position) => {
+      const contract = contractsByStage.get(position.stage);
+      const unlocked = Boolean(
+        contract && this.progress.unlockedContracts.includes(contract.id),
+      );
+      const selected = unlocked && contract?.id === this.selectedCampaignContractId;
+      const completed = Boolean(contract && this.progress.rankings[contract.id]?.length);
+      const label = `${position.stage}-${CAMPAIGN_WORLD}`;
+      const ariaLabel = !contract
+        ? `Fase ${label}, não cadastrada`
+        : unlocked
+          ? `Selecionar fase ${label}`
+          : `Fase ${label}, bloqueada`;
+      return `<button
+        class="campaign-stage-marker${selected ? ' is-current' : ''}${unlocked ? '' : ' is-locked'}${completed ? ' is-complete' : ''}"
+        type="button"
+        data-campaign-stage="${position.stage}"
+        ${contract ? `data-campaign-contract="${escapeHTML(contract.id)}"` : ''}
+        style="--stage-x:${((position.x / 1672) * 100).toFixed(4)}%;--stage-y:${((position.y / 941) * 100).toFixed(4)}%"
+        aria-label="${ariaLabel}"
+        aria-pressed="${selected}"
+        ${unlocked ? '' : 'disabled'}>
+          <span class="campaign-stage-shadow" aria-hidden="true"></span>
+          <span class="campaign-stage-base" aria-hidden="true"></span>
+          <span class="campaign-stage-rim" aria-hidden="true"><span class="campaign-stage-disc">
+            ${unlocked ? `<strong>${label}</strong>` : icon('lock')}
+          </span></span>
+        </button>`;
+    }).join('');
+
+    nodes.querySelectorAll<HTMLButtonElement>('[data-campaign-contract]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const contractId = button.dataset.campaignContract;
+        if (contractId) this.selectCampaignContract(contractId, true);
+      });
+    });
+    this.renderCampaignStageActions();
+  }
+
+  private selectCampaignContract(contractId: ContractId, focus = false): void {
+    const contract = this.contracts.find(({ id }) => id === contractId);
+    if (!contract || !this.progress.unlockedContracts.includes(contract.id)) return;
+    this.selectedCampaignContractId = contract.id;
+    this.renderCampaignMap();
+    if (focus) {
+      this.root
+        .querySelector<HTMLButtonElement>(`[data-campaign-contract="${CSS.escape(contract.id)}"]`)
+        ?.focus({ preventScroll: true });
+    }
+  }
+
+  private renderCampaignStageActions(): void {
+    const panel = this.element('#campaign-stage-actions');
+    const contract = this.contracts.find(({ id }) => id === this.selectedCampaignContractId);
+    const available = Boolean(contract && this.progress.unlockedContracts.includes(contract.id));
+    panel.classList.toggle('is-hidden', !available);
+    if (!contract || !available) return;
+    const ranking = this.progress.rankings[contract.id] ?? [];
+    this.element('[data-campaign-stage-label]').textContent = contractLabel(contract);
+    this.element('[data-campaign-best-score]').textContent = ranking[0]
+      ? `Melhor: ${formatScore(ranking[0].score)} pontos`
+      : 'Sem pontuação';
+  }
+
+  private startSelectedCampaign(): void {
+    const contract = this.contracts.find(({ id }) => id === this.selectedCampaignContractId);
+    if (!contract || !this.progress.unlockedContracts.includes(contract.id)) return;
+    this.hideMenu();
+    appEvents.emit('ui:start-mode', {
+      mode: 'campaign',
+      contractId: contract.id,
+      contract: structuredClone(contract),
+    });
+  }
+
+  private openCampaignRanking(): void {
+    const contract = this.contracts.find(({ id }) => id === this.selectedCampaignContractId);
+    if (!contract) return;
+    this.element('#ranking-title').textContent = `Ranking da fase ${contractLabel(contract)}`;
+    const ranking = this.progress.rankings[contract.id] ?? [];
+    const list = this.element('#ranking-list');
+    list.innerHTML = ranking.length
+      ? ranking
+          .map(
+            (result, index) => `<article class="ranking-entry">
+              <strong class="ranking-position">${index + 1}º</strong>
+              <div><b>${formatScore(result.score)} pts</b><span>${formatRankingDate(result.completedAt)}</span></div>
+              <dl>
+                <div><dt>Tempo</dt><dd>${formatTime(result.metrics.elapsedSeconds)}</dd></div>
+                <div><dt>Perdas</dt><dd>${result.metrics.lost}</dd></div>
+                <div><dt>Peças</dt><dd>${result.metrics.placedPieces}</dd></div>
+                <div><dt>Estrelas</dt><dd>${result.metrics.collectedStars}</dd></div>
+              </dl>
+            </article>`,
+          )
+          .join('')
+      : '<div class="ranking-empty"><strong>Ainda não há pontuações</strong><span>Conclua a fase para entrar no Top 10 local.</span></div>';
+    this.element('#ranking-modal').classList.remove('is-hidden');
+    this.element('#menu-screen').toggleAttribute('inert', true);
+    window.requestAnimationFrame(() =>
+      this.root
+        .querySelector<HTMLButtonElement>('#ranking-modal [data-action="campaign-ranking-close"]')
+        ?.focus(),
+    );
+  }
+
+  private closeCampaignRanking(): void {
+    this.element('#ranking-modal').classList.add('is-hidden');
+    this.element('#menu-screen').removeAttribute('inert');
+    this.root
+      .querySelector<HTMLButtonElement>('[data-action="campaign-ranking"]')
+      ?.focus({ preventScroll: true });
   }
 
   private selectMenuContract(
@@ -1151,26 +1481,26 @@ export class AppUI {
 
   private renderAdminMenuCards(list: HTMLElement): void {
     const completed = this.contracts.filter(
-      (contract) => this.progress.bestResults[contract.id],
+      (contract) => (this.progress.rankings[contract.id]?.length ?? 0) > 0,
     ).length;
     this.element('#campaign-progress').textContent =
       `${completed} de ${this.contracts.length} concluídos`;
 
     for (const contract of this.contracts) {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
-      const best = this.progress.bestResults[contract.id];
+      const best = this.progress.rankings[contract.id]?.[0];
+      const label = contractLabel(contract);
       const entry = document.createElement('article');
       entry.className = 'contract-entry';
       const button = document.createElement('button');
       button.className = `contract-card is-admin-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
-      button.setAttribute('aria-label', `Editar ${contract.title}`);
+      button.setAttribute('aria-label', `Editar fase ${label}`);
       button.innerHTML = `
-        <span class="contract-index">${String(contract.order).padStart(2, '0')}</span>
+        <span class="contract-index">${label}</span>
         <span class="contract-copy">
           <span class="contract-title-row">
-            <strong>${escapeHTML(contract.title)}</strong>
+            <strong>Fase ${label}</strong>
           </span>
-          <small>${escapeHTML(contract.subtitle)}</small>
           <span class="contract-tags">
             <i>${contract.goal.deliveries} caixas</i>
             <i>${contract.goal.pieceBudget} peças</i>
@@ -1191,7 +1521,7 @@ export class AppUI {
       remove.type = 'button';
       remove.innerHTML = `${icon('trash')} Excluir`;
       remove.addEventListener('click', () =>
-        this.openAdminConfirmation(contract.id, contract.title),
+        this.openAdminConfirmation(contract.id, label),
       );
       actions.append(remove);
       entry.append(actions);
@@ -1365,6 +1695,7 @@ export class AppUI {
         hint: 'Arraste para redimensionar',
         icon: 'blocker',
       },
+      { type: 'star', label: 'Estrela', hint: 'Bônus coletável', icon: 'star' },
     ];
     for (const tool of tools) {
       const button = document.createElement('button');
@@ -1374,7 +1705,9 @@ export class AppUI {
       button.title = `${tool.label} · ${tool.hint}`;
       button.setAttribute('aria-label', `${tool.label}: ${tool.hint}`);
       button.innerHTML = `<span class="tool-glyph tool-${tool.type}">${
-        tool.type === 'obstacle' ? icon(tool.icon) : machineThumbnail(tool.type)
+        tool.type === 'obstacle' || tool.type === 'star'
+          ? icon(tool.icon)
+          : machineThumbnail(tool.type)
       }</span>`;
       button.addEventListener('click', () => {
         hotbar
@@ -1394,7 +1727,10 @@ export class AppUI {
   ): void {
     const editing = Boolean(this.editorContract && !this.editorPreviewActive);
     const canManipulate = Boolean(
-      selectionCount > 1 || (machine && (editing || !machine.fixed)) || (editing && obstacle),
+      selectionCount > 1 ||
+        (machine && (editing || !machine.fixed)) ||
+        (editing && obstacle) ||
+        (editing && selectionCount === 1 && !machine && !obstacle),
     );
     const remove = this.element<HTMLButtonElement>('[data-action="delete"]');
     const copy = this.element<HTMLButtonElement>('[data-action="copy"]');
@@ -1461,33 +1797,43 @@ export class AppUI {
     indicator.querySelector('strong')!.textContent = `${normalizeAngle(payload.angle)}°`;
   }
 
-  private renderResult(result: {
+  private renderResult(payload: {
     contractId: ContractId;
-    stars: number;
     snapshot: GameSnapshot;
+    result?: ContractResult;
+    rankingPosition?: number | null;
+    isNewRecord?: boolean;
   }): void {
-    const { snapshot } = result;
+    const { snapshot, result } = payload;
     const success = snapshot.status === 'success';
-    const contract = this.contracts.find((item) => item.id === result.contractId);
+    const contract =
+      this.contracts.find((item) => item.id === payload.contractId) ?? this.editorContract;
 
-    this.resultContractId = result.contractId;
+    this.resultContractId = payload.contractId;
     this.element('#result-kicker').textContent = success
       ? 'CONTRATO CONCLUÍDO'
       : 'TENTATIVA ENCERRADA';
     this.element('#result-title').textContent = success
-      ? (contract?.title ?? 'Fluxo estabelecido')
+      ? contract
+        ? `Fase ${contractLabel(contract)}`
+        : 'Fluxo estabelecido'
       : 'A linha parou';
     this.element('#result-summary').textContent = success
-      ? result.stars === 3
-        ? 'Um fluxo preciso, limpo e eficiente.'
-        : 'A entrega foi concluída. Ainda há espaço para refinar.'
+      ? payload.isNewRecord
+        ? 'Novo recorde local. O fluxo encontrou um ritmo excepcional.'
+        : 'A meta foi concluída. Tente novamente para subir no ranking.'
       : snapshot.goal && snapshot.metrics.lost > snapshot.goal.maxLosses
         ? 'Muitas caixas foram perdidas. Ajuste os ângulos e tente de novo.'
         : 'O tempo terminou. Encurte o percurso e mantenha o ritmo.';
 
-    const starsNode = this.element('#result-stars');
-    starsNode.innerHTML = stars(success ? result.stars : 0, false);
-    starsNode.setAttribute('aria-label', `${success ? result.stars : 0} estrelas`);
+    this.element('[data-result-score]').textContent = formatScore(result?.score ?? 0);
+    this.element('[data-result-ranking]').textContent = success
+      ? payload.rankingPosition
+        ? `${payload.rankingPosition}º lugar no Top 10 local`
+        : snapshot.mode === 'campaign'
+          ? 'Resultado fora do Top 10 local'
+          : 'Prévia do editor · não salva'
+      : 'Tentativa não classificada';
     this.element('[data-result="delivered"] strong').textContent = String(
       snapshot.metrics.delivered,
     );
@@ -1498,12 +1844,47 @@ export class AppUI {
     this.element('[data-result="pieces"] strong').textContent = String(
       snapshot.metrics.placedPieces,
     );
+    this.element('[data-result="collected-stars"] strong').textContent = String(
+      snapshot.metrics.collectedStars,
+    );
+
+    const breakdown = this.element('#score-breakdown');
+    breakdown.classList.toggle('is-hidden', !success || !result);
+    if (result) {
+      this.element('[data-score-part="deliveries"]').textContent =
+        `+${formatScore(result.breakdown.deliveryPoints)}`;
+      this.element('[data-score-part="time"]').textContent =
+        `+${formatScore(result.breakdown.timeBonus)}`;
+      this.element('[data-score-part="efficiency"]').textContent =
+        `+${formatScore(result.breakdown.efficiencyBonus)}`;
+      this.element('[data-score-part="stars"]').textContent =
+        `+${formatScore(result.breakdown.starBonus)}`;
+      this.element('[data-score-part="losses"]').textContent =
+        `−${formatScore(result.breakdown.lossPenalty)}`;
+    }
 
     const next = this.element<HTMLButtonElement>('[data-action="next"]');
-    const currentIndex = this.contracts.findIndex((item) => item.id === result.contractId);
-    next.classList.toggle('is-hidden', !success || currentIndex >= this.contracts.length - 1);
+    const nextContract = contract
+      ? this.contracts.find(
+          (candidate) =>
+            candidate.world === contract.world && candidate.stage === contract.stage + 1,
+        )
+      : undefined;
+    next.classList.toggle(
+      'is-hidden',
+      !success ||
+        snapshot.mode !== 'campaign' ||
+        !nextContract ||
+        !this.progress.unlockedContracts.includes(nextContract.id),
+    );
     this.closePauseMenu();
     this.element('#result-modal').classList.remove('is-hidden');
+    this.updateGameUiAvailability();
+    window.requestAnimationFrame(() =>
+      this.root
+        .querySelector<HTMLButtonElement>('#result-modal [data-action="replay"]')
+        ?.focus({ preventScroll: true }),
+    );
     if (success) this.audio.play('win');
   }
 
@@ -1526,7 +1907,7 @@ export class AppUI {
     const contract = this.editorContract;
     if (!contract) return;
     this.element('#editor-rail').classList.toggle('is-hidden', this.editorPreviewActive);
-    this.element('#editor-contract-title').textContent = contract.title.trim() || 'Fase sem título';
+    this.element('#editor-contract-title').textContent = `Fase ${contractLabel(contract)}`;
     const dirtyState = this.element('#editor-dirty-state');
     const savingEditor = this.catalogSaving && this.catalogSavingContext === 'editor';
     dirtyState.textContent = savingEditor
@@ -1548,16 +1929,15 @@ export class AppUI {
 
   private populateEditorForm(contract: ContractDefinition): void {
     const form = this.element<HTMLFormElement>('#editor-contract-form');
-    setFormControlValue(form, 'title', contract.title);
-    setFormControlValue(form, 'subtitle', contract.subtitle);
-    setFormControlValue(form, 'description', contract.description);
+    setFormControlValue(form, 'world', contract.world);
+    setFormControlValue(form, 'stage', contract.stage);
     setFormControlValue(form, 'deliveries', contract.goal.deliveries);
     setFormControlValue(form, 'maxLosses', contract.goal.maxLosses);
     setFormControlValue(form, 'pieceBudget', contract.goal.pieceBudget);
     setFormControlValue(form, 'timeLimitSeconds', contract.goal.timeLimitSeconds ?? '');
-    setFormControlValue(form, 'parPieces', contract.goal.parPieces);
-    setFormControlValue(form, 'parTimeSeconds', contract.goal.parTimeSeconds ?? '');
+    setFormControlValue(form, 'idealTimeSeconds', contract.goal.idealTimeSeconds ?? '');
     setFormControlValue(form, 'spawnIntervalSeconds', contract.spawnIntervalSeconds);
+    this.updateEditorFormOutputs(contract);
     setFormControlChecked(
       form,
       'availableConveyor',
@@ -1572,11 +1952,15 @@ export class AppUI {
     const availableMachines: MachineType[] = [];
     if (formCheckbox(form, 'availableConveyor').checked) availableMachines.push('conveyor');
     if (formCheckbox(form, 'availableSpring').checked) availableMachines.push('spring');
+    const world = Math.round(numberFormValue(form, 'world'));
+    const stage = Math.round(numberFormValue(form, 'stage'));
+    const label = `${stage}-${world}`;
     const contract: ContractDefinition = {
       ...this.editorContract,
-      title: formValue(form, 'title'),
-      subtitle: formValue(form, 'subtitle'),
-      description: formValue(form, 'description'),
+      world,
+      stage: stage as ContractDefinition['stage'],
+      order: (world - 1) * 10 + stage,
+      title: label,
       availableMachines,
       goal: {
         ...this.editorContract.goal,
@@ -1584,15 +1968,15 @@ export class AppUI {
         maxLosses: numberFormValue(form, 'maxLosses'),
         pieceBudget: numberFormValue(form, 'pieceBudget'),
         timeLimitSeconds: optionalNumberFormValue(form, 'timeLimitSeconds'),
-        parPieces: numberFormValue(form, 'parPieces'),
-        parTimeSeconds: optionalNumberFormValue(form, 'parTimeSeconds'),
+        idealTimeSeconds: optionalNumberFormValue(form, 'idealTimeSeconds'),
       },
       spawnIntervalSeconds: numberFormValue(form, 'spawnIntervalSeconds'),
     };
     this.editorContract = contract;
     this.editorDirty = true;
     this.clearEditorMessage();
-    this.element('#editor-contract-title').textContent = contract.title.trim() || 'Fase sem título';
+    this.element('#editor-contract-title').textContent = contractLabel(contract);
+    this.updateEditorFormOutputs(contract);
     const dirty = this.element('#editor-dirty-state');
     dirty.textContent = this.editorIsNew ? 'Nova fase · não salva' : 'Alterações não salvas';
     dirty.classList.add('is-dirty');
@@ -1606,18 +1990,33 @@ export class AppUI {
     if (!contract) return false;
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     const errors: string[] = [];
-    if (!contract.title.trim()) errors.push('Informe o título da fase.');
+    if (!CAMPAIGN_WORLDS.some(({ value }) => value === contract.world))
+      errors.push('Selecione um mundo válido.');
+    if (!Number.isInteger(contract.stage) || contract.stage < 1 || contract.stage > 10)
+      errors.push('Selecione uma fase entre 1 e 10.');
+    if (
+      this.contracts.some(
+        (candidate) =>
+          candidate.id !== contract.id &&
+          candidate.world === contract.world &&
+          candidate.stage === contract.stage,
+      )
+    )
+      errors.push(`A fase ${contractLabel(contract)} já está cadastrada.`);
     if (contract.goal.deliveries < 1) errors.push('Entregas deve ser pelo menos 1.');
     if (contract.goal.maxLosses < 0) errors.push('Perdas máximas não pode ser negativa.');
     if (contract.goal.pieceBudget < 0) errors.push('O orçamento não pode ser negativo.');
-    if (contract.goal.parPieces > contract.goal.pieceBudget)
-      errors.push('A referência de peças não pode superar o orçamento.');
-    if (contract.spawnIntervalSeconds <= 0)
-      errors.push('O intervalo de geração deve ser positivo.');
+    if (contract.spawnIntervalSeconds < 0.8 || contract.spawnIntervalSeconds > 10)
+      errors.push('O intervalo de geração deve ficar entre 0,80 e 10 segundos.');
     if (contract.goal.timeLimitSeconds !== undefined && contract.goal.timeLimitSeconds <= 0)
       errors.push('O tempo limite deve ser positivo.');
-    if (contract.goal.parTimeSeconds !== undefined && contract.goal.parTimeSeconds <= 0)
-      errors.push('O tempo de referência deve ser positivo.');
+    if (
+      contract.goal.timeLimitSeconds !== undefined &&
+      !Number.isInteger(contract.goal.timeLimitSeconds)
+    )
+      errors.push('O tempo limite deve usar segundos inteiros.');
+    if (contract.goal.idealTimeSeconds !== undefined && contract.goal.idealTimeSeconds <= 0)
+      errors.push('O tempo ideal deve ser positivo.');
     if (!contract.fixedMachines.some((machine) => machine.type === 'source'))
       errors.push('Adicione pelo menos uma saída.');
     if (!contract.fixedMachines.some((machine) => machine.type === 'receiver'))
@@ -1637,6 +2036,12 @@ export class AppUI {
       'true',
     );
     return false;
+  }
+
+  private updateEditorFormOutputs(contract: ContractDefinition): void {
+    this.element<HTMLOutputElement>('[data-stage-label]').value = contractLabel(contract);
+    this.element<HTMLOutputElement>('[data-spawn-interval-output]').value =
+      `${contract.spawnIntervalSeconds.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} s`;
   }
 
   private toggleEditorConfiguration(): void {
@@ -1662,13 +2067,16 @@ export class AppUI {
 
   private startNextContract(): void {
     if (!this.resultContractId) return;
-    const currentIndex = this.contracts.findIndex(
-      (contract) => contract.id === this.resultContractId,
-    );
-    const next = this.contracts[currentIndex + 1];
-    if (!next) {
+    const current = this.contracts.find((contract) => contract.id === this.resultContractId);
+    const next = current
+      ? this.contracts.find(
+          (contract) =>
+            contract.world === current.world && contract.stage === current.stage + 1,
+        )
+      : undefined;
+    if (!next || !this.progress.unlockedContracts.includes(next.id)) {
       appEvents.emit('ui:menu', undefined);
-      this.showMenu();
+      this.showMenu('play');
       return;
     }
     appEvents.emit('ui:start-mode', {
@@ -1706,10 +2114,9 @@ export class AppUI {
 
     this.root.classList.toggle('is-catalog-saving', editorSaving);
     this.updateGameUiAvailability();
-    this.element(`#${this.gameContainerId}`).toggleAttribute('inert', editorSaving);
     this.element('#editor-contract-form')
-      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
-        'input, textarea, button',
+      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>(
+        'input, textarea, select, button',
       )
       .forEach((control) => {
         control.disabled = editorSaving;
@@ -1723,7 +2130,10 @@ export class AppUI {
       });
 
     this.element<HTMLButtonElement>('#admin-toggle').disabled = saving;
-    this.element<HTMLButtonElement>('#create-contract-button').disabled = saving;
+    const createButton = this.element<HTMLButtonElement>('#create-contract-button');
+    const worldIsFull = this.contracts.filter(({ world }) => world === CAMPAIGN_WORLD).length >= 10;
+    createButton.disabled = saving || worldIsFull;
+    createButton.title = worldIsFull ? 'O Mundo 1 já possui as dez fases cadastradas.' : '';
     this.root
       .querySelectorAll<HTMLButtonElement>('.contract-admin-actions button')
       .forEach((button) => {
@@ -1785,7 +2195,10 @@ export class AppUI {
     const gameUi = this.element('#game-ui');
     const menuOpen = !this.element('#menu-screen').classList.contains('is-hidden');
     const editorSaving = this.catalogSaving && this.catalogSavingContext === 'editor';
-    gameUi.toggleAttribute('inert', !this.gameReady || editorSaving || menuOpen);
+    const resultOpen = !this.element('#result-modal').classList.contains('is-hidden');
+    const blocked = !this.gameReady || editorSaving || menuOpen || resultOpen;
+    gameUi.toggleAttribute('inert', blocked);
+    this.element(`#${this.gameContainerId}`).toggleAttribute('inert', blocked);
     gameUi.setAttribute('aria-hidden', String(menuOpen));
     gameUi.setAttribute('aria-busy', String(!this.gameReady || editorSaving));
   }
@@ -1838,6 +2251,22 @@ function formatTime(seconds: number): string {
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
 }
 
+function formatScore(score: number): string {
+  return Math.max(0, Math.round(score)).toLocaleString('pt-BR');
+}
+
+function formatRankingDate(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Data indisponível';
+  return new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
 function normalizeAngle(angle: number): number {
   const normalized = Math.round(angle) % 360;
   return normalized < 0 ? normalized + 360 : normalized;
@@ -1849,9 +2278,16 @@ function escapeHTML(value: string): string {
   return node.innerHTML;
 }
 
-function formControl(form: HTMLFormElement, name: string): HTMLInputElement | HTMLTextAreaElement {
+function formControl(
+  form: HTMLFormElement,
+  name: string,
+): HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
   const control = form.elements.namedItem(name);
-  if (!(control instanceof HTMLInputElement) && !(control instanceof HTMLTextAreaElement))
+  if (
+    !(control instanceof HTMLInputElement) &&
+    !(control instanceof HTMLTextAreaElement) &&
+    !(control instanceof HTMLSelectElement)
+  )
     throw new Error(`Editor form control not found: ${name}`);
   return control;
 }
@@ -1884,12 +2320,6 @@ function optionalNumberFormValue(form: HTMLFormElement, name: string): number | 
   if (!raw) return undefined;
   const value = Number(raw);
   return Number.isFinite(value) ? value : undefined;
-}
-
-function stars(count: number, compact: boolean): string {
-  return `<span class="${compact ? 'mini-stars' : 'star-row'}">${[1, 2, 3]
-    .map((star) => `<i class="${star <= count ? 'is-filled' : ''}">${icon('star')}</i>`)
-    .join('')}</span>`;
 }
 
 function contractStagePreview(contract: ContractDefinition): string {
@@ -1967,6 +2397,7 @@ function icon(name: IconName): string {
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',
+    ranking: '<path d="M8 21V10h8v11M5 21h14M9 4h6l-1 4h-4z"/><path d="M8 5H5a3 3 0 0 0 3 4m8-4h3a3 3 0 0 1-3 4"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4M4 20h16"/>',
     settings:
       '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.3 3h-4.6l-.4 3a8 8 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.6-1a8 8 0 0 0 1.7 1l.4 3h4.6l.4-3a8 8 0 0 0 1.7-1l2.6 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',

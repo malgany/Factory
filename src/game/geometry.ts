@@ -18,13 +18,14 @@ export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
 };
 
 /**
- * Static bodies keep a small invisible clearance so adjoining conveyor surfaces do not overlap
- * in Matter while their visible footprints meet exactly on the grid.
+ * Solid bodies keep a small invisible clearance so adjoining conveyor surfaces do not overlap
+ * in Matter while their visible footprints meet exactly on the grid. Sensor-only endpoints match
+ * their visible footprint so interactions start when a box reaches the rendered machine.
  */
 export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> = {
-  source: { width: 68, height: 68 },
+  source: MACHINE_DIMENSIONS.source,
   conveyor: { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
-  receiver: { width: 76, height: 76 },
+  receiver: MACHINE_DIMENSIONS.receiver,
   spring: MACHINE_DIMENSIONS.spring,
 };
 

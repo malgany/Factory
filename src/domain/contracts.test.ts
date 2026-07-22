@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
-import { CONTRACTS, SANDBOX_DEFINITION, getContract, getNextContractId } from './contracts';
+import {
+  CONTRACTS,
+  SANDBOX_DEFINITION,
+  getContract,
+  getContractBySlot,
+  getNextContractId,
+} from './contracts';
 
 describe('contratos', () => {
   it('define três fases progressivas em uma área 30×18', () => {
     expect(CONTRACTS).toHaveLength(3);
     expect(CONTRACTS.map((contract) => contract.order)).toEqual([1, 2, 3]);
+    expect(
+      CONTRACTS.map(({ world, stage, title, revision }) => ({ world, stage, title, revision })),
+    ).toEqual([
+      { world: 1, stage: 1, title: '1-1', revision: 1 },
+      { world: 1, stage: 2, title: '2-1', revision: 1 },
+      { world: 1, stage: 3, title: '3-1', revision: 1 },
+    ]);
     expect(CONTRACTS.every((contract) => contract.grid.columns === 30)).toBe(true);
     expect(CONTRACTS.every((contract) => contract.grid.rows === 18)).toBe(true);
     expect(
@@ -48,6 +61,9 @@ describe('contratos', () => {
     expect(getNextContractId('first-flow')).toBe('controlled-jump');
     expect(getNextContractId('controlled-jump')).toBe('line-rhythm');
     expect(getNextContractId('line-rhythm')).toBeUndefined();
+    expect(getContractBySlot(1, 2)?.id).toBe('controlled-jump');
+    const fifth = { ...structuredClone(CONTRACTS[0]!), id: 'fifth', stage: 5 as const, order: 5 };
+    expect(getNextContractId('line-rhythm', [...CONTRACTS, fifth])).toBeUndefined();
     expect(SANDBOX_DEFINITION.availableMachines).toEqual([
       'source',
       'conveyor',

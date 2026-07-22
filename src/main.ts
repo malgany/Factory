@@ -11,9 +11,11 @@ import {
 import {
   applyContractResult,
   clearContractRecord,
+  getContractResultPosition,
   reconcileProgress,
   removeContractProgress,
 } from './domain/progress';
+import { createContractResult } from './domain/rules';
 import type {
   ContractCatalogFile,
   ContractDefinition,
@@ -61,23 +63,41 @@ if (!catalogLoad.ok) {
 }
 
 const eventUnsubscribers = [
-  appEvents.on('game:result', ({ contractId, stars, snapshot }) => {
+  appEvents.on('game:result', ({ contractId, snapshot }) => {
     if (snapshot.status !== 'success' || snapshot.mode !== 'campaign') return;
-    progress = applyContractResult(
-      progress,
-      { contractId, stars, metrics: { ...snapshot.metrics } },
-      contracts,
-    );
+    const contract = findContract(contractId);
+    if (!contract) {
+      notify('A fase concluída não foi encontrada no catálogo.', 'danger');
+      return;
+    }
+
+    const result = createContractResult(contract, snapshot.metrics);
+    progress = applyContractResult(progress, result, contracts);
     const saved = platform.saveProgress(progress);
     ui.updateProgress(progress);
+
+    const rankingPosition = getContractResultPosition(progress, result) ?? null;
+    const isNewRecord = rankingPosition === 1;
+
+    appEvents.emit('game:result-recorded', {
+      result,
+      snapshot,
+      rankingPosition,
+      isNewRecord,
+    });
+
     if (!saved.ok) {
       appEvents.emit('game:toast', { message: saved.error, tone: 'danger' });
     }
     void platform.unlockAchievement(`contract:${contractId}`);
-    if (stars === 3) void platform.unlockAchievement(`contract:${contractId}:perfect`);
+    if (isNewRecord) void platform.unlockAchievement(`contract:${contractId}:record`);
   }),
   appEvents.on('ui:admin-create-contract', () => {
-    openEditor(createEmptyContractDraft(catalog), true);
+    try {
+      openEditor(createEmptyContractDraft(catalog), true);
+    } catch (error) {
+      notify(errorMessage(error, 'Não há outro slot disponível neste mundo.'), 'danger');
+    }
   }),
   appEvents.on('ui:admin-edit-contract', ({ contractId }) => {
     const contract = findContract(contractId);

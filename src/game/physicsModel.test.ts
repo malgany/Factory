@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { localToWorld } from './geometry';
+import { localToWorld, MACHINE_PHYSICS_DIMENSIONS } from './geometry';
 import {
+  boxTouchesOrientedSurface,
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
@@ -39,12 +40,80 @@ describe('modelo físico determinístico', () => {
     expect(Math.abs(impulse.x)).toBeCloseTo(Math.abs(impulse.y), 8);
   });
 
-  it('detecta o sensor de entrada após rotação', () => {
-    const center = { x: 300, y: 240 };
-    const inside = localToWorld(center, 63, 22, -10);
-    const outside = localToWorld(center, 63, 44, 0);
+  it('só aciona o trampolim quando a caixa alcança a superfície', () => {
+    const surfaceCenter = { x: 160, y: 98 };
+    const surfaceAngle = 22;
+    const boxAngle = 0;
+    const boxSize = 28;
+    const surfaceWidth = 64;
+    const surfaceHeight = 32;
+    const relativeAngle = ((boxAngle - surfaceAngle) * Math.PI) / 180;
+    const projectedHalfSize =
+      (boxSize / 2) * (Math.abs(Math.cos(relativeAngle)) + Math.abs(Math.sin(relativeAngle)));
+    const touching = localToWorld(
+      surfaceCenter,
+      surfaceAngle,
+      0,
+      -surfaceHeight / 2 - projectedHalfSize,
+    );
+    const visiblySeparated = localToWorld(
+      surfaceCenter,
+      surfaceAngle,
+      0,
+      -surfaceHeight / 2 - boxSize,
+    );
 
-    expect(pointInsideOrientedSensor(inside, center, 76, 76, 63, 5)).toBe(true);
-    expect(pointInsideOrientedSensor(outside, center, 76, 76, 63, 5)).toBe(false);
+    expect(
+      boxTouchesOrientedSurface(
+        visiblySeparated,
+        boxAngle,
+        boxSize,
+        surfaceCenter,
+        surfaceAngle,
+        surfaceWidth,
+        surfaceHeight,
+      ),
+    ).toBe(false);
+    expect(
+      boxTouchesOrientedSurface(
+        touching,
+        boxAngle,
+        boxSize,
+        surfaceCenter,
+        surfaceAngle,
+        surfaceWidth,
+        surfaceHeight,
+      ),
+    ).toBe(true);
+  });
+
+  it('detecta o contato da caixa com o sensor após rotação', () => {
+    const center = { x: 300, y: 240 };
+    const receiver = MACHINE_PHYSICS_DIMENSIONS.receiver;
+    const boxHalfSize = 14;
+    const contactDistance = receiver.width / 2 + boxHalfSize;
+    const touching = localToWorld(center, 63, contactDistance, 0);
+    const outside = localToWorld(center, 63, contactDistance + 0.01, 0);
+
+    expect(
+      pointInsideOrientedSensor(
+        touching,
+        center,
+        receiver.width,
+        receiver.height,
+        63,
+        boxHalfSize,
+      ),
+    ).toBe(true);
+    expect(
+      pointInsideOrientedSensor(
+        outside,
+        center,
+        receiver.width,
+        receiver.height,
+        63,
+        boxHalfSize,
+      ),
+    ).toBe(false);
   });
 });

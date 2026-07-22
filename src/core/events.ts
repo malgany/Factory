@@ -1,6 +1,7 @@
 import type {
   ContractDefinition,
   ContractId,
+  ContractResult,
   GameMode,
   GameSnapshot,
   MachineState,
@@ -14,7 +15,13 @@ export interface AppEvents {
   'game:angle': { angle: number; clientX: number; clientY: number; visible: boolean };
   'game:camera': { zoom: number; scrollX: number; scrollY: number };
   'game:toast': { message: string; tone: 'neutral' | 'success' | 'danger' };
-  'game:result': { contractId: ContractId; stars: number; snapshot: GameSnapshot };
+  'game:result': { contractId: ContractId; snapshot: GameSnapshot };
+  'game:result-recorded': {
+    result: ContractResult;
+    snapshot: GameSnapshot;
+    rankingPosition: number | null;
+    isNewRecord: boolean;
+  };
   'game:sandbox-changed': MachineState[];
   'game:editor-changed': { contract: ContractDefinition; dirty: boolean };
   'game:editor-preview': { active: boolean };
@@ -26,7 +33,7 @@ export interface AppEvents {
     machines?: MachineState[];
   };
   'ui:start-editor': { contract: ContractDefinition; isNew?: boolean };
-  'ui:editor-tool': { type: MachineType | 'obstacle' };
+  'ui:editor-tool': { type: MachineType | 'obstacle' | 'star' };
   'ui:editor-update-settings': { contract: ContractDefinition };
   'ui:editor-test': undefined;
   'ui:editor-return': undefined;

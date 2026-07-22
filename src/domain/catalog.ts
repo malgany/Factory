@@ -1,23 +1,29 @@
 import { orderContracts } from './contracts';
 import {
   CELL_SIZE,
+  COLLECTIBLE_STAR_RADIUS,
   GRID_COLUMNS,
   GRID_ROWS,
   PLAY_AREA_MAX_COLUMN,
   PLAY_AREA_MAX_ROW,
   PLAY_AREA_MIN_COLUMN,
   PLAY_AREA_MIN_ROW,
+  type CollectibleDefinition,
   type ContractCatalogFile,
   type ContractDefinition,
+  type ContractStage,
   type MachineState,
   type MachineType,
   type ObstacleDefinition,
   type PersistenceResult,
 } from './types';
 
-export const CONTRACT_CATALOG_VERSION = 1 as const;
+export const CONTRACT_CATALOG_VERSION = 2 as const;
 export const MIN_CONTRACT_CAMERA_ZOOM = 1;
 export const MAX_CONTRACT_CAMERA_ZOOM = 2;
+export const MIN_SPAWN_INTERVAL_SECONDS = 0.8;
+export const MAX_SPAWN_INTERVAL_SECONDS = 10;
+export const SPAWN_INTERVAL_STEP_SECONDS = 0.05;
 
 const MACHINE_TYPES: readonly MachineType[] = ['source', 'conveyor', 'receiver', 'spring'];
 const CUSTOM_ID_PREFIX = 'custom-';
@@ -33,10 +39,12 @@ export type ContractValidationCode =
   | 'out-of-bounds'
   | 'overlap'
   | 'duplicate-id'
+  | 'duplicate-slot'
   | 'invalid-machine'
   | 'invalid-obstacle'
+  | 'invalid-collectible'
   | 'invalid-camera'
-  | 'par-over-budget';
+  | 'invalid-slot';
 
 export interface ContractValidationIssue {
   code: ContractValidationCode;
@@ -80,7 +88,7 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
     return catalogFailure('O catálogo de fases salvo tem um formato inválido.');
   }
 
-  if (candidate.version !== CONTRACT_CATALOG_VERSION) {
+  if (candidate.version !== 1 && candidate.version !== CONTRACT_CATALOG_VERSION) {
     return catalogFailure('A versão do catálogo de fases não é compatível.');
   }
 
@@ -94,10 +102,18 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
 
   const contracts: ContractDefinition[] = [];
   const ids = new Set<string>();
+  const slots = new Set<string>();
   for (const value of candidate.contracts) {
-    const contract = readContractDefinition(value);
+    const contract =
+      candidate.version === 1
+        ? readVersionOneContractDefinition(value)
+        : readContractDefinition(value);
     if (!contract || ids.has(contract.id)) {
       return catalogFailure('O catálogo contém uma fase inválida ou duplicada.');
+    }
+    const slot = contractSlotKey(contract);
+    if (slots.has(slot)) {
+      return catalogFailure('O catálogo contém duas fases no mesmo mundo e etapa.');
     }
     const validation = validateContractDefinition(contract);
     if (!validation.valid) {
@@ -106,6 +122,7 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
       );
     }
     ids.add(contract.id);
+    slots.add(slot);
     contracts.push(contract);
   }
 
@@ -132,9 +149,7 @@ export function mergeContractCatalog(catalog: ContractCatalogFile): ContractDefi
 }
 
 export function normalizeContractCatalog(catalog: ContractCatalogFile): ContractCatalogFile {
-  const contracts = orderContracts(catalog.contracts).map((contract, index) =>
-    normalizeContract({ ...contract, order: index + 1 }),
-  );
+  const contracts = orderContracts(catalog.contracts).map(normalizeContract);
   return {
     version: CONTRACT_CATALOG_VERSION,
     contracts,
@@ -154,10 +169,23 @@ export function saveContractToCatalog(
 
   const next = normalizeContractCatalog(catalog);
   const index = next.contracts.findIndex((candidate) => candidate.id === contract.id);
+  const duplicateSlot = next.contracts.find(
+    (candidate) =>
+      candidate.id !== contract.id &&
+      candidate.world === contract.world &&
+      candidate.stage === contract.stage,
+  );
+  if (duplicateSlot) {
+    throw new Error(`O slot ${contract.stage}-${contract.world} já está ocupado.`);
+  }
   if (index >= 0) {
-    next.contracts[index] = cloneContract({ ...contract, order: next.contracts[index]!.order });
+    const previous = next.contracts[index]!;
+    next.contracts[index] = cloneContract({
+      ...contract,
+      revision: Math.max(contract.revision, previous.revision + 1),
+    });
   } else {
-    next.contracts.push(cloneContract({ ...contract, order: next.contracts.length + 1 }));
+    next.contracts.push(cloneContract({ ...contract, revision: Math.max(1, contract.revision) }));
   }
   next.updatedAt = updatedAt;
   return normalizeContractCatalog(next);
@@ -176,11 +204,12 @@ export function appendCustomContract(
   const contract: ContractDefinition = {
     ...cloneContractFields(definition),
     id,
-    order: catalog.contracts.length + 1,
+    order: contractOrder(definition.world, definition.stage),
   };
+  const nextCatalog = saveContractToCatalog(catalog, contract, updatedAt);
   return {
-    catalog: saveContractToCatalog(catalog, contract, updatedAt),
-    contract,
+    catalog: nextCatalog,
+    contract: cloneContract(nextCatalog.contracts.find((candidate) => candidate.id === id)!),
   };
 }
 
@@ -195,6 +224,16 @@ export function deleteContractFromCatalog(
   return normalizeContractCatalog(next);
 }
 
+export function getContractSlotLabel(
+  contract: Pick<ContractDefinition, 'stage' | 'world'>,
+): string {
+  return `${contract.stage}-${contract.world}`;
+}
+
+export function contractOrder(world: number, stage: number): number {
+  return (world - 1) * 10 + stage;
+}
+
 export function createCustomContractId(randomUuid: () => string = defaultRandomUuid): string {
   return `${CUSTOM_ID_PREFIX}${randomUuid()}`;
 }
@@ -203,21 +242,34 @@ export function createEmptyContractDraft(
   catalog: ContractCatalogFile,
   id = createCustomContractId(),
 ): ContractDefinition {
+  const usedStages = new Set(
+    catalog.contracts.filter(({ world }) => world === 1).map(({ stage }) => stage),
+  );
+  const stage =
+    ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as ContractStage[]).find(
+      (candidate) => !usedStages.has(candidate),
+    );
+  if (!stage) {
+    throw new Error('O Mundo 1 já possui as dez fases cadastradas.');
+  }
   return {
     id,
-    order: mergeContractCatalog(catalog).length + 1,
-    title: 'Nova fase',
+    world: 1,
+    stage,
+    revision: 1,
+    order: contractOrder(1, stage),
+    title: `${stage}-1`,
     subtitle: 'Crie um novo desafio.',
     description: 'Monte o cenário e configure as ferramentas disponíveis.',
     grid: { columns: GRID_COLUMNS, rows: GRID_ROWS },
     availableMachines: ['conveyor', 'spring'],
     fixedMachines: [],
     obstacles: [],
+    collectibles: [],
     goal: {
       deliveries: 10,
       maxLosses: 3,
       pieceBudget: 8,
-      parPieces: 7,
     },
     spawnIntervalSeconds: 1.25,
     initialCamera: {
@@ -243,6 +295,11 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     );
   }
   if (!contract.title.trim()) add('required', 'title', 'Informe o título da fase.');
+  validateInteger(contract.world, 1, 'world', 'O mundo deve ser um inteiro positivo.', add);
+  if (!Number.isInteger(contract.stage) || contract.stage < 1 || contract.stage > 10) {
+    add('invalid-slot', 'stage', 'A fase deve estar entre 1 e 10.');
+  }
+  validateInteger(contract.revision, 1, 'revision', 'A revisão deve ser um inteiro positivo.', add);
   if (contract.grid.columns !== GRID_COLUMNS || contract.grid.rows !== GRID_ROWS) {
     add('invalid-grid', 'grid', `O tabuleiro deve ter ${GRID_COLUMNS}×${GRID_ROWS} células.`);
   }
@@ -268,30 +325,28 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     'O orçamento não pode ser negativo.',
     add,
   );
-  validateInteger(
-    contract.goal.parPieces,
-    0,
-    'goal.parPieces',
-    'A referência de peças não pode ser negativa.',
-    add,
-  );
-  if (contract.goal.parPieces > contract.goal.pieceBudget) {
-    add('par-over-budget', 'goal.parPieces', 'A referência de peças não pode superar o orçamento.');
-  }
-  validateOptionalPositive(
+  validateOptionalPositiveInteger(
     contract.goal.timeLimitSeconds,
     'goal.timeLimitSeconds',
     'O tempo limite deve ser positivo.',
     add,
   );
   validateOptionalPositive(
-    contract.goal.parTimeSeconds,
-    'goal.parTimeSeconds',
-    'A referência de tempo deve ser positiva.',
+    contract.goal.idealTimeSeconds,
+    'goal.idealTimeSeconds',
+    'O tempo ideal deve ser positivo.',
     add,
   );
-  if (!Number.isFinite(contract.spawnIntervalSeconds) || contract.spawnIntervalSeconds <= 0) {
-    add('invalid-number', 'spawnIntervalSeconds', 'O intervalo de geração deve ser positivo.');
+  if (
+    !Number.isFinite(contract.spawnIntervalSeconds) ||
+    contract.spawnIntervalSeconds < MIN_SPAWN_INTERVAL_SECONDS ||
+    contract.spawnIntervalSeconds > MAX_SPAWN_INTERVAL_SECONDS
+  ) {
+    add(
+      'invalid-number',
+      'spawnIntervalSeconds',
+      `O intervalo de geração deve ficar entre ${MIN_SPAWN_INTERVAL_SECONDS} e ${MAX_SPAWN_INTERVAL_SECONDS} segundos.`,
+    );
   }
   const camera = contract.initialCamera;
   if (
@@ -363,6 +418,31 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     }
   }
 
+  for (const [index, collectible] of contract.collectibles.entries()) {
+    const path = `collectibles.${index}`;
+    if (!collectible.id.trim() || entityIds.has(collectible.id)) {
+      add('duplicate-id', `${path}.id`, 'Cada objeto precisa de um identificador único.');
+    }
+    entityIds.add(collectible.id);
+    if (
+      collectible.type !== 'star' ||
+      !isQuarterGrid(collectible.gridX) ||
+      !isQuarterGrid(collectible.gridY)
+    ) {
+      add('invalid-collectible', path, 'Estrelas devem respeitar os quartos da grade.');
+    }
+    const starRadiusInCells = COLLECTIBLE_STAR_RADIUS / CELL_SIZE;
+    if (
+      !pointWithinBoard(
+        collectible.gridX + 0.5,
+        collectible.gridY + 0.5,
+        starRadiusInCells,
+      )
+    ) {
+      add('out-of-bounds', path, 'Há uma estrela fora do tabuleiro.');
+    }
+  }
+
   const shapes: Array<{ path: string; polygon: Point[] }> = [
     ...contract.fixedMachines.map((machine, index) => ({
       path: `fixedMachines.${index}`,
@@ -397,6 +477,7 @@ export function cloneContract(contract: ContractDefinition): ContractDefinition 
     availableMachines: [...contract.availableMachines],
     fixedMachines: contract.fixedMachines.map((machine) => ({ ...machine })),
     obstacles: contract.obstacles.map((obstacle) => ({ ...obstacle })),
+    collectibles: contract.collectibles.map((collectible) => ({ ...collectible })),
     goal: { ...contract.goal },
     initialCamera: { ...contract.initialCamera },
   };
@@ -404,6 +485,8 @@ export function cloneContract(contract: ContractDefinition): ContractDefinition 
 
 function normalizeContract(contract: ContractDefinition): ContractDefinition {
   const normalized = cloneContract(contract);
+  normalized.order = contractOrder(normalized.world, normalized.stage);
+  normalized.title = getContractSlotLabel(normalized);
   normalized.fixedMachines = normalized.fixedMachines.map((machine) => ({
     ...machine,
     gridX: roundForCatalog(machine.gridX, 4),
@@ -417,18 +500,22 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
     columns: roundForCatalog(obstacle.columns, 4),
     rows: roundForCatalog(obstacle.rows, 4),
   }));
+  normalized.collectibles = normalized.collectibles.map((collectible) => ({
+    ...collectible,
+    gridX: roundForCatalog(collectible.gridX, 4),
+    gridY: roundForCatalog(collectible.gridY, 4),
+  }));
   normalized.goal = {
     ...normalized.goal,
     deliveries: roundForCatalog(normalized.goal.deliveries, 4),
     maxLosses: roundForCatalog(normalized.goal.maxLosses, 4),
     pieceBudget: roundForCatalog(normalized.goal.pieceBudget, 4),
-    parPieces: roundForCatalog(normalized.goal.parPieces, 4),
     ...(normalized.goal.timeLimitSeconds === undefined
       ? {}
       : { timeLimitSeconds: roundForCatalog(normalized.goal.timeLimitSeconds, 4) }),
-    ...(normalized.goal.parTimeSeconds === undefined
+    ...(normalized.goal.idealTimeSeconds === undefined
       ? {}
-      : { parTimeSeconds: roundForCatalog(normalized.goal.parTimeSeconds, 4) }),
+      : { idealTimeSeconds: roundForCatalog(normalized.goal.idealTimeSeconds, 4) }),
   };
   normalized.spawnIntervalSeconds = roundForCatalog(normalized.spawnIntervalSeconds, 4);
   normalized.initialCamera = {
@@ -448,12 +535,24 @@ function cloneContractFields(
     availableMachines: [...definition.availableMachines],
     fixedMachines: definition.fixedMachines.map((machine) => ({ ...machine })),
     obstacles: definition.obstacles.map((obstacle) => ({ ...obstacle })),
+    collectibles: definition.collectibles.map((collectible) => ({ ...collectible })),
     goal: { ...definition.goal },
     initialCamera: { ...definition.initialCamera },
   };
 }
 
 function readContractDefinition(value: unknown): ContractDefinition | undefined {
+  return readRawContractDefinition(value, false);
+}
+
+function readVersionOneContractDefinition(value: unknown): ContractDefinition | undefined {
+  return readRawContractDefinition(value, true);
+}
+
+function readRawContractDefinition(
+  value: unknown,
+  legacyVersionOne: boolean,
+): ContractDefinition | undefined {
   if (
     !isRecord(value) ||
     !isRecord(value.grid) ||
@@ -466,9 +565,16 @@ function readContractDefinition(value: unknown): ContractDefinition | undefined 
     return undefined;
   }
   if (!Array.isArray(value.obstacles)) return undefined;
+  const world = legacyVersionOne ? 1 : value.world;
+  const stage = legacyVersionOne ? value.order : value.stage;
+  const revision = legacyVersionOne ? 1 : value.revision;
+  const collectibles = legacyVersionOne ? [] : value.collectibles;
   if (
     typeof value.id !== 'string' ||
     typeof value.order !== 'number' ||
+    typeof world !== 'number' ||
+    !isContractStage(stage) ||
+    typeof revision !== 'number' ||
     typeof value.title !== 'string' ||
     typeof value.subtitle !== 'string' ||
     typeof value.description !== 'string' ||
@@ -484,21 +590,27 @@ function readContractDefinition(value: unknown): ContractDefinition | undefined 
   if (!value.availableMachines.every(isMachineType)) return undefined;
   if (!value.fixedMachines.every(isMachineState)) return undefined;
   if (!value.obstacles.every(isObstacleDefinition)) return undefined;
+  if (!Array.isArray(collectibles) || !collectibles.every(isCollectibleDefinition)) {
+    return undefined;
+  }
   const goal = value.goal;
+  const idealTimeSeconds = legacyVersionOne ? goal.parTimeSeconds : goal.idealTimeSeconds;
   if (
     typeof goal.deliveries !== 'number' ||
     typeof goal.maxLosses !== 'number' ||
     typeof goal.pieceBudget !== 'number' ||
-    typeof goal.parPieces !== 'number' ||
     !isOptionalNumber(goal.timeLimitSeconds) ||
-    !isOptionalNumber(goal.parTimeSeconds)
+    !isOptionalNumber(idealTimeSeconds)
   ) {
     return undefined;
   }
 
-  return cloneContract({
+  return normalizeContract({
     id: value.id,
-    order: value.order,
+    world,
+    stage,
+    revision,
+    order: contractOrder(world, stage),
     title: value.title,
     subtitle: value.subtitle,
     description: value.description,
@@ -506,13 +618,13 @@ function readContractDefinition(value: unknown): ContractDefinition | undefined 
     availableMachines: value.availableMachines,
     fixedMachines: value.fixedMachines,
     obstacles: value.obstacles,
+    collectibles,
     goal: {
       deliveries: goal.deliveries,
       maxLosses: goal.maxLosses,
       pieceBudget: goal.pieceBudget,
-      parPieces: goal.parPieces,
       ...(goal.timeLimitSeconds === undefined ? {} : { timeLimitSeconds: goal.timeLimitSeconds }),
-      ...(goal.parTimeSeconds === undefined ? {} : { parTimeSeconds: goal.parTimeSeconds }),
+      ...(idealTimeSeconds === undefined ? {} : { idealTimeSeconds }),
     },
     spawnIntervalSeconds: value.spawnIntervalSeconds,
     initialCamera: {
@@ -552,6 +664,22 @@ function isObstacleDefinition(value: unknown): value is ObstacleDefinition {
     typeof value.rows === 'number' &&
     Number.isFinite(value.rows)
   );
+}
+
+function isCollectibleDefinition(value: unknown): value is CollectibleDefinition {
+  return (
+    isRecord(value) &&
+    value.type === 'star' &&
+    typeof value.id === 'string' &&
+    typeof value.gridX === 'number' &&
+    Number.isFinite(value.gridX) &&
+    typeof value.gridY === 'number' &&
+    Number.isFinite(value.gridY)
+  );
+}
+
+function isContractStage(value: unknown): value is ContractStage {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 10;
 }
 
 function isMachineType(value: unknown): value is MachineType {
@@ -610,6 +738,17 @@ function validateOptionalPositive(
   add: AddIssue,
 ): void {
   if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+    add('invalid-number', path, message);
+  }
+}
+
+function validateOptionalPositiveInteger(
+  value: number | undefined,
+  path: string,
+  message: string,
+  add: AddIssue,
+): void {
+  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
     add('invalid-number', path, message);
   }
 }
@@ -685,6 +824,19 @@ function obstacleWithinBoard(obstacle: ObstacleDefinition): boolean {
     obstacle.gridX + obstacle.columns <= PLAY_AREA_MAX_COLUMN &&
     obstacle.gridY + obstacle.rows <= PLAY_AREA_MAX_ROW
   );
+}
+
+function pointWithinBoard(x: number, y: number, margin = 0): boolean {
+  return (
+    x >= PLAY_AREA_MIN_COLUMN + margin &&
+    y >= PLAY_AREA_MIN_ROW + margin &&
+    x <= PLAY_AREA_MAX_COLUMN - margin &&
+    y <= PLAY_AREA_MAX_ROW - margin
+  );
+}
+
+function contractSlotKey(contract: Pick<ContractDefinition, 'world' | 'stage'>): string {
+  return `${contract.world}:${contract.stage}`;
 }
 
 function polygonsOverlap(left: readonly Point[], right: readonly Point[]): boolean {

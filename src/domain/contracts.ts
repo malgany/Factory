@@ -52,9 +52,20 @@ export function getNextContractId(
   contractId: ContractId,
   contracts: readonly ContractDefinition[] = CONTRACTS,
 ): ContractId | undefined {
-  const ordered = orderContracts(contracts);
-  const index = ordered.findIndex((contract) => contract.id === contractId);
-  return index >= 0 ? ordered[index + 1]?.id : undefined;
+  const current = contracts.find((contract) => contract.id === contractId);
+  if (!current) return undefined;
+  const nextWorld = current.stage === 10 ? current.world + 1 : current.world;
+  const nextStage = current.stage === 10 ? 1 : current.stage + 1;
+  return contracts.find((contract) => contract.world === nextWorld && contract.stage === nextStage)
+    ?.id;
+}
+
+export function getContractBySlot(
+  world: number,
+  stage: number,
+  contracts: readonly ContractDefinition[] = CONTRACTS,
+): ContractDefinition | undefined {
+  return contracts.find((contract) => contract.world === world && contract.stage === stage);
 }
 
 export function isContractId(
@@ -70,6 +81,7 @@ export function isContractId(
 
 export function orderContracts(contracts: readonly ContractDefinition[]): ContractDefinition[] {
   return [...contracts].sort(
-    (left, right) => left.order - right.order || left.id.localeCompare(right.id),
+    (left, right) =>
+      left.world - right.world || left.stage - right.stage || left.id.localeCompare(right.id),
   );
 }

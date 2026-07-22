@@ -153,6 +153,9 @@ test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ 
     const gameUi = document.querySelector<HTMLElement>('#game-ui');
     gameUi?.removeAttribute('inert');
     gameUi?.setAttribute('aria-hidden', 'false');
+    const gameContainer = document.querySelector<HTMLElement>('#game-container');
+    gameContainer?.removeAttribute('inert');
+    gameContainer?.setAttribute('aria-hidden', 'false');
     if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {
@@ -234,6 +237,9 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
     const gameUi = document.querySelector<HTMLElement>('#game-ui');
     gameUi?.removeAttribute('inert');
     gameUi?.setAttribute('aria-hidden', 'false');
+    const gameContainer = document.querySelector<HTMLElement>('#game-container');
+    gameContainer?.removeAttribute('inert');
+    gameContainer?.setAttribute('aria-hidden', 'false');
     if (!debug.placeMachine('conveyor', 6, 6, 25)) throw new Error('Machine not placed');
     if (!debug.placeObstacle(10, 6, 2, 2)) throw new Error('Obstacle not placed');
     if (debug.selectArea(200, 230, 600, 410) !== 2) {
@@ -280,5 +286,103 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
     machine: { gridX: 8, gridY: 8, angle: 25 },
     obstacle: { gridX: 12, gridY: 8, columns: 2, rows: 2 },
     selection: 0,
+  });
+});
+
+test('editor collectible is non-solid, collected once and restored on restart', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+
+  const result = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    debug.startEditor({
+      id: 'editor-star-test',
+      world: 1,
+      stage: 4,
+      revision: 1,
+      order: 4,
+      title: '4-1',
+      subtitle: '',
+      description: '',
+      grid: { columns: 30, rows: 18 },
+      availableMachines: ['conveyor'],
+      fixedMachines: [
+        {
+          id: 'star-source',
+          type: 'source',
+          gridX: 5.5,
+          gridY: 5.5,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+      ],
+      obstacles: [{ id: 'star-obstacle', gridX: 10, gridY: 10, columns: 2, rows: 2 }],
+      collectibles: [],
+      goal: { deliveries: 99, maxLosses: 99, pieceBudget: 3 },
+      spawnIntervalSeconds: 1,
+      initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
+    });
+
+    // Deliberately overlap an obstacle: collectibles are sensors, not solid bodies.
+    const placed = debug.placeCollectible(10.62, 10.62);
+    const snapped = debug.getCollectibles()[0];
+    if (!snapped) throw new Error('Star was not placed');
+    debug.selectCollectible(snapped.id);
+    const deleted = debug.deleteSelected();
+    const afterDelete = debug.getCollectibles().length;
+    debug.undo();
+    const afterUndo = debug.getCollectibles().length;
+    debug.redo();
+    const afterRedo = debug.getCollectibles().length;
+    debug.undo();
+
+    const restored = debug.getCollectibles()[0];
+    if (!restored) throw new Error('Star was not restored');
+    debug.selectCollectible(restored.id);
+    const moved = debug.moveSelectedCollectible(5.5, 6.75);
+    const draftCollectible = debug.getEditorDraft().collectibles[0];
+
+    debug.beginEditorPreview();
+    const firstPickup = debug.advance(0.15).metrics.collectedStars;
+    const stillOnePickup = debug.advance(0.8).metrics.collectedStars;
+    debug.reset();
+    const afterReset = debug.getSnapshot().metrics.collectedStars;
+    const pickupAfterReset = debug.advance(0.15).metrics.collectedStars;
+    debug.returnToEditor();
+
+    return {
+      placed,
+      snapped: { gridX: snapped.gridX, gridY: snapped.gridY },
+      deleted,
+      afterDelete,
+      afterUndo,
+      afterRedo,
+      moved,
+      draftCollectible,
+      firstPickup,
+      stillOnePickup,
+      afterReset,
+      pickupAfterReset,
+      restoredAfterPreview: debug.getEditorDraft().collectibles[0],
+    };
+  });
+
+  expect(result).toMatchObject({
+    placed: true,
+    snapped: { gridX: 10.5, gridY: 10.5 },
+    deleted: true,
+    afterDelete: 0,
+    afterUndo: 1,
+    afterRedo: 0,
+    moved: true,
+    draftCollectible: { type: 'star', gridX: 5.5, gridY: 6.75 },
+    firstPickup: 1,
+    stillOnePickup: 1,
+    afterReset: 0,
+    pickupAfterReset: 1,
+    restoredAfterPreview: { type: 'star', gridX: 5.5, gridY: 6.75 },
   });
 });

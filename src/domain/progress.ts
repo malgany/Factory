@@ -1,23 +1,27 @@
 import { CONTRACTS, getNextContractId, orderContracts } from './contracts';
+import { createContractResult, evaluateRun } from './rules';
 import type {
   ContractDefinition,
   ContractId,
   ContractResult,
   MachineState,
   ProgressSave,
+  RunMetrics,
   SandboxSave,
+  ScoreBreakdown,
 } from './types';
 
-export const PROGRESS_VERSION = 2 as const;
+export const PROGRESS_VERSION = 3 as const;
+export const MAX_RANKING_RESULTS = 10;
 
 export function createDefaultProgress(
   contracts: readonly ContractDefinition[] = CONTRACTS,
 ): ProgressSave {
-  const firstContract = orderContracts(contracts)[0]?.id;
+  const firstContract = contracts.find(({ world, stage }) => world === 1 && stage === 1)?.id;
   return {
     version: PROGRESS_VERSION,
     unlockedContracts: firstContract ? [firstContract] : [],
-    bestResults: {},
+    rankings: {},
     settings: {
       muted: false,
       volume: 0.65,
@@ -64,52 +68,42 @@ export function reconcileProgress(
   const ordered = orderContracts(contracts);
   const knownIds = new Set(ordered.map(({ id }) => id));
   const unlocked = new Set(progress.unlockedContracts.filter((id) => knownIds.has(id)));
-  const first = ordered[0]?.id;
-  if (first) unlocked.add(first);
+  const firstContract = ordered.find(({ world, stage }) => world === 1 && stage === 1);
+  if (firstContract) unlocked.add(firstContract.id);
 
-  // Existing unlocks never regress. A gap from an older save implies that all
-  // preceding phases had already been made available.
-  let furthestUnlockedIndex = -1;
-  for (const id of unlocked) {
-    furthestUnlockedIndex = Math.max(
-      furthestUnlockedIndex,
-      ordered.findIndex((contract) => contract.id === id),
-    );
-  }
-  for (let index = 0; index <= furthestUnlockedIndex; index += 1) {
-    const id = ordered[index]?.id;
-    if (id) unlocked.add(id);
-  }
-
-  // Newly appended phases become available when the preceding phase has a
-  // winning result. This keeps custom phases in the same sequential campaign.
-  for (let index = 1; index < ordered.length; index += 1) {
-    const previousId = ordered[index - 1]?.id;
-    const currentId = ordered[index]?.id;
-    if (!previousId || !currentId || unlocked.has(currentId)) continue;
-    if ((progress.bestResults[previousId]?.stars ?? 0) > 0) unlocked.add(currentId);
-  }
-
-  const furthestAfterEligibility = Math.max(
-    -1,
-    ...[...unlocked].map((id) => ordered.findIndex((contract) => contract.id === id)),
-  );
-  for (let index = 0; index <= furthestAfterEligibility; index += 1) {
-    const id = ordered[index]?.id;
-    if (id) unlocked.add(id);
-  }
-
-  const bestResults: ProgressSave['bestResults'] = {};
+  const rankings: ProgressSave['rankings'] = {};
   for (const contract of ordered) {
-    const result = progress.bestResults[contract.id];
-    if (result) bestResults[contract.id] = structuredClone(result);
+    const entries = progress.rankings[contract.id] ?? [];
+    const currentRevisionEntries = entries.filter(
+      (entry) =>
+        entry.contractId === contract.id &&
+        entry.contractRevision === contract.revision &&
+        evaluateRun(entry.metrics, contract.goal).resolution === 'success',
+    );
+    const normalized = sortContractResults(currentRevisionEntries).slice(0, MAX_RANKING_RESULTS);
+    if (normalized.length > 0) rankings[contract.id] = structuredClone(normalized);
+  }
+
+  // A newly registered immediate successor becomes available if the preceding
+  // slot has already been completed. Missing slots never get skipped.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const contract of ordered) {
+      if ((rankings[contract.id]?.length ?? 0) === 0) continue;
+      const nextId = getNextContractId(contract.id, ordered);
+      if (nextId && !unlocked.has(nextId)) {
+        unlocked.add(nextId);
+        changed = true;
+      }
+    }
   }
 
   return {
     ...structuredClone(progress),
     version: PROGRESS_VERSION,
     unlockedContracts: ordered.filter(({ id }) => unlocked.has(id)).map(({ id }) => id),
-    bestResults,
+    rankings,
   };
 }
 
@@ -118,15 +112,23 @@ export function applyContractResult(
   result: ContractResult,
   contracts: readonly ContractDefinition[] = CONTRACTS,
 ): ProgressSave {
-  const next = structuredClone(progress);
-  const previous = next.bestResults[result.contractId];
-
-  if (!previous || isBetterResult(result, previous)) {
-    next.bestResults[result.contractId] = structuredClone(result);
+  const contract = contracts.find(({ id }) => id === result.contractId);
+  if (
+    !contract ||
+    result.contractRevision !== contract.revision ||
+    evaluateRun(result.metrics, contract.goal).resolution !== 'success'
+  ) {
+    return reconcileProgress(progress, contracts);
   }
 
+  const next = structuredClone(progress);
+  next.rankings[result.contractId] = sortContractResults([
+    ...(next.rankings[result.contractId] ?? []),
+    structuredClone(result),
+  ]).slice(0, MAX_RANKING_RESULTS);
+
   const nextContract = getNextContractId(result.contractId, contracts);
-  if (result.stars > 0 && nextContract && !next.unlockedContracts.includes(nextContract)) {
+  if (nextContract && !next.unlockedContracts.includes(nextContract)) {
     next.unlockedContracts.push(nextContract);
   }
 
@@ -135,7 +137,7 @@ export function applyContractResult(
 
 export function clearContractRecord(progress: ProgressSave, contractId: ContractId): ProgressSave {
   const next = structuredClone(progress);
-  delete next.bestResults[contractId];
+  delete next.rankings[contractId];
   return next;
 }
 
@@ -163,33 +165,66 @@ export function updateSandbox(
   };
 }
 
+export function compareContractResults(left: ContractResult, right: ContractResult): number {
+  if (left.score !== right.score) return right.score - left.score;
+  if (left.metrics.collectedStars !== right.metrics.collectedStars) {
+    return right.metrics.collectedStars - left.metrics.collectedStars;
+  }
+  if (left.metrics.lost !== right.metrics.lost) return left.metrics.lost - right.metrics.lost;
+  if (left.metrics.placedPieces !== right.metrics.placedPieces) {
+    return left.metrics.placedPieces - right.metrics.placedPieces;
+  }
+  if (left.metrics.elapsedSeconds !== right.metrics.elapsedSeconds) {
+    return left.metrics.elapsedSeconds - right.metrics.elapsedSeconds;
+  }
+  return left.completedAt.localeCompare(right.completedAt);
+}
+
+export function sortContractResults(results: readonly ContractResult[]): ContractResult[] {
+  return [...results].sort(compareContractResults);
+}
+
 export function isBetterResult(candidate: ContractResult, current: ContractResult): boolean {
-  if (candidate.stars !== current.stars) return candidate.stars > current.stars;
-  if (candidate.metrics.lost !== current.metrics.lost) {
-    return candidate.metrics.lost < current.metrics.lost;
-  }
-  if (candidate.metrics.placedPieces !== current.metrics.placedPieces) {
-    return candidate.metrics.placedPieces < current.metrics.placedPieces;
-  }
-  if (candidate.metrics.elapsedSeconds !== current.metrics.elapsedSeconds) {
-    return candidate.metrics.elapsedSeconds < current.metrics.elapsedSeconds;
-  }
-  return candidate.metrics.delivered > current.metrics.delivered;
+  return compareContractResults(candidate, current) < 0;
+}
+
+export function getContractRanking(
+  progress: ProgressSave,
+  contractId: ContractId,
+): readonly ContractResult[] {
+  return progress.rankings[contractId] ?? [];
+}
+
+export function getBestContractResult(
+  progress: ProgressSave,
+  contractId: ContractId,
+): ContractResult | undefined {
+  return getContractRanking(progress, contractId)[0];
+}
+
+export function getContractResultPosition(
+  progress: ProgressSave,
+  result: Pick<ContractResult, 'contractId' | 'completedAt'>,
+): number | undefined {
+  const index = getContractRanking(progress, result.contractId).findIndex(
+    ({ completedAt }) => completedAt === result.completedAt,
+  );
+  return index >= 0 ? index + 1 : undefined;
 }
 
 function migrateProgress(
   candidate: Record<string, unknown>,
   contracts: readonly ContractDefinition[],
 ): ProgressSave {
-  // Version 1 and the unversioned prototype format share the same fields. The
-  // v2 migration widens IDs to strings and then reconciles them with the active
-  // (built-in + local) catalog supplied by the caller.
   const defaults = createDefaultProgress(contracts);
   const settings = isRecord(candidate.settings) ? candidate.settings : {};
   const progress: ProgressSave = {
     version: PROGRESS_VERSION,
     unlockedContracts: readUnlocked(candidate.unlockedContracts),
-    bestResults: readBestResults(candidate.bestResults),
+    rankings:
+      candidate.version === PROGRESS_VERSION
+        ? readRankings(candidate.rankings, contracts)
+        : migrateBestResults(candidate.bestResults, contracts),
     settings: {
       muted: typeof settings.muted === 'boolean' ? settings.muted : defaults.settings.muted,
       volume: clampNumber(settings.volume, 0, 1, defaults.settings.volume),
@@ -204,28 +239,118 @@ function readUnlocked(value: unknown): ContractId[] {
   return [...new Set(value.filter(isStableContractId))];
 }
 
-function readBestResults(value: unknown): ProgressSave['bestResults'] {
+function readRankings(
+  value: unknown,
+  contracts: readonly ContractDefinition[],
+): ProgressSave['rankings'] {
   if (!isRecord(value)) return {};
-
-  const result: ProgressSave['bestResults'] = {};
-  for (const [contractId, candidate] of Object.entries(value)) {
-    if (!isStableContractId(contractId) || !isRecord(candidate) || !isRecord(candidate.metrics)) {
-      continue;
+  const contractById = new Map(contracts.map((contract) => [contract.id, contract]));
+  const rankings: ProgressSave['rankings'] = {};
+  for (const [contractId, entries] of Object.entries(value)) {
+    const contract = contractById.get(contractId);
+    if (!contract || !Array.isArray(entries)) continue;
+    const validEntries = entries
+      .map((entry) => readContractResult(entry, contract))
+      .filter((entry): entry is ContractResult => entry !== undefined);
+    if (validEntries.length > 0) {
+      rankings[contractId] = sortContractResults(validEntries).slice(0, MAX_RANKING_RESULTS);
     }
-    const metrics = candidate.metrics;
-    result[contractId] = {
-      contractId,
-      stars: Math.round(clampNumber(candidate.stars, 0, 3, 0)),
-      metrics: {
-        delivered: nonNegative(metrics.delivered),
-        lost: nonNegative(metrics.lost),
-        active: nonNegative(metrics.active),
-        elapsedSeconds: nonNegative(metrics.elapsedSeconds),
-        placedPieces: nonNegative(metrics.placedPieces),
-      },
-    };
   }
-  return result;
+  return rankings;
+}
+
+function migrateBestResults(
+  value: unknown,
+  contracts: readonly ContractDefinition[],
+): ProgressSave['rankings'] {
+  if (!isRecord(value)) return {};
+  const rankings: ProgressSave['rankings'] = {};
+  for (const contract of contracts) {
+    const candidate = value[contract.id];
+    if (!isRecord(candidate) || !isRecord(candidate.metrics)) continue;
+    const metrics = readLegacyMetrics(candidate.metrics);
+    if (!metrics || evaluateRun(metrics, contract.goal).resolution !== 'success') continue;
+    const completedAt = isIsoTimestamp(candidate.completedAt)
+      ? candidate.completedAt
+      : new Date(0).toISOString();
+    rankings[contract.id] = [createContractResult(contract, metrics, completedAt)];
+  }
+  return rankings;
+}
+
+function readContractResult(
+  value: unknown,
+  contract: ContractDefinition,
+): ContractResult | undefined {
+  if (
+    !isRecord(value) ||
+    value.contractId !== contract.id ||
+    value.contractRevision !== contract.revision ||
+    !Number.isFinite(value.score) ||
+    !isRecord(value.breakdown) ||
+    !isRecord(value.metrics) ||
+    !isIsoTimestamp(value.completedAt)
+  ) {
+    return undefined;
+  }
+  const metrics = readMetrics(value.metrics);
+  const breakdown = readScoreBreakdown(value.breakdown);
+  if (!metrics || !breakdown || evaluateRun(metrics, contract.goal).resolution !== 'success') {
+    return undefined;
+  }
+  return {
+    contractId: contract.id,
+    contractRevision: contract.revision,
+    score: Math.round(nonNegative(value.score)),
+    breakdown,
+    metrics,
+    completedAt: value.completedAt,
+  };
+}
+
+function readLegacyMetrics(value: Record<string, unknown>): RunMetrics | undefined {
+  if (
+    !hasFiniteNumber(value, 'delivered') ||
+    !hasFiniteNumber(value, 'lost') ||
+    !hasFiniteNumber(value, 'active') ||
+    !hasFiniteNumber(value, 'elapsedSeconds') ||
+    !hasFiniteNumber(value, 'placedPieces')
+  ) {
+    return undefined;
+  }
+  return {
+    delivered: nonNegative(value.delivered),
+    lost: nonNegative(value.lost),
+    active: nonNegative(value.active),
+    elapsedSeconds: nonNegative(value.elapsedSeconds),
+    placedPieces: nonNegative(value.placedPieces),
+    collectedStars: 0,
+  };
+}
+
+function readMetrics(value: Record<string, unknown>): RunMetrics | undefined {
+  const legacy = readLegacyMetrics(value);
+  if (!legacy || !hasFiniteNumber(value, 'collectedStars')) return undefined;
+  legacy.collectedStars = Math.round(nonNegative(value.collectedStars));
+  return legacy;
+}
+
+function readScoreBreakdown(value: Record<string, unknown>): ScoreBreakdown | undefined {
+  const keys = [
+    'deliveryPoints',
+    'timeBonus',
+    'efficiencyBonus',
+    'starBonus',
+    'lossPenalty',
+  ] as const;
+  if (!keys.every((key) => hasFiniteNumber(value, key))) return undefined;
+  return {
+    deliveryPoints: Math.round(nonNegative(value.deliveryPoints)),
+    timeBonus: Math.round(nonNegative(value.timeBonus)),
+    efficiencyBonus: Math.round(nonNegative(value.efficiencyBonus)),
+    starBonus: Math.round(nonNegative(value.starBonus)),
+    lossPenalty: Math.round(nonNegative(value.lossPenalty)),
+  };
 }
 
 function readSandbox(value: unknown, fallback: SandboxSave): SandboxSave {
@@ -260,6 +385,13 @@ function isStableContractId(value: unknown): value is ContractId {
   );
 }
 
+function hasFiniteNumber(
+  value: Record<string, unknown>,
+  key: string,
+): value is Record<string, unknown> & Record<typeof key, number> {
+  return typeof value[key] === 'number' && Number.isFinite(value[key]);
+}
+
 function nonNegative(value: unknown): number {
   return clampNumber(value, 0, Number.MAX_SAFE_INTEGER, 0);
 }
@@ -268,6 +400,12 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.min(max, Math.max(min, value))
     : fallback;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

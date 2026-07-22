@@ -20,11 +20,11 @@ afterEach(async () => {
   );
 });
 
-function catalog(title = CONTRACTS[0]!.title): ContractCatalogFile {
+function catalog(deliveries = CONTRACTS[0]!.goal.deliveries): ContractCatalogFile {
   const contract = structuredClone(CONTRACTS[0]!);
-  contract.title = title;
+  contract.goal.deliveries = deliveries;
   return {
-    version: 1,
+    version: 2,
     updatedAt: '2026-07-21T00:00:00.000Z',
     contracts: [contract],
   };
@@ -54,7 +54,7 @@ async function startTestServer(): Promise<{ root: string; url: string }> {
 describe('contractCatalogPlugin', () => {
   it('grava catálogo válido em formato canônico', async () => {
     const { root, url } = await startTestServer();
-    const next = catalog('Título gravado');
+    const next = catalog(17);
 
     const response = await fetch(`${url}${CONTRACT_CATALOG_ROUTE}`, {
       method: 'POST',
@@ -67,7 +67,7 @@ describe('contractCatalogPlugin', () => {
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({
       ok: true,
-      value: { contracts: [{ title: 'Título gravado' }] },
+      value: { contracts: [{ title: '1-1', goal: { deliveries: 17 } }] },
     });
     expect(written).toBe(serializeContractCatalogFile(next));
   });
@@ -80,7 +80,7 @@ describe('contractCatalogPlugin', () => {
     const response = await fetch(`${url}${CONTRACT_CATALOG_ROUTE}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: url },
-      body: JSON.stringify({ version: 1, contracts: [{ id: 'incompleta' }] }),
+      body: JSON.stringify({ version: 2, contracts: [{ id: 'incompleta' }] }),
     });
     const after = await fs.readFile(catalogPath, 'utf8');
 

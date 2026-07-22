@@ -36,6 +36,9 @@ interface AdminObstacle {
 
 interface AdminContract {
   id: string;
+  world: number;
+  stage: number;
+  revision: number;
   order: number;
   title: string;
   subtitle: string;
@@ -44,20 +47,25 @@ interface AdminContract {
   availableMachines: AdminMachineType[];
   fixedMachines: AdminMachine[];
   obstacles: AdminObstacle[];
+  collectibles: Array<{
+    type: 'star';
+    id: string;
+    gridX: number;
+    gridY: number;
+  }>;
   goal: {
     deliveries: number;
     maxLosses: number;
     pieceBudget: number;
     timeLimitSeconds?: number;
-    parPieces: number;
-    parTimeSeconds?: number;
+    idealTimeSeconds?: number;
   };
   spawnIntervalSeconds: number;
   initialCamera: AdminCamera;
 }
 
 interface AdminCatalog {
-  version: 1;
+  version: 2;
   updatedAt: string;
   contracts: AdminContract[];
 }
@@ -101,13 +109,17 @@ function clone<T>(value: T): T {
 
 function makeContract(
   id: string,
-  order: number,
-  title: string,
+  stage: number,
   initialCamera: AdminCamera = { centerX: 720, centerY: 432, zoom: 1 },
+  world = 1,
 ): AdminContract {
+  const title = `${stage}-${world}`;
   return {
     id,
-    order,
+    world,
+    stage,
+    revision: 1,
+    order: (world - 1) * 10 + stage,
     title,
     subtitle: `Subtítulo de ${title}`,
     description: `Descrição de ${title}`,
@@ -134,12 +146,12 @@ function makeContract(
       },
     ],
     obstacles: [],
+    collectibles: [],
     goal: {
       deliveries: 10,
       maxLosses: 3,
       pieceBudget: 8,
-      parPieces: 7,
-      parTimeSeconds: 32,
+      idealTimeSeconds: 32,
     },
     spawnIntervalSeconds: 1.25,
     initialCamera: { ...initialCamera },
@@ -148,7 +160,7 @@ function makeContract(
 
 function makeCatalog(...contracts: AdminContract[]): AdminCatalog {
   return normalizeHarnessCatalog({
-    version: 1,
+    version: 2,
     updatedAt: new Date(0).toISOString(),
     contracts,
   });
@@ -157,8 +169,14 @@ function makeCatalog(...contracts: AdminContract[]): AdminCatalog {
 function normalizeHarnessCatalog(catalog: AdminCatalog): AdminCatalog {
   const normalized = clone(catalog);
   normalized.contracts = [...normalized.contracts]
-    .sort((left, right) => left.order - right.order)
-    .map((contract, index) => ({ ...contract, order: index + 1 }));
+    .sort(
+      (left, right) =>
+        left.world - right.world || left.stage - right.stage || left.id.localeCompare(right.id),
+    )
+    .map((contract) => ({
+      ...contract,
+      order: (contract.world - 1) * 10 + contract.stage,
+    }));
   return normalized;
 }
 
@@ -243,32 +261,47 @@ async function installCatalogHarness(
   };
 }
 
-async function seedProgress(page: Page, contractIds: string[]): Promise<void> {
+async function seedProgress(page: Page, contracts: AdminContract[]): Promise<void> {
   await page.addInitScript(
-    ({ key, ids }) => {
-      const makeResult = (contractId: string) => ({
-        contractId,
-        stars: 3,
+    ({ key, seededContracts }) => {
+      const makeResult = (contract: { id: string; revision: number }) => ({
+        contractId: contract.id,
+        contractRevision: contract.revision,
+        score: 100_000,
+        breakdown: {
+          deliveryPoints: 100_000,
+          timeBonus: 0,
+          efficiencyBonus: 0,
+          starBonus: 0,
+          lossPenalty: 0,
+        },
         metrics: {
           delivered: 10,
           lost: 0,
           active: 0,
           elapsedSeconds: 20,
           placedPieces: 6,
+          collectedStars: 0,
         },
+        completedAt: new Date(0).toISOString(),
       });
       localStorage.setItem(
         key,
         JSON.stringify({
-          version: 2,
-          unlockedContracts: ids,
-          bestResults: Object.fromEntries(ids.map((id) => [id, makeResult(id)])),
+          version: 3,
+          unlockedContracts: seededContracts.map(({ id }) => id),
+          rankings: Object.fromEntries(
+            seededContracts.map((contract) => [contract.id, [makeResult(contract)]]),
+          ),
           settings: { muted: false, volume: 0.65 },
           sandbox: { machines: [], updatedAt: new Date(0).toISOString() },
         }),
       );
     },
-    { key: PROGRESS_KEY, ids: contractIds },
+    {
+      key: PROGRESS_KEY,
+      seededContracts: contracts.map(({ id, revision }) => ({ id, revision })),
+    },
   );
 }
 
@@ -361,10 +394,10 @@ async function setDebugCamera(page: Page, requested: AdminCamera): Promise<Admin
 test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorage', async ({
   page,
 }) => {
-  const first = makeContract('first-flow', 1, 'Primeiro Fluxo');
-  const second = makeContract('controlled-jump', 2, 'Salto Controlado');
+  const first = makeContract('first-flow', 1);
+  const second = makeContract('controlled-jump', 2);
   const harness = await installCatalogHarness(page, makeCatalog(first, second));
-  await seedProgress(page, [first.id, second.id]);
+  await seedProgress(page, [first, second]);
   await openApp(page);
 
   const adminToggle = page.locator('#admin-toggle');
@@ -373,22 +406,28 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await enableAdmin(page);
   await expect(page.locator('.contract-entry')).toHaveCount(2);
 
-  await page.getByRole('button', { name: 'Editar Primeiro Fluxo' }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
   await page.locator('[data-action="editor-configure"]').first().click();
-  await page
-    .locator('#editor-contract-form input[name="subtitle"]')
-    .fill('Versão JSON do contrato');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('1');
+  await page.locator('#editor-contract-form input[name="deliveries"]').fill('11');
   await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect.poll(() => harness.posts().length).toBe(1);
-  expect(harness.current().contracts.find(({ id }) => id === first.id)?.subtitle).toBe(
-    'Versão JSON do contrato',
-  );
+  expect(harness.current().contracts.find(({ id }) => id === first.id)).toMatchObject({
+    world: 1,
+    stage: 1,
+    revision: 2,
+    order: 1,
+    title: '1-1',
+    goal: { deliveries: 11 },
+  });
 
   const progressAfterEdit = await getProgress(page);
-  expect((progressAfterEdit.bestResults as Record<string, unknown>)[first.id]).toBeUndefined();
-  expect((progressAfterEdit.bestResults as Record<string, unknown>)[second.id]).toBeTruthy();
+  const rankingsAfterEdit = progressAfterEdit.rankings as Record<string, unknown>;
+  expect(rankingsAfterEdit[first.id]).toBeUndefined();
+  expect(rankingsAfterEdit[second.id]).toBeTruthy();
   expect(progressAfterEdit.unlockedContracts).toEqual(
     expect.arrayContaining([first.id, second.id]),
   );
@@ -403,7 +442,9 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
 
   await expect(page.locator('[data-action="delete"]')).toBeEnabled();
   await page.locator('[data-action="editor-configure"]').first().click();
-  await page.locator('#editor-contract-form input[name="title"]').fill('Fluxo de Teste Admin');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('3');
+  await expect(page.locator('#editor-contract-form [data-stage-label]')).toHaveText('3-1');
 
   const progressBeforePreview = await page.evaluate(
     (key) => localStorage.getItem(key),
@@ -427,7 +468,12 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect.poll(() => harness.current().contracts.length).toBe(3);
   expect(harness.current().contracts.find(({ id }) => id === draftId)).toMatchObject({
-    title: 'Fluxo de Teste Admin',
+    world: 1,
+    stage: 3,
+    revision: 1,
+    order: 3,
+    title: '3-1',
+    collectibles: [],
     fixedMachines: expect.arrayContaining([
       expect.objectContaining({ type: 'source', fixed: true }),
       expect.objectContaining({ type: 'receiver', fixed: true }),
@@ -436,7 +482,7 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   });
 
   await page.locator('[data-action="editor-cancel"]').click();
-  const originalEntry = page.locator('.contract-entry').filter({ hasText: 'Primeiro Fluxo' });
+  const originalEntry = page.locator('.contract-entry').filter({ hasText: '1-1' });
   await originalEntry.locator('.text-button.danger').click();
   await page.locator('[data-action="admin-confirm-accept"]').click();
   await expect
@@ -444,17 +490,17 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
     .toBe(false);
   await expect(page.locator('.contract-entry')).toHaveCount(2);
   expect(harness.current().contracts.map(({ id }) => id)).toEqual([second.id, draftId]);
-  expect(harness.current().contracts.map(({ order }) => order)).toEqual([1, 2]);
+  expect(harness.current().contracts.map(({ order }) => order)).toEqual([2, 3]);
   expect(await page.evaluate((key) => localStorage.getItem(key), LEGACY_CATALOG_KEY)).toBeNull();
 });
 
 test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ page }) => {
-  const onlyContract = makeContract('only-stage', 1, 'Fase Única');
+  const onlyContract = makeContract('only-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(onlyContract));
   await openApp(page);
   await enableAdmin(page);
 
-  const onlyEntry = page.locator('.contract-entry').filter({ hasText: onlyContract.title });
+  const onlyEntry = page.locator('.contract-entry').filter({ hasText: '1-1' });
   await onlyEntry.locator('.text-button.danger').click();
   await page.locator('[data-action="admin-confirm-accept"]').click();
   await expect.poll(() => harness.current().contracts.length).toBe(0);
@@ -466,18 +512,25 @@ test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ 
   await page.locator('#create-contract-button').click();
   const recreatedId = await authorRequiredEntities(page);
   await page.locator('[data-action="editor-configure"]').first().click();
-  await page.locator('#editor-contract-form input[name="title"]').fill('Primeira Recriada');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form [data-stage-label]')).toHaveText('1-1');
   await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect.poll(() => harness.current().contracts.length).toBe(1);
   expect(harness.current().contracts[0]).toMatchObject({
     id: recreatedId,
+    world: 1,
+    stage: 1,
+    revision: 1,
     order: 1,
-    title: 'Primeira Recriada',
+    title: '1-1',
   });
 
   const progress = await getProgress(page);
+  expect(progress.version).toBe(3);
   expect(progress.unlockedContracts).toEqual([recreatedId]);
+  expect(progress.rankings).toEqual({});
   await page.locator('[data-action="editor-cancel"]').click();
   await page.locator('#admin-toggle').click();
   const playerCard = page.locator('#contract-list .stage-contract-card');
@@ -488,11 +541,11 @@ test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ 
 test('salva a câmera autorada, recarrega o editor e inicia a campanha no mesmo enquadramento', async ({
   page,
 }) => {
-  const contract = makeContract('camera-stage', 1, 'Câmera Precisa');
+  const contract = makeContract('camera-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(contract));
   await openApp(page);
   await enableAdmin(page);
-  await page.getByRole('button', { name: `Editar ${contract.title}` }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
 
   const authoredCamera = await setDebugCamera(page, {
     centerX: 930.125,
@@ -517,7 +570,7 @@ test('salva a câmera autorada, recarrega o editor e inicia a campanha no mesmo 
   await expect(page.locator('#menu-title')).toBeVisible();
   await page.waitForFunction(() => Boolean((window as AdminWindow).__FACTORY_DEBUG__));
   await enableAdmin(page);
-  await page.getByRole('button', { name: `Editar ${contract.title}` }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
   expect(
     await page.evaluate(() => {
       const camera = (window as AdminWindow).__FACTORY_DEBUG__!.getCamera();
@@ -529,7 +582,7 @@ test('salva a câmera autorada, recarrega o editor e inicia a campanha no mesmo 
   await page.locator('#admin-toggle').click();
   const playerCard = page.locator('#contract-list .stage-contract-card');
   await expect(playerCard).toBeEnabled();
-  await playerCard.click();
+  await playerCard.evaluate((button: HTMLButtonElement) => button.click());
   const campaign = await page.evaluate(() => {
     const debug = (window as AdminWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Admin debug API unavailable');
@@ -568,11 +621,11 @@ test('salva a câmera autorada, recarrega o editor e inicia a campanha no mesmo 
 });
 
 test('descarta pan e zoom feitos na prévia ao voltar ao editor', async ({ page }) => {
-  const contract = makeContract('preview-camera-stage', 1, 'Câmera da Prévia');
+  const contract = makeContract('preview-camera-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(contract));
   await openApp(page);
   await enableAdmin(page);
-  await page.getByRole('button', { name: `Editar ${contract.title}` }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
 
   const authoringCamera = await setDebugCamera(page, {
     centerX: 880,
@@ -616,13 +669,13 @@ test('descarta pan e zoom feitos na prévia ao voltar ao editor', async ({ page 
 });
 
 test('bloqueia autoria e saída do editor enquanto o POST está pendente', async ({ page }) => {
-  const contract = makeContract('pending-save-stage', 1, 'Gravação Pendente');
+  const contract = makeContract('pending-save-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(contract));
   await openApp(page);
   await enableAdmin(page);
-  await page.getByRole('button', { name: `Editar ${contract.title}` }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
   await page.locator('[data-action="editor-configure"]').first().click();
-  await page.locator('#editor-contract-form input[name="title"]').fill('Versão Confirmada');
+  await page.locator('#editor-contract-form select[name="stage"]').selectOption('2');
 
   const cameraBefore = await page.evaluate(() => {
     const camera = (window as AdminWindow).__FACTORY_DEBUG__!.getCamera();
@@ -634,7 +687,7 @@ test('bloqueia autoria e saída do editor enquanto o POST está pendente', async
 
   await expect(page.locator('#game-ui')).toHaveAttribute('inert', '');
   await expect(page.locator('#game-container')).toHaveAttribute('inert', '');
-  await expect(page.locator('#editor-contract-form input[name="title"]')).toBeDisabled();
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toBeDisabled();
   await expect(page.locator('[data-action="editor-cancel"]')).toBeDisabled();
   const blocked = await page.evaluate(() => {
     const debug = (window as AdminWindow).__FACTORY_DEBUG__!;
@@ -653,17 +706,23 @@ test('bloqueia autoria e saída do editor enquanto o POST está pendente', async
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect(page.locator('#game-ui')).not.toHaveAttribute('inert', '');
   await expect(page.locator('[data-action="editor-cancel"]')).toBeEnabled();
-  expect(harness.current().contracts[0]?.title).toBe('Versão Confirmada');
+  expect(harness.current().contracts[0]).toMatchObject({
+    world: 1,
+    stage: 2,
+    revision: 2,
+    order: 2,
+    title: '2-1',
+  });
 });
 
 test('mantém o rascunho sujo e mostra o erro quando o POST falha', async ({ page }) => {
-  const contract = makeContract('post-failure-stage', 1, 'Falha de Persistência');
+  const contract = makeContract('post-failure-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(contract));
   await openApp(page);
   await enableAdmin(page);
-  await page.getByRole('button', { name: `Editar ${contract.title}` }).click();
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
   await page.locator('[data-action="editor-configure"]').first().click();
-  await page.locator('#editor-contract-form input[name="title"]').fill('Rascunho Retido');
+  await page.locator('#editor-contract-form select[name="stage"]').selectOption('2');
 
   const releaseFailure = harness.failNextPostAfterRelease('Falha simulada ao gravar o JSON.');
   await page.locator('[data-action="editor-save"]').click();
@@ -676,9 +735,25 @@ test('mantém o rascunho sujo e mostra o erro quando o POST falha', async ({ pag
   await expect(page.locator('#editor-feedback')).toContainText('Falha simulada ao gravar o JSON');
   await expect(page.locator('#editor-dirty-state')).toContainText('salvas');
   await expect(page.locator('[data-action="editor-save"]')).toBeEnabled();
-  expect(harness.current().contracts[0]?.title).toBe(contract.title);
+  expect(harness.current().contracts[0]).toMatchObject({
+    world: 1,
+    stage: 1,
+    revision: 1,
+    order: 1,
+    title: '1-1',
+  });
   expect(
-    await page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getEditorDraft().title),
-  ).toBe('Rascunho Retido');
+    await page.evaluate(() => {
+      const draft = (window as AdminWindow).__FACTORY_DEBUG__?.getEditorDraft();
+      return draft
+        ? {
+            world: draft.world,
+            stage: draft.stage,
+            order: draft.order,
+            title: draft.title,
+          }
+        : undefined;
+    }),
+  ).toEqual({ world: 1, stage: 2, order: 2, title: '2-1' });
   expect(harness.posts()).toHaveLength(1);
 });

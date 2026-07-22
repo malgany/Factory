@@ -10,12 +10,19 @@ import {
   worldToLocal,
   type Point,
 } from './geometry';
-import { conveyorVelocity, FIXED_PHYSICS_STEP_SECONDS, springVelocity } from './physicsModel';
+import {
+  boxTouchesOrientedSurface,
+  conveyorVelocity,
+  FIXED_PHYSICS_STEP_SECONDS,
+  springVelocity,
+} from './physicsModel';
 
 const STAGE_WIDTH = 256;
 const STAGE_HEIGHT = 128;
 const MENU_GRID_SIZE = 64;
 const BOX_SIZE = 28;
+const BOX_TEXTURE_SCALE_X = 1.2;
+const BOX_TEXTURE_SCALE_Y = 1.18;
 const OFFSCREEN_CLEANUP_MARGIN = BOX_SIZE * 2;
 const BOX_TEXTURE_KEY = 'menu-demo-box';
 const PHYSICS_SPEED = 0.5;
@@ -254,13 +261,16 @@ export class MenuDemoScene extends Phaser.Scene {
   private updateSpring(): void {
     const box = this.box;
     if (!box || this.simulationTimeMs < box.springReadyAt) return;
-    const local = worldToLocal(SPRING_CENTER, SPRING_ANGLE, box.body.position);
     const dimensions = MACHINE_DIMENSIONS.spring;
-    if (
-      Math.abs(local.x) > dimensions.width / 2 + BOX_SIZE / 2 ||
-      local.y < -BOX_SIZE - dimensions.height / 2 ||
-      local.y > dimensions.height / 2 + 5
-    ) {
+    if (!boxTouchesOrientedSurface(
+      box.body.position,
+      Phaser.Math.RadToDeg(box.body.angle),
+      BOX_SIZE,
+      SPRING_CENTER,
+      SPRING_ANGLE,
+      dimensions.width,
+      dimensions.height,
+    )) {
       return;
     }
 
@@ -314,7 +324,7 @@ export class MenuDemoScene extends Phaser.Scene {
     box.image
       .setPosition(box.body.position.x, box.body.position.y)
       .setRotation(box.body.angle)
-      .setDisplaySize(BOX_SIZE, BOX_SIZE);
+      .setDisplaySize(BOX_SIZE * BOX_TEXTURE_SCALE_X, BOX_SIZE * BOX_TEXTURE_SCALE_Y);
   }
 
   private drawConveyor(graphics: Phaser.GameObjects.Graphics): void {

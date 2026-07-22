@@ -64,8 +64,12 @@ test('renderiza o canvas nítido em 1920×1080 HiDPI sem overflow', async ({ pag
   await expect(menu).toHaveAttribute('data-menu-view', 'home');
   await expect(menu).not.toHaveAttribute('data-menu-transitioning', 'true');
   await page.locator('[data-action="menu-play"]').click();
-  await expect(page.locator('[data-menu-panel="play"]')).not.toHaveClass(/is-hidden/);
-  await page.locator('[data-start-sandbox]').click();
+  await expect(menu).toHaveAttribute('data-menu-view', 'play');
+  await expect(menu).not.toHaveAttribute('data-menu-transitioning', 'true');
+  await expect(page.locator('.campaign-map-image')).toBeInViewport();
+  await page
+    .locator('[data-start-sandbox]')
+    .evaluate((button: HTMLButtonElement) => button.click());
   await page.locator('[data-tool="conveyor"]').click();
   const canvasBounds = await page.locator('#game-container canvas').boundingBox();
   if (!canvasBounds) throw new Error('Canvas sem dimensões');

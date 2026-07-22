@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CELL_SIZE } from '../domain/types';
-import { MACHINE_DIMENSIONS } from './geometry';
+import { MACHINE_DIMENSIONS, MACHINE_PHYSICS_DIMENSIONS } from './geometry';
 
 describe('geometria das máquinas', () => {
   it('mantém entrada e saída no mesmo módulo de um e meio quadrados', () => {
@@ -24,5 +24,18 @@ describe('geometria das máquinas', () => {
       width: CELL_SIZE,
       height: CELL_SIZE / 2,
     });
+  });
+
+  it('alinha os sensores de entrada e saída aos contornos visuais', () => {
+    expect(MACHINE_PHYSICS_DIMENSIONS.source).toEqual(MACHINE_DIMENSIONS.source);
+    expect(MACHINE_PHYSICS_DIMENSIONS.receiver).toEqual(MACHINE_DIMENSIONS.receiver);
+  });
+
+  it('mantém folga somente nas superfícies sólidas adjacentes', () => {
+    expect(MACHINE_PHYSICS_DIMENSIONS.conveyor).toEqual({
+      width: MACHINE_DIMENSIONS.conveyor.width - 4,
+      height: MACHINE_DIMENSIONS.conveyor.height - 2,
+    });
+    expect(MACHINE_PHYSICS_DIMENSIONS.spring).toEqual(MACHINE_DIMENSIONS.spring);
   });
 });

@@ -135,9 +135,8 @@ test('Linha de Ritmo possui uma solução física dentro de 45 segundos', async 
     conveyor('solution-7', 15.25, 14.25, 0),
     conveyor('solution-8', 17.25, 14.25, 0),
     conveyor('solution-9', 19.25, 14.25, 0),
-    spring('solution-10', 20.5, 14.25, 85),
-    conveyor('solution-11', 21.25, 8.75, 0),
-    conveyor('solution-12', 18.25, 8.75, 0),
+    conveyor('solution-10', 21.25, 14.25, 0),
+    conveyor('solution-11', 23.25, 14.25, 0),
   ];
 
   const result = await runSolution(page, 'line-rhythm', layout, 45);

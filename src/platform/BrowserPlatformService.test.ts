@@ -25,7 +25,7 @@ function fakeStorage(initial: Record<string, string> = {}): Storage {
 
 function catalog(): ContractCatalogFile {
   return {
-    version: 1,
+    version: 2,
     updatedAt: new Date(0).toISOString(),
     contracts: CONTRACTS.map((contract) => structuredClone(contract)),
   };
@@ -57,7 +57,7 @@ describe('BrowserPlatformService', () => {
     const localStorage = fakeStorage();
     vi.stubGlobal('window', { localStorage });
     const source = catalog();
-    source.contracts[0]!.title = 'Persistida no JSON';
+    source.contracts[0]!.goal.deliveries = 17;
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, value: source }), {
         status: 200,
@@ -69,7 +69,8 @@ describe('BrowserPlatformService', () => {
     const saved = await new BrowserPlatformService().saveContractCatalog(source);
 
     expect(saved.ok).toBe(true);
-    expect(saved.value.contracts[0]?.title).toBe('Persistida no JSON');
+    expect(saved.value.contracts[0]?.title).toBe('1-1');
+    expect(saved.value.contracts[0]?.goal.deliveries).toBe(17);
     expect(fetchMock).toHaveBeenCalledWith(
       CONTRACT_CATALOG_WRITE_URL,
       expect.objectContaining({ method: 'POST' }),

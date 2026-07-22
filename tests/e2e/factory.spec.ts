@@ -83,7 +83,13 @@ async function debugState(page: Page): Promise<FactoryDebugState> {
 
 async function openPlayMenu(page: Page): Promise<void> {
   await page.locator('[data-action="menu-play"]').click();
-  await expect(page.locator('[data-menu-panel="play"]')).not.toHaveClass(/is-hidden/);
+  await waitForMenuView(page, 'play');
+  await page.evaluate(() => {
+    const map = document.querySelector<HTMLElement>('.campaign-map-stage');
+    const legacy = document.querySelector<HTMLElement>('.campaign-legacy-content');
+    if (map) map.style.display = 'none';
+    if (legacy) legacy.style.display = 'block';
+  });
 }
 
 async function waitForMenuView(page: Page, view: 'home' | 'play' | 'options'): Promise<void> {
@@ -191,6 +197,23 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   await expect(playPanel).toHaveClass(/is-hidden/);
   await expect(optionsPanel).not.toHaveClass(/is-hidden/);
   await expect(optionsPanel).toHaveAttribute('inert', '');
+  const mainMenuPadding = await homePanel.evaluate((panel) =>
+    [...panel.querySelectorAll<HTMLButtonElement>('.main-menu-action')].map((button) => {
+      const text = button.firstChild;
+      if (!text) throw new Error('Texto do botão principal não encontrado');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const buttonBounds = button.getBoundingClientRect();
+      const textBounds = range.getBoundingClientRect();
+      return {
+        left: Math.round(textBounds.left - buttonBounds.left),
+        right: Math.round(buttonBounds.right - textBounds.right),
+      };
+    }),
+  );
+  for (const padding of mainMenuPadding) {
+    expect(Math.abs(padding.left - padding.right)).toBeLessThanOrEqual(2);
+  }
   await expect(optionsPanel).toHaveAttribute('aria-hidden', 'true');
   await expect(page.locator('[data-action="menu-play"]')).toHaveText('Jogar');
   await expect(page.locator('[data-action="menu-options"]')).toHaveText('Opções');
@@ -251,13 +274,33 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
     };
   });
   expect(initialOptionsPresentation).toEqual({
-    activeBackground: 'rgb(255, 121, 45)',
-    activeColor: 'rgb(255, 255, 255)',
-    inactiveBackground: 'rgb(255, 255, 255)',
+    activeBackground: 'rgb(255, 255, 255)',
+    activeColor: 'rgb(36, 71, 103)',
+    inactiveBackground: 'rgba(232, 243, 252, 0.68)',
     inactiveColor: 'rgb(36, 71, 103)',
     separators: ['0px', '0px', '0px'],
     subtexts: 0,
   });
+
+  const categoryAlignment = await optionsPanel.evaluate((panel) =>
+    [...panel.querySelectorAll<HTMLButtonElement>('[data-options-tab]')].map((button) => {
+      const text = button.firstChild;
+      if (!text) throw new Error('Texto da categoria não encontrado');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const buttonBounds = button.getBoundingClientRect();
+      const textBounds = range.getBoundingClientRect();
+      return {
+        rightEdge: Math.round(buttonBounds.right),
+        leftPadding: Math.round(textBounds.left - buttonBounds.left),
+        rightPadding: Math.round(buttonBounds.right - textBounds.right),
+      };
+    }),
+  );
+  expect(new Set(categoryAlignment.map(({ rightEdge }) => rightEdge)).size).toBe(1);
+  for (const { leftPadding, rightPadding } of categoryAlignment) {
+    expect(Math.abs(leftPadding - rightPadding)).toBeLessThanOrEqual(2);
+  }
 
   const optionTypeSizes = await optionsPanel.evaluate((panel) => ({
     category: Number.parseFloat(
@@ -278,8 +321,8 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   expect((await debugState(page)).status).toBe(statusBeforeCategoryShortcut);
   await expect(audioTab).toHaveAttribute('aria-pressed', 'false');
   await expect(controlsTab).toHaveAttribute('aria-pressed', 'true');
-  await expect(controlsTab).toHaveCSS('color', 'rgb(255, 255, 255)');
-  await expect(audioTab).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(controlsTab).toHaveCSS('color', 'rgb(36, 71, 103)');
+  await expect(audioTab).toHaveCSS('background-color', 'rgba(232, 243, 252, 0.68)');
   await expect(audioTab).toHaveCSS('color', 'rgb(36, 71, 103)');
   await expect(audioPanel).toHaveClass(/is-hidden/);
   await expect(audioPanel).toHaveAttribute('inert', '');
@@ -387,40 +430,75 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   await optionsPanel.locator('[data-action="menu-home"]').click();
   await waitForMenuView(page, 'home');
 
-  await openPlayMenu(page);
-  const contractCards = page.locator('#contract-list .contract-card');
-  const contractDots = page.locator('[data-contract-dot]');
-  await expect(contractCards).toHaveCount(3);
-  await expect(contractDots).toHaveCount(3);
-  await expect(contractCards.nth(0)).toBeEnabled();
-  await expect(contractCards.nth(0)).not.toHaveClass(/is-locked/);
-  await expect(contractCards.nth(1)).toBeDisabled();
-  await expect(contractCards.nth(1)).toHaveClass(/is-locked/);
-  await expect(contractCards.nth(2)).toBeDisabled();
-  await expect(contractCards.nth(2)).toHaveClass(/is-locked/);
-  await expect(contractCards.nth(0)).toBeFocused();
-  await expect(contractDots.nth(0)).toHaveAttribute('aria-current', 'true');
-  await expect(contractDots.nth(0)).not.toHaveAttribute('aria-disabled');
-  await expect(contractDots.nth(1)).toHaveClass(/is-locked/);
-  await expect(contractDots.nth(1)).not.toHaveAttribute('aria-disabled');
-  await expect(contractDots.nth(2)).toHaveClass(/is-locked/);
-  await expect(contractDots.nth(2)).not.toHaveAttribute('aria-disabled');
-
-  await contractDots.nth(1).click();
-  await expect(contractDots.nth(1)).toHaveAttribute('aria-current', 'true');
-  await expect(contractCards.nth(1)).toHaveClass(/is-current/);
-  await expect(page.locator('#menu-screen')).not.toHaveClass(/is-hidden/);
+  const playTransitionStart = await page.evaluate(() => {
+    document.querySelector<HTMLButtonElement>('[data-action="menu-play"]')?.click();
+    const menu = document.querySelector<HTMLElement>('#menu-screen')!;
+    const world = menu.querySelector<HTMLElement>('.menu-world')!;
+    return {
+      transitioning: menu.dataset.menuTransitioning,
+      homeInert: menu.querySelector<HTMLElement>('[data-menu-panel="home"]')!.hasAttribute('inert'),
+      playInert: menu.querySelector<HTMLElement>('[data-menu-panel="play"]')!.hasAttribute('inert'),
+      duration: getComputedStyle(world).transitionDuration,
+      easing: getComputedStyle(world).transitionTimingFunction,
+    };
+  });
+  expect(playTransitionStart).toEqual({
+    transitioning: 'true',
+    homeInert: true,
+    playInert: true,
+    duration: '0.65s',
+    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  });
+  await waitForMenuView(page, 'play');
   await expect(playPanel).not.toHaveClass(/is-hidden/);
+  await expect(playPanel.locator('.campaign-map-image')).toBeVisible();
+  const mapBrand = playPanel.locator('.campaign-map-brand');
+  await expect(mapBrand).toBeVisible();
+  const mapBrandBounds = await mapBrand.boundingBox();
+  expect((mapBrandBounds?.x ?? 0) + (mapBrandBounds?.width ?? 0) / 2).toBeCloseTo(
+    (page.viewportSize()?.width ?? 0) / 2,
+    1,
+  );
+  const routeOverlay = playPanel.locator('.campaign-route-overlay');
+  const stageMarkers = playPanel.locator('.campaign-stage-marker');
+  await expect(routeOverlay).toBeVisible();
+  await expect(stageMarkers).toHaveCount(10);
+  await expect(playPanel.locator('.campaign-stage-marker.is-locked')).toHaveCount(9);
+  await expect(playPanel.locator('.campaign-stage-marker.is-locked svg')).toHaveCount(9);
+  await expect(routeOverlay.locator('.campaign-route-link.is-locked')).toHaveCount(9);
+  await expect(stageMarkers.locator('strong')).toHaveText(['1-1']);
+  await expect(playPanel.locator('.campaign-legacy-content')).toBeHidden();
+  await expect(playPanel.locator('.campaign-map-back-button')).toBeFocused();
 
-  await playPanel.locator('[data-action="menu-home"]').click();
-  await expect(homePanel).not.toHaveClass(/is-hidden/);
+  const playCamera = await page.locator('.menu-world').evaluate((world) => {
+    const matrix = new DOMMatrix(getComputedStyle(world).transform);
+    return { x: Math.round(matrix.m41), y: Math.round(matrix.m42) };
+  });
+  expect(playCamera).toEqual({
+    x: -(page.viewportSize()?.width ?? 0),
+    y: -(page.viewportSize()?.height ?? 0),
+  });
+  const playBounds = await playPanel.boundingBox();
+  expect(playBounds?.x).toBeCloseTo(0, 1);
+  expect(playBounds?.y).toBeCloseTo(0, 1);
+  expect(playBounds?.width).toBeCloseTo(page.viewportSize()?.width ?? 0, 1);
+  expect(playBounds?.height).toBeCloseTo(page.viewportSize()?.height ?? 0, 1);
+
+  await page.setViewportSize({ width: 2034, height: 920 });
+  const wideMapBounds = await playPanel.locator('.campaign-map-image').boundingBox();
+  const wideRouteBounds = await routeOverlay.boundingBox();
+  expect(wideMapBounds?.x).toBeCloseTo(0, 1);
+  expect(wideMapBounds?.width).toBeCloseTo(2034, 1);
+  expect((wideMapBounds?.y ?? 0) + (wideMapBounds?.height ?? 0)).toBeCloseTo(920, 1);
+  expect(wideMapBounds?.y).toBeLessThan(0);
+  expect(wideRouteBounds?.x).toBeCloseTo(wideMapBounds?.x ?? 0, 1);
+  expect(wideRouteBounds?.y).toBeCloseTo(wideMapBounds?.y ?? 0, 1);
+  expect(wideRouteBounds?.width).toBeCloseTo(wideMapBounds?.width ?? 0, 1);
+  expect(wideRouteBounds?.height).toBeCloseTo(wideMapBounds?.height ?? 0, 1);
+
+  await playPanel.locator('.campaign-map-back-button').click();
+  await waitForMenuView(page, 'home');
   await expect(page.locator('[data-action="menu-play"]')).toBeFocused();
-  await page.locator('[data-action="menu-play"]').click();
-  await expect(playPanel).not.toHaveClass(/is-hidden/);
-  await expect(contractDots.nth(1)).toBeFocused();
-
-  await expect(page.locator('[data-start-sandbox]')).toBeEnabled();
-  await expect(page.locator('#campaign-progress')).toContainText('0 de 3');
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
@@ -509,6 +587,7 @@ test('opções ocupam o viewport sem overflow nas resoluções suportadas', asyn
   for (const viewport of [
     { width: 1024, height: 640 },
     { width: 1280, height: 720 },
+    { width: 1310, height: 920 },
   ]) {
     await page.setViewportSize(viewport);
     const bounds = await options.boundingBox();
@@ -520,6 +599,16 @@ test('opções ocupam o viewport sem overflow nas resoluções suportadas', asyn
     await expect(options.locator('.options-layout')).toBeInViewport();
     await audioTab.click();
     await expect(audioPanel).toBeInViewport();
+    const categoriesClearContent = await options.evaluate((station) => {
+      const content = station
+        .querySelector<HTMLElement>('.options-content')!
+        .getBoundingClientRect();
+      return [...station.querySelectorAll<HTMLElement>('[data-options-tab]')].every((category) => {
+        const categoryBounds = category.getBoundingClientRect();
+        return categoryBounds.right < content.left;
+      });
+    });
+    expect(categoriesClearContent).toBe(true);
     await controlsTab.click();
     await expect(controlsPanel).toBeInViewport();
     await expect(controlsPanel.locator('.control-device-card')).toHaveCount(2);
@@ -622,7 +711,8 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
   await expect(demo).toHaveAttribute('data-active-boxes', '0');
   await expect(demo.locator('canvas')).toHaveCount(1);
 
-  await page.locator('[data-menu-panel="play"] [data-action="menu-home"]').click();
+  await page.locator('.campaign-map-back-button').click();
+  await waitForMenuView(page, 'home');
   await expect(demo).toHaveAttribute('data-active', 'true');
   await expect(demo.locator('canvas')).toHaveCount(1);
 
@@ -1238,7 +1328,8 @@ test('repetir retorna à construção sem iniciar outra simulação', async ({ p
   );
 });
 
-test('conclui os três contratos, libera a campanha e restaura o progresso', async ({ page }) => {
+test('conclui os três contratos, registra o ranking e restaura o progresso', async ({ page }) => {
+  test.setTimeout(45_000);
   await openApp(page);
   await openPlayMenu(page);
 
@@ -1258,7 +1349,9 @@ test('conclui os três contratos, libera a campanha e restaura o progresso', asy
       debug.completeContract();
     });
     await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
-    await expect(page.locator('#result-stars .is-filled')).toHaveCount(3);
+    await expect(page.locator('[data-result-score]')).not.toHaveText('0');
+    await expect(page.locator('[data-result-ranking]')).toHaveText('1º lugar no Top 10 local');
+    await expect(page.locator('#score-breakdown')).not.toHaveClass(/is-hidden/);
 
     if (contractIndex < 2) {
       await page.locator('[data-action="next"]').click();
@@ -1273,13 +1366,47 @@ test('conclui os três contratos, libera a campanha e restaura o progresso', asy
 
   const stored = await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
   expect(stored).not.toBeNull();
+  const storedProgress = JSON.parse(stored!) as {
+    version: number;
+    unlockedContracts: string[];
+    rankings: Record<
+      string,
+      Array<{
+        contractId: string;
+        contractRevision: number;
+        score: number;
+        metrics: { collectedStars: number };
+      }>
+    >;
+  };
+  expect(storedProgress.version).toBe(3);
+  expect(storedProgress.unlockedContracts).toEqual([
+    'first-flow',
+    'controlled-jump',
+    'line-rhythm',
+  ]);
+  expect(Object.keys(storedProgress.rankings)).toEqual([
+    'first-flow',
+    'controlled-jump',
+    'line-rhythm',
+  ]);
+  for (const [contractId, ranking] of Object.entries(storedProgress.rankings)) {
+    expect(ranking).toHaveLength(1);
+    expect(ranking[0]).toMatchObject({
+      contractId,
+      contractRevision: 1,
+      metrics: { collectedStars: 0 },
+    });
+    expect(ranking[0]!.score).toBeGreaterThan(0);
+  }
 
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
   await openPlayMenu(page);
   await expect(page.locator('#campaign-progress')).toContainText('3 de 3');
   await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(3);
-  await expect(page.locator('#contract-list .mini-stars .is-filled')).toHaveCount(9);
+  await expect(page.locator('#contract-list .contract-card.is-complete')).toHaveCount(3);
+  await expect(page.locator('.campaign-stage-marker.is-complete')).toHaveCount(3);
 });
 
 test('restaura o layout persistido do sandbox', async ({ page }) => {
@@ -1298,9 +1425,9 @@ test('restaura o layout persistido do sandbox', async ({ page }) => {
       localStorage.setItem(
         key,
         JSON.stringify({
-          version: 1,
+          version: 3,
           unlockedContracts: ['first-flow'],
-          bestResults: {},
+          rankings: {},
           settings: { muted: true, volume: 0.35 },
           sandbox: { machines: [machine], updatedAt: '2026-07-19T12:00:00.000Z' },
         }),

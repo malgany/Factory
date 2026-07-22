@@ -1,11 +1,14 @@
 {
-  "version": 1,
+  "version": 2,
   "updatedAt": "1970-01-01T00:00:00.000Z",
   "contracts": [
     {
       "id": "first-flow",
+      "world": 1,
+      "stage": 1,
+      "revision": 1,
       "order": 1,
-      "title": "Primeiro Fluxo",
+      "title": "1-1",
       "subtitle": "Faça a linha funcionar.",
       "description": "Ligue a saída acima e à esquerda à entrada abaixo e à direita usando somente esteiras.",
       "grid": {
@@ -34,12 +37,12 @@
         }
       ],
       "obstacles": [],
+      "collectibles": [],
       "goal": {
         "deliveries": 10,
         "maxLosses": 3,
         "pieceBudget": 8,
-        "parPieces": 7,
-        "parTimeSeconds": 32
+        "idealTimeSeconds": 32
       },
       "spawnIntervalSeconds": 1.25,
       "initialCamera": {
@@ -50,8 +53,11 @@
     },
     {
       "id": "controlled-jump",
+      "world": 1,
+      "stage": 2,
+      "revision": 1,
       "order": 2,
-      "title": "Salto Controlado",
+      "title": "2-1",
       "subtitle": "Atravesse a barreira.",
       "description": "Combine esteiras e trampolins para lançar as caixas por cima da barreira central.",
       "grid": {
@@ -88,12 +94,12 @@
           "rows": 6
         }
       ],
+      "collectibles": [],
       "goal": {
         "deliveries": 12,
         "maxLosses": 3,
         "pieceBudget": 8,
-        "parPieces": 7,
-        "parTimeSeconds": 38
+        "idealTimeSeconds": 38
       },
       "spawnIntervalSeconds": 1.1,
       "initialCamera": {
@@ -104,8 +110,11 @@
     },
     {
       "id": "line-rhythm",
+      "world": 1,
+      "stage": 3,
+      "revision": 1,
       "order": 3,
-      "title": "Linha de Ritmo",
+      "title": "3-1",
       "subtitle": "Sincronize dois fluxos.",
       "description": "Conduza duas saídas por entre os obstáculos e alimente uma única entrada antes do tempo acabar.",
       "grid": {
@@ -158,15 +167,15 @@
           "rows": 3
         }
       ],
+      "collectibles": [],
       "goal": {
         "deliveries": 25,
         "maxLosses": 2,
         "pieceBudget": 12,
         "timeLimitSeconds": 45,
-        "parPieces": 10,
-        "parTimeSeconds": 40
+        "idealTimeSeconds": 40
       },
-      "spawnIntervalSeconds": 0.72,
+      "spawnIntervalSeconds": 0.8,
       "initialCamera": {
         "centerX": 720,
         "centerY": 432,

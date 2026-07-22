@@ -4,9 +4,10 @@ import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import { appEvents } from '../core/events';
 import { getContract, SANDBOX_DEFINITION } from '../domain/contracts';
 import { CommandHistory, createSnapshotCommand } from '../domain/history';
-import { calculateStars, evaluateRun, isWithinPieceBudget } from '../domain/rules';
+import { evaluateRun, isWithinPieceBudget } from '../domain/rules';
 import {
   CELL_SIZE,
+  COLLECTIBLE_STAR_RADIUS,
   GRID_COLUMNS,
   GRID_ROWS,
   PLAY_AREA_MAX_COLUMN,
@@ -16,6 +17,7 @@ import {
   type ContractCamera,
   type ContractDefinition,
   type ContractId,
+  type CollectibleDefinition,
   type GameMode,
   type GameSnapshot,
   type MachineState,
@@ -44,6 +46,7 @@ import {
 } from './geometry';
 import { DISPLAY_DENSITY, fromCameraZoom, toCameraZoom } from './display';
 import {
+  boxTouchesOrientedSurface,
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
@@ -68,6 +71,8 @@ const BOX_SIZE = 28;
 const BOX_TEXTURE_KEY = 'factory-box';
 const BOX_TEXTURE_SCALE_X = 1.2;
 const BOX_TEXTURE_SCALE_Y = 1.18;
+const STAR_PICKUP_RADIUS = 30;
+const STAR_RENDER_RADIUS = COLLECTIBLE_STAR_RADIUS;
 const CONVEYOR_SPEED = 4.2;
 const SPRING_SPEED = 11.5;
 const FIXED_PHYSICS_STEP_MS = FIXED_PHYSICS_STEP_SECONDS * 1000;
@@ -92,6 +97,9 @@ const COLORS = {
   green: 0x35a26b,
   red: 0xd95050,
   obstacle: 0xb9c0c2,
+  star: 0xffc247,
+  starLight: 0xfff2a6,
+  starDark: 0xc97819,
 } as const;
 
 interface PhysicsMachine {
@@ -128,7 +136,15 @@ interface Particle {
 }
 
 interface DragState {
-  kind: 'move' | 'group-move' | 'rotate' | 'obstacle-move' | 'obstacle-resize' | 'pan' | 'marquee';
+  kind:
+    | 'move'
+    | 'group-move'
+    | 'rotate'
+    | 'obstacle-move'
+    | 'obstacle-resize'
+    | 'collectible-move'
+    | 'pan'
+    | 'marquee';
   machineId?: string;
   before?: MachineState[];
   preview?: MachineState;
@@ -137,6 +153,8 @@ interface DragState {
   beforeDocument?: EditorDocument;
   previewObstacle?: ObstacleDefinition;
   previewObstacles?: ObstacleDefinition[];
+  collectibleId?: string;
+  previewCollectible?: CollectibleDefinition;
   grabOffsetX?: number;
   grabOffsetY?: number;
   startWorld?: Point;
@@ -148,6 +166,7 @@ interface DragState {
 
 type MachineClipboard = Pick<MachineState, 'type' | 'angle' | 'reversed' | 'fixed'>;
 type ObstacleClipboard = Pick<ObstacleDefinition, 'columns' | 'rows'>;
+type CollectibleClipboard = Pick<CollectibleDefinition, 'type'>;
 
 interface GroupClipboard {
   machines: MachineState[];
@@ -158,9 +177,10 @@ interface GroupClipboard {
 interface EditorDocument {
   machines: MachineState[];
   obstacles: ObstacleDefinition[];
+  collectibles: CollectibleDefinition[];
 }
 
-export type EditorTool = MachineType | 'obstacle';
+export type EditorTool = MachineType | 'obstacle' | 'star';
 
 interface EditorAuthoringState {
   contract: ContractDefinition;
@@ -171,6 +191,7 @@ export interface FactoryDebugApi {
   getSnapshot(): GameSnapshot;
   getMachines(): MachineState[];
   getObstacles(): ObstacleDefinition[];
+  getCollectibles(): CollectibleDefinition[];
   getBoxes(): Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
   getCamera(): {
     scrollX: number;
@@ -198,6 +219,9 @@ export interface FactoryDebugApi {
   selectObstacle(id: string): boolean;
   moveSelectedObstacle(gridX: number, gridY: number): boolean;
   resizeSelectedObstacle(columns: number, rows: number): boolean;
+  placeCollectible(gridX: number, gridY: number): boolean;
+  selectCollectible(id: string): boolean;
+  moveSelectedCollectible(gridX: number, gridY: number): boolean;
   beginEditorPreview(): void;
   returnToEditor(): void;
   run(): void;
@@ -225,10 +249,17 @@ function cloneObstacles(obstacles: readonly ObstacleDefinition[]): ObstacleDefin
   return obstacles.map((obstacle) => ({ ...obstacle }));
 }
 
+function cloneCollectibles(
+  collectibles: readonly CollectibleDefinition[],
+): CollectibleDefinition[] {
+  return collectibles.map((collectible) => ({ ...collectible }));
+}
+
 function cloneEditorDocument(document: EditorDocument): EditorDocument {
   return {
     machines: cloneMachines(document.machines),
     obstacles: cloneObstacles(document.obstacles),
+    collectibles: cloneCollectibles(document.collectibles),
   };
 }
 
@@ -241,6 +272,7 @@ function cloneContract(contract: ContractDefinition): ContractDefinition {
     availableMachines: [...contract.availableMachines],
     fixedMachines: cloneMachines(contract.fixedMachines),
     obstacles: cloneObstacles(contract.obstacles),
+    collectibles: cloneCollectibles(contract.collectibles ?? []),
   };
 }
 
@@ -364,6 +396,9 @@ export class FactoryScene extends Phaser.Scene {
   private contract?: ContractDefinition;
   private machines: MachineState[] = [];
   private obstacles: ObstacleDefinition[] = [];
+  private collectibles: CollectibleDefinition[] = [];
+  private readonly collectedCollectibleIds = new Set<string>();
+  private readonly collectibleDisappear = new Map<string, number>();
   private availableMachines: MachineType[] = [];
   private status: SimulationStatus = 'build';
   private metrics: RunMetrics = {
@@ -372,19 +407,23 @@ export class FactoryScene extends Phaser.Scene {
     active: 0,
     elapsedSeconds: 0,
     placedPieces: 0,
+    collectedStars: 0,
   };
 
   private selectedTool?: MachineType;
   private selectedEditorTool?: EditorTool;
   private readonly selectedMachineIds = new Set<string>();
   private readonly selectedObstacleIds = new Set<string>();
+  private selectedCollectibleId?: string;
   private ghostMachine?: MachineState;
   private ghostObstacle?: ObstacleDefinition;
+  private ghostCollectible?: CollectibleDefinition;
   private ghostGroupMachines: MachineState[] = [];
   private ghostGroupObstacles: ObstacleDefinition[] = [];
   private groupGhostAnchor?: Point;
   private machineClipboard?: MachineClipboard;
   private obstacleClipboard?: ObstacleClipboard;
+  private collectibleClipboard?: CollectibleClipboard;
   private groupClipboard?: GroupClipboard;
   private ghostValid = false;
   private drag?: DragState;
@@ -395,6 +434,7 @@ export class FactoryScene extends Phaser.Scene {
   private editorAuthoringState?: EditorAuthoringState;
   private editorPersistenceLocked = false;
   private obstacleSequence = 0;
+  private collectibleSequence = 0;
   private muted = false;
   private gridEnabled = true;
   private simulationSpeed = 1;
@@ -415,7 +455,10 @@ export class FactoryScene extends Phaser.Scene {
 
   private set selectedMachineId(id: string | undefined) {
     this.selectedMachineIds.clear();
-    if (id) this.selectedMachineIds.add(id);
+    if (id) {
+      this.selectedMachineIds.add(id);
+      this.selectedCollectibleId = undefined;
+    }
   }
 
   private get selectedObstacleId(): string | undefined {
@@ -424,7 +467,10 @@ export class FactoryScene extends Phaser.Scene {
 
   private set selectedObstacleId(id: string | undefined) {
     this.selectedObstacleIds.clear();
-    if (id) this.selectedObstacleIds.add(id);
+    if (id) {
+      this.selectedObstacleIds.add(id);
+      this.selectedCollectibleId = undefined;
+    }
   }
 
   constructor() {
@@ -516,6 +562,7 @@ export class FactoryScene extends Phaser.Scene {
       ...(this.contract?.availableMachines ?? SANDBOX_DEFINITION.availableMachines),
     ];
     this.obstacles = (this.contract?.obstacles ?? []).map((obstacle) => ({ ...obstacle }));
+    this.collectibles = this.normalizeCollectibles(this.contract?.collectibles ?? []);
     const initialMachines =
       this.contract?.fixedMachines ?? restoredMachines ?? SANDBOX_DEFINITION.fixedMachines;
     this.machines = this.normalizeMachineIds(initialMachines, this.mode === 'campaign');
@@ -524,8 +571,10 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.simulationSpeed = 1;
     this.history.clear();
     this.editorHistory.clear();
@@ -550,6 +599,7 @@ export class FactoryScene extends Phaser.Scene {
     this.contract = draft;
     this.availableMachines = ['source', 'receiver', 'conveyor', 'spring'];
     this.obstacles = this.normalizeObstacles(draft.obstacles);
+    this.collectibles = this.normalizeCollectibles(draft.collectibles ?? []);
     this.machines = this.normalizeMachineIds(
       draft.fixedMachines.map((machine) => ({ ...machine, fixed: true })),
       true,
@@ -559,8 +609,10 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.drag = undefined;
     this.simulationSpeed = 1;
     this.history.clear();
@@ -583,6 +635,7 @@ export class FactoryScene extends Phaser.Scene {
       initialCamera: this.captureCamera(),
       fixedMachines: cloneMachines(this.machines).map((machine) => ({ ...machine, fixed: true })),
       obstacles: cloneObstacles(this.obstacles),
+      collectibles: cloneCollectibles(this.collectibles),
     };
     this.contract = this.editorContract;
     this.emitEditorChanged();
@@ -592,12 +645,14 @@ export class FactoryScene extends Phaser.Scene {
   public selectEditorTool(type: EditorTool): void {
     if (!this.isAuthoring() || !this.canBuild()) return;
     this.selectedEditorTool = type;
-    this.selectedTool = type === 'obstacle' ? undefined : type;
+    this.selectedTool = type === 'obstacle' || type === 'star' ? undefined : type;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.clearClipboard();
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.emitSnapshot();
   }
 
@@ -618,13 +673,16 @@ export class FactoryScene extends Phaser.Scene {
       fixed: true,
     }));
     this.obstacles = cloneObstacles(draft.obstacles);
+    this.collectibles = this.normalizeCollectibles(draft.collectibles ?? []);
     this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.history.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
@@ -654,6 +712,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.history.clear();
     this.resetSimulation('build');
     this.rebuildStaticBodies();
@@ -686,14 +745,17 @@ export class FactoryScene extends Phaser.Scene {
     this.contract = undefined;
     this.machines = [];
     this.obstacles = [];
+    this.collectibles = [];
     this.availableMachines = [];
     this.clearClipboard();
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.drag = undefined;
     this.editorHistory.clear();
     this.history.clear();
@@ -712,6 +774,7 @@ export class FactoryScene extends Phaser.Scene {
       initialCamera: this.isAuthoring() ? this.captureCamera() : { ...base.initialCamera },
       fixedMachines: cloneMachines(this.machines).map((machine) => ({ ...machine, fixed: true })),
       obstacles: cloneObstacles(this.obstacles),
+      collectibles: cloneCollectibles(this.collectibles),
     };
   }
 
@@ -729,9 +792,11 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = this.isAuthoring() ? type : undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.clearClipboard();
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.emitSnapshot();
   }
 
@@ -820,6 +885,9 @@ export class FactoryScene extends Phaser.Scene {
   public deleteSelected(): boolean {
     if (!this.canBuild()) return false;
     if (this.selectionCount() > 1) return this.deleteSelectedGroup();
+    if (this.isAuthoring() && this.selectedCollectibleId) {
+      return this.deleteSelectedCollectible();
+    }
     if (this.isAuthoring() && this.selectedObstacleId) {
       return this.deleteSelectedObstacle();
     }
@@ -855,6 +923,12 @@ export class FactoryScene extends Phaser.Scene {
       this.beginObstaclePaste(obstacle);
       return true;
     }
+
+    const collectible = this.getSelectedCollectible();
+    if (collectible && this.isAuthoring()) {
+      this.beginCollectiblePaste(collectible);
+      return true;
+    }
     return false;
   }
 
@@ -879,6 +953,20 @@ export class FactoryScene extends Phaser.Scene {
       after.obstacles = after.obstacles.filter((candidate) => candidate.id !== obstacle.id);
       this.executeEditorSnapshotCommand('Recortar bloqueador', before, after);
       this.beginObstaclePaste(obstacle);
+      this.audio('place');
+      this.emitEditorChanged();
+      return true;
+    }
+
+    const collectible = this.getSelectedCollectible();
+    if (collectible && this.isAuthoring()) {
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.collectibles = after.collectibles.filter(
+        (candidate) => candidate.id !== collectible.id,
+      );
+      this.executeEditorSnapshotCommand('Recortar estrela', before, after);
+      this.beginCollectiblePaste(collectible);
       this.audio('place');
       this.emitEditorChanged();
       return true;
@@ -950,6 +1038,7 @@ export class FactoryScene extends Phaser.Scene {
     };
     this.machineClipboard = clipboard;
     this.obstacleClipboard = undefined;
+    this.collectibleClipboard = undefined;
     this.groupClipboard = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
@@ -974,6 +1063,7 @@ export class FactoryScene extends Phaser.Scene {
     const clipboard: ObstacleClipboard = { columns: obstacle.columns, rows: obstacle.rows };
     this.obstacleClipboard = clipboard;
     this.machineClipboard = undefined;
+    this.collectibleClipboard = undefined;
     this.groupClipboard = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
@@ -989,6 +1079,30 @@ export class FactoryScene extends Phaser.Scene {
       gridY: obstacle.gridY,
     };
     this.ghostValid = this.isObstaclePlacementValid(this.ghostObstacle);
+    this.emitSnapshot();
+  }
+
+  private beginCollectiblePaste(collectible: CollectibleDefinition): void {
+    this.collectibleClipboard = { type: collectible.type };
+    this.machineClipboard = undefined;
+    this.obstacleClipboard = undefined;
+    this.groupClipboard = undefined;
+    this.ghostGroupMachines = [];
+    this.ghostGroupObstacles = [];
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.ghostCollectible = {
+      id: 'ghost-collectible',
+      type: collectible.type,
+      gridX: collectible.gridX,
+      gridY: collectible.gridY,
+    };
+    this.ghostValid = this.isCollectiblePlacementValid(this.ghostCollectible);
     this.emitSnapshot();
   }
 
@@ -1009,6 +1123,7 @@ export class FactoryScene extends Phaser.Scene {
 
     this.machineClipboard = undefined;
     this.obstacleClipboard = undefined;
+    this.collectibleClipboard = undefined;
     this.groupClipboard = {
       machines: cloneMachines(machines),
       obstacles: cloneObstacles(obstacles),
@@ -1259,6 +1374,30 @@ export class FactoryScene extends Phaser.Scene {
     return true;
   }
 
+  private placeCollectibleFromClipboardAt(gridX: number, gridY: number): boolean {
+    if (!this.isAuthoring() || !this.canBuild() || !this.collectibleClipboard) return false;
+    const collectible: CollectibleDefinition = {
+      id: this.createCollectibleId(),
+      ...this.collectibleClipboard,
+      gridX: this.snapEditorPosition(gridX),
+      gridY: this.snapEditorPosition(gridY),
+    };
+    if (!this.isCollectiblePlacementValid(collectible)) return false;
+
+    const before = this.captureEditorDocument();
+    const after = cloneEditorDocument(before);
+    after.collectibles.push(collectible);
+    this.executeEditorSnapshotCommand('Colar estrela', before, after);
+    this.clearClipboard();
+    this.selectedCollectibleId = collectible.id;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
   public placeObstacleAt(gridX: number, gridY: number, columns = 1, rows = 1): boolean {
     if (!this.isAuthoring() || !this.canBuild()) return false;
     const obstacle: ObstacleDefinition = {
@@ -1337,6 +1476,79 @@ export class FactoryScene extends Phaser.Scene {
     return true;
   }
 
+  public placeCollectibleAt(gridX: number, gridY: number): boolean {
+    if (!this.isAuthoring() || !this.canBuild()) return false;
+    const collectible: CollectibleDefinition = {
+      id: this.createCollectibleId(),
+      type: 'star',
+      gridX: this.snapEditorPosition(gridX),
+      gridY: this.snapEditorPosition(gridY),
+    };
+    if (!this.isCollectiblePlacementValid(collectible)) {
+      this.toast('Posicione a estrela dentro do tabuleiro.', 'danger');
+      this.audio('error');
+      return false;
+    }
+    const before = this.captureEditorDocument();
+    const after = cloneEditorDocument(before);
+    after.collectibles.push(collectible);
+    this.executeEditorSnapshotCommand('Posicionar estrela', before, after);
+    this.selectedCollectibleId = collectible.id;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.ghostCollectible = undefined;
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
+  public selectCollectible(id: string): boolean {
+    if (!this.isAuthoring() || !this.collectibles.some((candidate) => candidate.id === id)) {
+      return false;
+    }
+    this.selectedCollectibleId = id;
+    this.selectedMachineId = undefined;
+    this.selectedObstacleId = undefined;
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.emitSnapshot();
+    return true;
+  }
+
+  public moveSelectedCollectible(gridX: number, gridY: number): boolean {
+    if (!this.isAuthoring() || !this.canBuild()) return false;
+    const selected = this.getSelectedCollectible();
+    if (!selected) return false;
+    const candidate = {
+      ...selected,
+      gridX: this.snapEditorPosition(gridX),
+      gridY: this.snapEditorPosition(gridY),
+    };
+    if (!this.isCollectiblePlacementValid(candidate)) return false;
+    this.replaceCollectibleWithHistory(selected, candidate, 'Mover estrela');
+    return true;
+  }
+
+  private deleteSelectedCollectible(): boolean {
+    if (!this.isAuthoring() || !this.canBuild()) return false;
+    const selected = this.getSelectedCollectible();
+    if (!selected) return false;
+    const before = this.captureEditorDocument();
+    const after = cloneEditorDocument(before);
+    after.collectibles = after.collectibles.filter(
+      (collectible) => collectible.id !== selected.id,
+    );
+    this.executeEditorSnapshotCommand('Remover estrela', before, after);
+    this.selectedCollectibleId = undefined;
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
   private toggleSimulation(): void {
     if (this.status === 'running') {
       this.pauseSimulation();
@@ -1350,8 +1562,10 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.clearClipboard();
     this.drag = undefined;
   }
@@ -1359,9 +1573,11 @@ export class FactoryScene extends Phaser.Scene {
   private clearClipboard(): void {
     this.machineClipboard = undefined;
     this.obstacleClipboard = undefined;
+    this.collectibleClipboard = undefined;
     this.groupClipboard = undefined;
     this.ghostMachine = undefined;
     this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
     this.groupGhostAnchor = undefined;
@@ -1380,6 +1596,8 @@ export class FactoryScene extends Phaser.Scene {
 
     if (this.status !== 'build' && this.status !== 'failure' && this.status !== 'success') return;
     this.clearBoxes();
+    this.collectedCollectibleIds.clear();
+    this.collectibleDisappear.clear();
     this.metrics = this.freshMetrics();
     this.spawnAccumulator = this.getSpawnInterval();
     this.status = 'running';
@@ -1411,6 +1629,7 @@ export class FactoryScene extends Phaser.Scene {
     if (this.activeHistory().undo()) {
       this.selectedMachineId = undefined;
       this.selectedObstacleId = undefined;
+      this.selectedCollectibleId = undefined;
       this.audio('place');
       this.emitSnapshot();
       this.emitEditorChanged();
@@ -1422,6 +1641,7 @@ export class FactoryScene extends Phaser.Scene {
     if (this.activeHistory().redo()) {
       this.selectedMachineId = undefined;
       this.selectedObstacleId = undefined;
+      this.selectedCollectibleId = undefined;
       this.audio('place');
       this.emitSnapshot();
       this.emitEditorChanged();
@@ -1487,7 +1707,7 @@ export class FactoryScene extends Phaser.Scene {
       selection: {
         machineIds: selectedMachines.map((machine) => machine.id),
         obstacleIds: selectedObstacles.map((obstacle) => obstacle.id),
-        count: selectedMachines.length + selectedObstacles.length,
+        count: this.selectionCount(),
       },
       availableMachines: [...this.availableMachines],
       canUndo: this.activeHistory().canUndo,
@@ -1636,6 +1856,7 @@ export class FactoryScene extends Phaser.Scene {
       this.selectedEditorTool = undefined;
       this.ghostMachine = undefined;
       this.ghostObstacle = undefined;
+      this.ghostCollectible = undefined;
       this.emitSnapshot();
       return;
     }
@@ -1720,11 +1941,24 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
+    if (this.isAuthoring() && this.selectedEditorTool === 'star') {
+      const grid = this.collectiblePositionFromWorld(world);
+      this.placeCollectibleAt(grid.x, grid.y);
+      return;
+    }
+
     if (this.obstacleClipboard && this.isAuthoring()) {
       this.placeObstacleFromClipboardAt(
         Math.floor(world.x / CELL_SIZE),
         Math.floor(world.y / CELL_SIZE),
       );
+      return;
+    }
+
+
+    if (this.collectibleClipboard && this.isAuthoring()) {
+      const grid = this.collectiblePositionFromWorld(world);
+      this.placeCollectibleFromClipboardAt(grid.x, grid.y);
       return;
     }
 
@@ -1737,6 +1971,26 @@ export class FactoryScene extends Phaser.Scene {
     if (this.selectedTool) {
       const grid = this.machinePositionFromWorld(world);
       this.placeMachineAt(this.selectedTool, grid.x, grid.y);
+      return;
+    }
+
+    const hitCollectible = this.isAuthoring() ? this.findCollectibleAt(world) : undefined;
+    if (hitCollectible) {
+      this.selectedCollectibleId = hitCollectible.id;
+      this.selectedMachineId = undefined;
+      this.selectedObstacleId = undefined;
+      this.selectedTool = undefined;
+      this.selectedEditorTool = undefined;
+      this.drag = {
+        kind: 'collectible-move',
+        collectibleId: hitCollectible.id,
+        beforeDocument: this.captureEditorDocument(),
+        previewCollectible: { ...hitCollectible },
+        valid: true,
+        lastScreenX: pointer.x,
+        lastScreenY: pointer.y,
+      };
+      this.emitSnapshot();
       return;
     }
 
@@ -1855,6 +2109,7 @@ export class FactoryScene extends Phaser.Scene {
 
     this.selectedMachineId = undefined;
     this.selectedObstacleId = undefined;
+    this.selectedCollectibleId = undefined;
     this.drag = {
       kind: 'pan',
       lastScreenX: pointer.x,
@@ -1932,6 +2187,21 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
+    if (
+      this.drag?.kind === 'collectible-move' &&
+      this.drag.previewCollectible &&
+      pointer.isDown
+    ) {
+      const grid = this.collectiblePositionFromWorld(world);
+      this.drag.previewCollectible = {
+        ...this.drag.previewCollectible,
+        gridX: grid.x,
+        gridY: grid.y,
+      };
+      this.drag.valid = this.isCollectiblePlacementValid(this.drag.previewCollectible);
+      return;
+    }
+
     if (this.groupClipboard) {
       if (this.isInsideWorld(world)) this.updateGroupGhostAt(world);
       else {
@@ -1953,6 +2223,20 @@ export class FactoryScene extends Phaser.Scene {
       };
       this.ghostValid = this.isObstaclePlacementValid(this.ghostObstacle);
       this.ghostMachine = undefined;
+      return;
+    }
+
+    if (this.collectibleClipboard && this.isAuthoring() && this.isInsideWorld(world)) {
+      const grid = this.collectiblePositionFromWorld(world);
+      this.ghostCollectible = {
+        id: 'ghost-collectible',
+        type: this.collectibleClipboard.type,
+        gridX: grid.x,
+        gridY: grid.y,
+      };
+      this.ghostValid = this.isCollectiblePlacementValid(this.ghostCollectible);
+      this.ghostMachine = undefined;
+      this.ghostObstacle = undefined;
       return;
     }
 
@@ -1986,6 +2270,21 @@ export class FactoryScene extends Phaser.Scene {
       return;
     }
 
+
+    if (this.isAuthoring() && this.selectedEditorTool === 'star' && this.isInsideWorld(world)) {
+      const grid = this.collectiblePositionFromWorld(world);
+      this.ghostCollectible = {
+        id: 'ghost-collectible',
+        type: 'star',
+        gridX: grid.x,
+        gridY: grid.y,
+      };
+      this.ghostValid = this.isCollectiblePlacementValid(this.ghostCollectible);
+      this.ghostMachine = undefined;
+      this.ghostObstacle = undefined;
+      return;
+    }
+
     if (this.selectedTool && this.isInsideWorld(world)) {
       const grid = this.machinePositionFromWorld(world);
       const current = this.ghostMachine;
@@ -2006,6 +2305,7 @@ export class FactoryScene extends Phaser.Scene {
     } else {
       this.ghostMachine = undefined;
       this.ghostObstacle = undefined;
+      this.ghostCollectible = undefined;
     }
   }
 
@@ -2099,6 +2399,39 @@ export class FactoryScene extends Phaser.Scene {
       this.emitSnapshot();
       this.emitEditorChanged();
     }
+
+    if (
+      drag.kind === 'collectible-move' &&
+      drag.previewCollectible &&
+      drag.beforeDocument
+    ) {
+      const original = drag.beforeDocument.collectibles.find(
+        (collectible) => collectible.id === drag.collectibleId,
+      );
+      if (!drag.valid || !original) {
+        this.toast('Solte a estrela dentro do tabuleiro.', 'danger');
+        this.audio('error');
+        return;
+      }
+      if (this.sameCollectibleState(original, drag.previewCollectible)) return;
+      const after = cloneEditorDocument(drag.beforeDocument);
+      after.collectibles = after.collectibles.map((collectible) =>
+        collectible.id === drag.collectibleId ? { ...drag.previewCollectible! } : collectible,
+      );
+      this.applyEditorDocument(after, false);
+      this.activeHistory().record(
+        createSnapshotCommand({
+          label: 'Mover estrela',
+          before: drag.beforeDocument,
+          after,
+          apply: (snapshot) => this.applyEditorDocument(snapshot),
+          clone: cloneEditorDocument,
+        }),
+      );
+      this.audio('place');
+      this.emitSnapshot();
+      this.emitEditorChanged();
+    }
   }
 
   private handleWheel(
@@ -2141,6 +2474,7 @@ export class FactoryScene extends Phaser.Scene {
     this.updateSources();
     this.updateConveyors();
     this.matter.world.step(FIXED_PHYSICS_STEP_MS);
+    this.updateCollectibles();
     this.updateSprings();
     this.updateReceivers();
     this.updateLostBoxes();
@@ -2153,7 +2487,7 @@ export class FactoryScene extends Phaser.Scene {
       center,
       source.angle,
       0,
-      MACHINE_PHYSICS_DIMENSIONS.source.height / 2 + 22,
+      MACHINE_DIMENSIONS.source.height / 2 + BOX_SIZE / 2 - 6,
     );
     const body = this.matter.add.rectangle(output.x, output.y, BOX_SIZE, BOX_SIZE, {
       label: 'factory-box',
@@ -2210,13 +2544,16 @@ export class FactoryScene extends Phaser.Scene {
       if (this.simulationTimeMs < box.springReadyAt) continue;
       for (const spring of springs) {
         const center = machineCenter(spring);
-        const local = worldToLocal(center, spring.angle, box.body.position);
         const dimensions = MACHINE_DIMENSIONS.spring;
-        if (
-          Math.abs(local.x) > dimensions.width / 2 + BOX_SIZE / 2 ||
-          local.y < -BOX_SIZE - dimensions.height / 2 ||
-          local.y > dimensions.height / 2 + 5
-        ) {
+        if (!boxTouchesOrientedSurface(
+          box.body.position,
+          Phaser.Math.RadToDeg(box.body.angle),
+          BOX_SIZE,
+          center,
+          spring.angle,
+          dimensions.width,
+          dimensions.height,
+        )) {
           continue;
         }
 
@@ -2237,6 +2574,25 @@ export class FactoryScene extends Phaser.Scene {
     }
   }
 
+  private updateCollectibles(): void {
+    if (this.collectibles.length === 0 || this.boxes.size === 0) return;
+    for (const collectible of this.collectibles) {
+      if (this.collectedCollectibleIds.has(collectible.id)) continue;
+      const center = this.collectibleCenter(collectible);
+      const touched = [...this.boxes.values()].some(
+        (box) => distance(center, box.body.position) <= STAR_PICKUP_RADIUS,
+      );
+      if (!touched) continue;
+
+      this.collectedCollectibleIds.add(collectible.id);
+      this.collectibleDisappear.set(collectible.id, 0.28);
+      this.metrics.collectedStars += 1;
+      this.spawnBurst(center.x, center.y, COLORS.star, 14);
+      this.spawnBurst(center.x, center.y, COLORS.starLight, 7);
+      this.audio('deliver');
+    }
+  }
+
   private updateReceivers(): void {
     const receivers = this.machines.filter((machine) => machine.type === 'receiver');
     const delivered: BoxRuntime[] = [];
@@ -2250,7 +2606,7 @@ export class FactoryScene extends Phaser.Scene {
             dimensions.width,
             dimensions.height,
             receiver.angle,
-            5,
+            BOX_SIZE / 2,
           )
         ) {
           delivered.push(box);
@@ -2294,7 +2650,6 @@ export class FactoryScene extends Phaser.Scene {
 
     this.status = evaluation.resolution;
     this.matter.world.pause();
-    const stars = this.status === 'success' ? calculateStars(this.contract, this.metrics) : 0;
     if (this.status === 'success') {
       for (let index = 0; index < 42; index += 1) {
         this.particles.push({
@@ -2318,7 +2673,6 @@ export class FactoryScene extends Phaser.Scene {
     if (!this.editorActive) {
       appEvents.emit('game:result', {
         contractId: this.contract.id,
-        stars,
         snapshot: this.getSnapshot(),
       });
     }
@@ -2326,6 +2680,11 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private updateEffects(deltaSeconds: number): void {
+    for (const [id, remaining] of this.collectibleDisappear) {
+      const next = remaining - deltaSeconds;
+      if (next <= 0) this.collectibleDisappear.delete(id);
+      else this.collectibleDisappear.set(id, next);
+    }
     for (const [id, compression] of this.springCompression) {
       const next = Math.max(0, compression - deltaSeconds * 4.8);
       if (next === 0) this.springCompression.delete(id);
@@ -2377,6 +2736,26 @@ export class FactoryScene extends Phaser.Scene {
     for (const machine of groupDrag?.previewMachines ?? []) {
       this.drawMachine(graphics, machine, 1, groupDrag?.valid !== false);
     }
+    for (const collectible of this.collectibles) {
+      const disappearing = this.collectibleDisappear.get(collectible.id);
+      if (this.collectedCollectibleIds.has(collectible.id) && disappearing === undefined) continue;
+      const preview =
+        this.drag?.collectibleId === collectible.id
+          ? this.drag.previewCollectible
+          : undefined;
+      if (!preview) {
+        const progress = disappearing === undefined ? 0 : 1 - disappearing / 0.28;
+        this.drawCollectible(graphics, collectible, 1 - progress, 1 - progress * 0.75);
+      }
+    }
+    if (this.drag?.previewCollectible) {
+      this.drawCollectible(
+        graphics,
+        this.drag.previewCollectible,
+        1,
+        this.drag.valid === false ? 0.45 : 1,
+      );
+    }
     for (const box of this.boxes.values()) this.drawBox(box);
 
     const effects = this.effectsGraphics;
@@ -2395,6 +2774,9 @@ export class FactoryScene extends Phaser.Scene {
     if (this.ghostObstacle) {
       this.drawObstacle(overlay, this.ghostObstacle, 0.42, this.ghostValid);
     }
+    if (this.ghostCollectible) {
+      this.drawCollectible(overlay, this.ghostCollectible, 0.82, this.ghostValid ? 0.72 : 0.4);
+    }
     for (const ghost of this.ghostGroupObstacles) {
       this.drawObstacle(overlay, ghost, 0.42, this.ghostValid);
     }
@@ -2403,7 +2785,9 @@ export class FactoryScene extends Phaser.Scene {
     }
     const selectedMachines = this.getSelectedMachines();
     const selectedObstacles = this.getSelectedObstacles();
-    const selectionCount = selectedMachines.length + selectedObstacles.length;
+    const selectedCollectible = this.getSelectedCollectible();
+    const selectionCount =
+      selectedMachines.length + selectedObstacles.length + (selectedCollectible ? 1 : 0);
     if (groupDrag) {
       for (const preview of groupDrag.previewMachines ?? []) {
         this.drawSelection(overlay, preview, groupDrag.valid !== false, false);
@@ -2430,6 +2814,9 @@ export class FactoryScene extends Phaser.Scene {
       for (const selectedObstacle of selectedObstacles) {
         this.drawObstacleSelection(overlay, selectedObstacle, true, selectionCount === 1);
       }
+    }
+    if (selectedCollectible && !this.drag?.previewCollectible) {
+      this.drawCollectibleSelection(overlay, selectedCollectible);
     }
     if (this.drag?.kind === 'marquee' && this.drag.startWorld && this.drag.currentWorld) {
       this.drawMarquee(overlay, this.drag.startWorld, this.drag.currentWorld);
@@ -2470,6 +2857,67 @@ export class FactoryScene extends Phaser.Scene {
         graphics.lineBetween(PLAY_AREA_MIN_X, row * CELL_SIZE, PLAY_AREA_MAX_X, row * CELL_SIZE);
       }
     }
+  }
+
+  private drawCollectible(
+    graphics: Phaser.GameObjects.Graphics,
+    collectible: CollectibleDefinition,
+    scale = 1,
+    alpha = 1,
+  ): void {
+    const center = this.collectibleCenter(collectible);
+    const phase = this.time.now * 0.0042 + this.collectiblePhase(collectible.id);
+    const facing = Math.cos(phase);
+    const widthScale = 0.2 + Math.abs(facing) * 0.8;
+    const radius = STAR_RENDER_RADIUS * Math.max(0, scale);
+    if (radius <= 0.1 || alpha <= 0.01) return;
+
+    graphics.fillStyle(COLORS.graphite, alpha * 0.22);
+    graphics.fillEllipse(center.x + 2, center.y + radius * 0.78, radius * 1.55, radius * 0.42);
+
+    const points: Point[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      const angle = -Math.PI / 2 + (Math.PI * 2 * index) / 10;
+      const pointRadius = index % 2 === 0 ? radius : radius * 0.47;
+      points.push({
+        x: center.x + Math.cos(angle) * pointRadius * widthScale,
+        y: center.y + Math.sin(angle) * pointRadius,
+      });
+    }
+
+    graphics.fillStyle(COLORS.starDark, alpha);
+    drawPolygon(
+      graphics,
+      points.map((point) => ({ x: point.x + Math.max(1.5, radius * 0.1), y: point.y + 2 })),
+    );
+    graphics.fillStyle(COLORS.star, alpha);
+    drawPolygon(graphics, points);
+    graphics.lineStyle(Math.max(1, radius * 0.08), COLORS.starLight, alpha * 0.82);
+    linePolygon(graphics, points);
+
+    const highlightX = center.x + Math.sign(facing || 1) * radius * widthScale * 0.22;
+    graphics.fillStyle(COLORS.white, alpha * (0.42 + Math.abs(facing) * 0.38));
+    graphics.fillEllipse(
+      highlightX,
+      center.y - radius * 0.28,
+      Math.max(1.5, radius * widthScale * 0.2),
+      radius * 0.34,
+    );
+  }
+
+  private drawCollectibleSelection(
+    graphics: Phaser.GameObjects.Graphics,
+    collectible: CollectibleDefinition,
+  ): void {
+    const center = this.collectibleCenter(collectible);
+    const zoom = fromCameraZoom(this.cameras.main.zoom);
+    graphics.lineStyle(2 / zoom, COLORS.orange, 0.96);
+    graphics.strokeEllipse(
+      center.x,
+      center.y,
+      (STAR_RENDER_RADIUS * 2 + 15) / zoom,
+      (STAR_RENDER_RADIUS * 2 + 15) / zoom,
+    );
   }
 
   private drawObstacle(
@@ -3171,6 +3619,7 @@ export class FactoryScene extends Phaser.Scene {
     return {
       machines: cloneMachines(this.machines),
       obstacles: cloneObstacles(this.obstacles),
+      collectibles: cloneCollectibles(this.collectibles),
     };
   }
 
@@ -3180,6 +3629,9 @@ export class FactoryScene extends Phaser.Scene {
       fixed: this.isAuthoring() ? true : machine.fixed,
     }));
     this.obstacles = cloneObstacles(document.obstacles);
+    this.collectibles = cloneCollectibles(document.collectibles);
+    this.collectedCollectibleIds.clear();
+    this.collectibleDisappear.clear();
     this.updatePlacedPieces();
     this.rebuildStaticBodies();
     if (notify) this.emitEditorChanged();
@@ -3200,6 +3652,21 @@ export class FactoryScene extends Phaser.Scene {
     this.emitEditorChanged();
   }
 
+  private replaceCollectibleWithHistory(
+    previous: CollectibleDefinition,
+    next: CollectibleDefinition,
+    label: string,
+  ): void {
+    const before = this.captureEditorDocument();
+    const after = cloneEditorDocument(before);
+    after.collectibles = after.collectibles.map((collectible) =>
+      collectible.id === previous.id ? { ...next } : collectible,
+    );
+    this.executeEditorSnapshotCommand(label, before, after);
+    this.emitSnapshot();
+    this.emitEditorChanged();
+  }
+
   private clearPlacedMachines(): void {
     if (!this.canBuild()) return;
     const before = cloneMachines(this.machines);
@@ -3212,6 +3679,8 @@ export class FactoryScene extends Phaser.Scene {
 
   private resetSimulation(nextStatus: SimulationStatus): void {
     this.clearBoxes();
+    this.collectedCollectibleIds.clear();
+    this.collectibleDisappear.clear();
     this.metrics = this.freshMetrics();
     this.spawnAccumulator = 0;
     this.physicsAccumulator = 0;
@@ -3228,6 +3697,7 @@ export class FactoryScene extends Phaser.Scene {
       active: 0,
       elapsedSeconds: 0,
       placedPieces: this.machines.filter((machine) => !machine.fixed).length,
+      collectedStars: 0,
     };
   }
 
@@ -3254,6 +3724,12 @@ export class FactoryScene extends Phaser.Scene {
     return this.obstacles.find((obstacle) => obstacle.id === this.selectedObstacleId);
   }
 
+  private getSelectedCollectible(): CollectibleDefinition | undefined {
+    return this.collectibles.find(
+      (collectible) => collectible.id === this.selectedCollectibleId,
+    );
+  }
+
   private getSelectedMachines(): MachineState[] {
     return this.machines.filter((machine) => this.selectedMachineIds.has(machine.id));
   }
@@ -3263,12 +3739,17 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private selectionCount(): number {
-    return this.getSelectedMachines().length + this.getSelectedObstacles().length;
+    return (
+      this.getSelectedMachines().length +
+      this.getSelectedObstacles().length +
+      (this.getSelectedCollectible() ? 1 : 0)
+    );
   }
 
   private clearSelection(): void {
     this.selectedMachineIds.clear();
     this.selectedObstacleIds.clear();
+    this.selectedCollectibleId = undefined;
   }
 
   private selectItemsInsideMarquee(start: Point, end: Point): void {
@@ -3314,6 +3795,13 @@ export class FactoryScene extends Phaser.Scene {
     });
   }
 
+  private findCollectibleAt(point: Point): CollectibleDefinition | undefined {
+    const hitRadius = (STAR_RENDER_RADIUS + 8) / fromCameraZoom(this.cameras.main.zoom);
+    return [...this.collectibles]
+      .reverse()
+      .find((collectible) => distance(point, this.collectibleCenter(collectible)) <= hitRadius);
+  }
+
   private obstacleResizeHandle(obstacle: ObstacleDefinition): Point {
     return {
       x: (obstacle.gridX + obstacle.columns) * CELL_SIZE,
@@ -3328,6 +3816,18 @@ export class FactoryScene extends Phaser.Scene {
       a.gridY === b.gridY &&
       a.columns === b.columns &&
       a.rows === b.rows
+    );
+  }
+
+  private sameCollectibleState(
+    a: CollectibleDefinition,
+    b: CollectibleDefinition,
+  ): boolean {
+    return (
+      a.id === b.id &&
+      a.type === b.type &&
+      a.gridX === b.gridX &&
+      a.gridY === b.gridY
     );
   }
 
@@ -3372,6 +3872,41 @@ export class FactoryScene extends Phaser.Scene {
     };
   }
 
+  private collectiblePositionFromWorld(point: Point): { x: number; y: number } {
+    const position = this.machinePositionFromWorld(point);
+    return {
+      x: this.snapEditorPosition(position.x),
+      y: this.snapEditorPosition(position.y),
+    };
+  }
+
+  private collectibleCenter(collectible: CollectibleDefinition): Point {
+    return gridToWorld({ x: collectible.gridX, y: collectible.gridY });
+  }
+
+  private collectiblePhase(id: string): number {
+    let hash = 0;
+    for (let index = 0; index < id.length; index += 1) {
+      hash = (hash * 31 + id.charCodeAt(index)) | 0;
+    }
+    return (Math.abs(hash) % 628) / 100;
+  }
+
+  private snapEditorPosition(value: number): number {
+    return Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
+  }
+
+  private isCollectiblePlacementValid(collectible: CollectibleDefinition): boolean {
+    if (!Number.isFinite(collectible.gridX) || !Number.isFinite(collectible.gridY)) return false;
+    const center = this.collectibleCenter(collectible);
+    return (
+      center.x >= PLAY_AREA_MIN_X + STAR_RENDER_RADIUS &&
+      center.x <= PLAY_AREA_MAX_X - STAR_RENDER_RADIUS &&
+      center.y >= PLAY_AREA_MIN_Y + STAR_RENDER_RADIUS &&
+      center.y <= PLAY_AREA_MAX_Y - STAR_RENDER_RADIUS
+    );
+  }
+
   private isRotatable(machine: MachineState): boolean {
     return (
       machine.type === 'conveyor' ||
@@ -3396,6 +3931,7 @@ export class FactoryScene extends Phaser.Scene {
       this.selectedEditorTool = undefined;
       this.ghostMachine = undefined;
       this.ghostObstacle = undefined;
+      this.ghostCollectible = undefined;
       this.ghostGroupMachines = [];
       this.ghostGroupObstacles = [];
       this.groupGhostAnchor = undefined;
@@ -3444,6 +3980,41 @@ export class FactoryScene extends Phaser.Scene {
       id = `obstacle-${++this.obstacleSequence}`;
     } while (reserved.has(id) || this.obstacles.some((obstacle) => obstacle.id === id));
     return id;
+  }
+
+  private createCollectibleId(reserved: ReadonlySet<string> = new Set()): string {
+    let id: string;
+    do {
+      id = `star-${++this.collectibleSequence}`;
+    } while (reserved.has(id) || this.collectibles.some((collectible) => collectible.id === id));
+    return id;
+  }
+
+  private normalizeCollectibles(
+    collectibles: readonly CollectibleDefinition[],
+  ): CollectibleDefinition[] {
+    this.collectibleSequence = 0;
+    const used = new Set<string>();
+    for (const id of collectibles.map((collectible) => collectible.id)) {
+      const match = /^star-(\d+)$/.exec(id);
+      if (match?.[1]) {
+        this.collectibleSequence = Math.max(this.collectibleSequence, Number(match[1]));
+      }
+    }
+    return collectibles.flatMap((collectible) => {
+      if (collectible.type !== 'star') return [];
+      let id = collectible.id.trim();
+      if (!id || used.has(id)) id = this.createCollectibleId(used);
+      used.add(id);
+      const normalized: CollectibleDefinition = {
+        ...collectible,
+        id,
+        type: 'star',
+        gridX: this.snapEditorPosition(collectible.gridX),
+        gridY: this.snapEditorPosition(collectible.gridY),
+      };
+      return this.isCollectiblePlacementValid(normalized) ? [normalized] : [];
+    });
   }
 
   private normalizeObstacles(obstacles: readonly ObstacleDefinition[]): ObstacleDefinition[] {
@@ -3504,6 +4075,7 @@ export class FactoryScene extends Phaser.Scene {
         .map((machine) => ({ ...machine, fixed: true }))
         .sort((a, b) => a.id.localeCompare(b.id)),
       obstacles: [...contract.obstacles].sort((a, b) => a.id.localeCompare(b.id)),
+      collectibles: [...contract.collectibles].sort((a, b) => a.id.localeCompare(b.id)),
       availableMachines: [...contract.availableMachines].sort(),
     });
   }
@@ -3642,6 +4214,7 @@ export class FactoryScene extends Phaser.Scene {
     this.availableMachines = [...SANDBOX_DEFINITION.availableMachines];
     this.machines = [];
     this.obstacles = [];
+    this.collectibles = [];
     this.history.clear();
     this.editorHistory.clear();
     this.resetSimulation('build');
@@ -3673,6 +4246,7 @@ export class FactoryScene extends Phaser.Scene {
       getSnapshot: () => this.getSnapshot(),
       getMachines: () => cloneMachines(this.machines),
       getObstacles: () => cloneObstacles(this.obstacles),
+      getCollectibles: () => cloneCollectibles(this.collectibles),
       getBoxes: () =>
         [...this.boxes.values()].map(({ body }) => ({
           x: body.position.x,
@@ -3725,6 +4299,10 @@ export class FactoryScene extends Phaser.Scene {
       selectObstacle: (id) => this.selectObstacle(id),
       moveSelectedObstacle: (gridX, gridY) => this.moveSelectedObstacle(gridX, gridY),
       resizeSelectedObstacle: (columns, rows) => this.resizeSelectedObstacle(columns, rows),
+      placeCollectible: (gridX, gridY) => this.placeCollectibleAt(gridX, gridY),
+      selectCollectible: (id) => this.selectCollectible(id),
+      moveSelectedCollectible: (gridX, gridY) =>
+        this.moveSelectedCollectible(gridX, gridY),
       beginEditorPreview: () => this.beginEditorPreview(),
       returnToEditor: () => this.returnToEditor(),
       run: () => this.runSimulation(),
