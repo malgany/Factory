@@ -1,103 +1,115 @@
 import { describe, expect, it } from 'vitest';
 
 import { getContract } from './contracts';
-import { calculateScore, createContractResult, evaluateRun, isWithinPieceBudget } from './rules';
+import { evaluateRun, isWithinBudget } from './rules';
 import type { RunMetrics } from './types';
 
 const metrics = (overrides: Partial<RunMetrics> = {}): RunMetrics => ({
   delivered: 0,
   lost: 0,
   active: 0,
-  elapsedSeconds: 0,
   placedPieces: 0,
   collectedStars: 0,
   ...overrides,
+  spent: overrides.spent ?? 0,
 });
 
 describe('regras de execução', () => {
-  it('vence pela meta sem descontar perdas e prioriza a entrega no último tick', () => {
-    const goal = getContract('assembly-line').goal;
-    expect(evaluateRun(metrics({ delivered: 8, lost: 4 }), goal)).toEqual({
-      resolution: 'success',
-      reason: 'deliveries',
-    });
+  it('vence somente com entregas, todas as estrelas e gasto dentro do orçamento', () => {
+    const contract = getContract('assembly-line');
+    const requiredStars = contract.collectibles.length;
+    const budgetLimit = contract.economy.budgetLimit;
+
+    expect(
+      evaluateRun(
+        metrics({
+          delivered: contract.goal.deliveries,
+          collectedStars: requiredStars,
+          spent: budgetLimit,
+        }),
+        contract.goal,
+        requiredStars,
+        budgetLimit,
+      ),
+    ).toEqual({ resolution: 'success', reason: 'deliveries' });
   });
 
-  it('falha apenas quando ultrapassa o máximo de perdas', () => {
-    const goal = getContract('assembly-line').goal;
-    expect(evaluateRun(metrics({ lost: 3 }), goal).resolution).toBeUndefined();
-    expect(evaluateRun(metrics({ lost: 4 }), goal)).toEqual({
+  it('não conclui enquanto faltar estrela ou o orçamento nominal estiver excedido', () => {
+    const contract = getContract('quality-curve');
+    const requiredStars = contract.collectibles.length;
+    const budgetLimit = contract.economy.budgetLimit!;
+    const completedDeliveries = metrics({
+      delivered: contract.goal.deliveries,
+      collectedStars: requiredStars,
+      spent: budgetLimit,
+    });
+
+    expect(
+      evaluateRun(
+        { ...completedDeliveries, collectedStars: requiredStars - 1 },
+        contract.goal,
+        requiredStars,
+        budgetLimit,
+      ).resolution,
+    ).toBeUndefined();
+    expect(
+      evaluateRun(
+        { ...completedDeliveries, spent: budgetLimit + 1 },
+        contract.goal,
+        requiredStars,
+        budgetLimit,
+      ).resolution,
+    ).toBeUndefined();
+  });
+
+  it('aceita qualquer gasto quando a fase não tem orçamento', () => {
+    const contract = getContract('assembly-line');
+    expect(
+      evaluateRun(
+        metrics({
+          delivered: contract.goal.deliveries,
+          collectedStars: contract.collectibles.length,
+          spent: 999_999_999,
+        }),
+        contract.goal,
+        contract.collectibles.length,
+      ),
+    ).toEqual({ resolution: 'success', reason: 'deliveries' });
+  });
+
+  it('falha apenas ao ultrapassar perdas configuradas e ignora perdas sem limite', () => {
+    const contract = getContract('assembly-line');
+    expect(
+      evaluateRun(metrics({ lost: contract.goal.maxLosses }), contract.goal, 1).resolution,
+    ).toBeUndefined();
+    expect(evaluateRun(metrics({ lost: contract.goal.maxLosses! + 1 }), contract.goal, 1)).toEqual({
       resolution: 'failure',
       reason: 'losses',
     });
+
+    expect(evaluateRun(metrics({ lost: 100 }), { deliveries: 8 }, 1).resolution).toBeUndefined();
   });
 
-  it('falha quando o limite de tempo termina sem concluir', () => {
-    const goal = getContract('final-inspection').goal;
-    expect(evaluateRun(metrics({ elapsedSeconds: 41.99 }), goal).resolution).toBeUndefined();
-    expect(evaluateRun(metrics({ elapsedSeconds: 42 }), goal)).toEqual({
-      resolution: 'failure',
-      reason: 'time',
-    });
-  });
-
-  it('calcula entregas, tempo, eficiência, estrelas e perdas', () => {
-    const contract = structuredClone(getContract('assembly-line'));
-    contract.goal.idealTimeSeconds = 18;
-    const calculation = calculateScore(
-      contract,
-      metrics({
-        delivered: 12,
-        lost: 1,
-        elapsedSeconds: 18,
-        placedPieces: 3,
-        collectedStars: 2,
-      }),
-    );
-
-    expect(calculation).toEqual({
-      score: 107_500,
-      breakdown: {
-        deliveryPoints: 80_000,
-        timeBonus: 20_000,
-        efficiencyBonus: 2_500,
-        starBonus: 10_000,
-        lossPenalty: 5_000,
-      },
-    });
-  });
-
-  it('usa o tempo ideal automático e zera eficiência quando o limite é zero', () => {
-    const contract = structuredClone(getContract('assembly-line'));
-    delete contract.goal.idealTimeSeconds;
-    contract.goal.pieceBudget = 0;
-    contract.spawnIntervalSeconds = 1;
-
-    expect(
-      calculateScore(contract, metrics({ delivered: 8, elapsedSeconds: 16, placedPieces: 0 }))
-        .breakdown,
-    ).toMatchObject({ timeBonus: 20_000, efficiencyBonus: 0 });
-  });
-
-  it('não pontua derrotas e cria o resultado com revisão e data', () => {
+  it('prioriza uma conclusão completa sobre perdas no mesmo tick', () => {
     const contract = getContract('assembly-line');
-    expect(calculateScore(contract, metrics({ delivered: 7 })).score).toBe(0);
-
-    const result = createContractResult(
-      contract,
-      metrics({ delivered: 8 }),
-      '2026-07-22T10:00:00.000Z',
-    );
-    expect(result).toMatchObject({
-      contractId: contract.id,
-      contractRevision: contract.revision,
-      completedAt: '2026-07-22T10:00:00.000Z',
-    });
+    expect(
+      evaluateRun(
+        metrics({
+          delivered: contract.goal.deliveries,
+          collectedStars: contract.collectibles.length,
+          spent: contract.economy.budgetLimit,
+          lost: contract.goal.maxLosses! + 1,
+        }),
+        contract.goal,
+        contract.collectibles.length,
+        contract.economy.budgetLimit,
+      ),
+    ).toEqual({ resolution: 'success', reason: 'deliveries' });
   });
 
-  it('impede a próxima colocação ao atingir o limite de peças', () => {
-    const goal = getContract('assembly-line').goal;
-    expect(isWithinPieceBudget(3, goal)).toBe(true);
-    expect(isWithinPieceBudget(4, goal)).toBe(false);
+  it('considera a igualdade dentro do orçamento e ausência de limite como ilimitada', () => {
+    expect(isWithinBudget(10_000, 10_000)).toBe(true);
+    expect(isWithinBudget(10_001, 10_000)).toBe(false);
+    expect(isWithinBudget(Number.MAX_SAFE_INTEGER)).toBe(true);
   });
 });

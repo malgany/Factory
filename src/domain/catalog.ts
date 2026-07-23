@@ -1,4 +1,5 @@
 import { orderContracts } from './contracts';
+import { DEFAULT_CONVEYOR_SPEED_COSTS } from './economy';
 import {
   CELL_SIZE,
   COLLECTIBLE_STAR_RADIUS,
@@ -11,19 +12,26 @@ import {
   type CollectibleDefinition,
   type ContractCatalogFile,
   type ContractDefinition,
+  type ContractEconomy,
+  type ContractMachineCosts,
   type ContractStage,
+  type ConveyorSpeed,
   type MachineState,
   type MachineType,
   type ObstacleDefinition,
   type PersistenceResult,
 } from './types';
 
-export const CONTRACT_CATALOG_VERSION = 2 as const;
+export const CONTRACT_CATALOG_VERSION = 3 as const;
 export const MIN_CONTRACT_CAMERA_ZOOM = 1;
 export const MAX_CONTRACT_CAMERA_ZOOM = 2;
 export const MIN_SPAWN_INTERVAL_SECONDS = 0.8;
 export const MAX_SPAWN_INTERVAL_SECONDS = 10;
 export const SPAWN_INTERVAL_STEP_SECONDS = 0.05;
+export const DEFAULT_MACHINE_COSTS: Readonly<ContractMachineCosts> = {
+  'tracked-conveyor': 2_500,
+  spring: 5_000,
+};
 
 const MACHINE_TYPES: readonly MachineType[] = [
   'source',
@@ -32,6 +40,7 @@ const MACHINE_TYPES: readonly MachineType[] = [
   'receiver',
   'spring',
 ];
+const CONVEYOR_SPEEDS: readonly ConveyorSpeed[] = ['slow', 'normal', 'fast'];
 const CUSTOM_ID_PREFIX = 'custom-';
 const EMPTY_UPDATED_AT = new Date(0).toISOString();
 
@@ -94,7 +103,11 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
     return catalogFailure('O catálogo de fases salvo tem um formato inválido.');
   }
 
-  if (candidate.version !== 1 && candidate.version !== CONTRACT_CATALOG_VERSION) {
+  if (
+    candidate.version !== 1 &&
+    candidate.version !== 2 &&
+    candidate.version !== CONTRACT_CATALOG_VERSION
+  ) {
     return catalogFailure('A versão do catálogo de fases não é compatível.');
   }
 
@@ -110,10 +123,7 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
   const ids = new Set<string>();
   const slots = new Set<string>();
   for (const value of candidate.contracts) {
-    const contract =
-      candidate.version === 1
-        ? readVersionOneContractDefinition(value)
-        : readContractDefinition(value);
+    const contract = readContractDefinition(value, candidate.version);
     if (!contract || ids.has(contract.id)) {
       return catalogFailure('O catálogo contém uma fase inválida ou duplicada.');
     }
@@ -251,10 +261,9 @@ export function createEmptyContractDraft(
   const usedStages = new Set(
     catalog.contracts.filter(({ world }) => world === 1).map(({ stage }) => stage),
   );
-  const stage =
-    ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as ContractStage[]).find(
-      (candidate) => !usedStages.has(candidate),
-    );
+  const stage = ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as ContractStage[]).find(
+    (candidate) => !usedStages.has(candidate),
+  );
   if (!stage) {
     throw new Error('O Mundo 1 já possui as dez fases cadastradas.');
   }
@@ -275,7 +284,11 @@ export function createEmptyContractDraft(
     goal: {
       deliveries: 10,
       maxLosses: 3,
-      pieceBudget: 8,
+    },
+    economy: {
+      budgetLimit: 25_000,
+      machineCosts: { ...DEFAULT_MACHINE_COSTS },
+      conveyorSpeedCosts: { ...DEFAULT_CONVEYOR_SPEED_COSTS },
     },
     spawnIntervalSeconds: 1.25,
     initialCamera: {
@@ -317,32 +330,43 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     'As entregas devem ser pelo menos 1.',
     add,
   );
-  validateInteger(
+  validateOptionalNonNegativeInteger(
     contract.goal.maxLosses,
-    0,
     'goal.maxLosses',
     'As perdas máximas não podem ser negativas.',
     add,
   );
+  validateOptionalNonNegativeInteger(
+    contract.economy.budgetLimit,
+    'economy.budgetLimit',
+    'O orçamento deve ser um inteiro não negativo.',
+    add,
+  );
   validateInteger(
-    contract.goal.pieceBudget,
+    contract.economy.machineCosts['tracked-conveyor'],
     0,
-    'goal.pieceBudget',
-    'O orçamento não pode ser negativo.',
+    'economy.machineCosts.tracked-conveyor',
+    'O custo da esteira deve ser um inteiro não negativo.',
     add,
   );
-  validateOptionalPositiveInteger(
-    contract.goal.timeLimitSeconds,
-    'goal.timeLimitSeconds',
-    'O tempo limite deve ser positivo.',
+  validateInteger(
+    contract.economy.machineCosts.spring,
+    0,
+    'economy.machineCosts.spring',
+    'O custo do trampolim deve ser um inteiro não negativo.',
     add,
   );
-  validateOptionalPositive(
-    contract.goal.idealTimeSeconds,
-    'goal.idealTimeSeconds',
-    'O tempo ideal deve ser positivo.',
-    add,
-  );
+  if (contract.economy.conveyorSpeedCosts) {
+    for (const speed of CONVEYOR_SPEEDS) {
+      validateInteger(
+        contract.economy.conveyorSpeedCosts[speed],
+        0,
+        `economy.conveyorSpeedCosts.${speed}`,
+        `O custo da velocidade ${CONVEYOR_SPEEDS.indexOf(speed) + 1} deve ser um inteiro não negativo.`,
+        add,
+      );
+    }
+  }
   if (
     !Number.isFinite(contract.spawnIntervalSeconds) ||
     contract.spawnIntervalSeconds < MIN_SPAWN_INTERVAL_SECONDS ||
@@ -414,11 +438,7 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
       obstacle.rows < 1 ||
       (obstacle.angle !== undefined && !Number.isFinite(obstacle.angle))
     ) {
-      add(
-        'invalid-obstacle',
-        path,
-        'Bloqueadores devem respeitar a grade e medir pelo menos 1×1.',
-      );
+      add('invalid-obstacle', path, 'Bloqueadores devem respeitar a grade e medir pelo menos 1×1.');
     }
     if (!obstacleWithinBoard(obstacle)) {
       add('out-of-bounds', path, 'Há um bloqueador fora do tabuleiro.');
@@ -439,13 +459,7 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
       add('invalid-collectible', path, 'Estrelas devem respeitar os quartos da grade.');
     }
     const starRadiusInCells = COLLECTIBLE_STAR_RADIUS / CELL_SIZE;
-    if (
-      !pointWithinBoard(
-        collectible.gridX + 0.5,
-        collectible.gridY + 0.5,
-        starRadiusInCells,
-      )
-    ) {
+    if (!pointWithinBoard(collectible.gridX + 0.5, collectible.gridY + 0.5, starRadiusInCells)) {
       add('out-of-bounds', path, 'Há uma estrela fora do tabuleiro.');
     }
   }
@@ -486,6 +500,13 @@ export function cloneContract(contract: ContractDefinition): ContractDefinition 
     obstacles: contract.obstacles.map((obstacle) => ({ ...obstacle })),
     collectibles: contract.collectibles.map((collectible) => ({ ...collectible })),
     goal: { ...contract.goal },
+    economy: {
+      ...contract.economy,
+      machineCosts: { ...contract.economy.machineCosts },
+      ...(contract.economy.conveyorSpeedCosts
+        ? { conveyorSpeedCosts: { ...contract.economy.conveyorSpeedCosts } }
+        : {}),
+    },
     initialCamera: { ...contract.initialCamera },
   };
 }
@@ -499,6 +520,10 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
     gridX: roundForCatalog(machine.gridX, 4),
     gridY: roundForCatalog(machine.gridY, 4),
     angle: roundForCatalog(machine.angle, 4),
+    conveyorSpeed:
+      machine.type === 'conveyor' || machine.type === 'tracked-conveyor'
+        ? normalizeConveyorSpeed(machine.conveyorSpeed)
+        : undefined,
   }));
   normalized.obstacles = normalized.obstacles.map((obstacle) => ({
     ...obstacle,
@@ -514,16 +539,29 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
     gridY: roundForCatalog(collectible.gridY, 4),
   }));
   normalized.goal = {
-    ...normalized.goal,
     deliveries: roundForCatalog(normalized.goal.deliveries, 4),
-    maxLosses: roundForCatalog(normalized.goal.maxLosses, 4),
-    pieceBudget: roundForCatalog(normalized.goal.pieceBudget, 4),
-    ...(normalized.goal.timeLimitSeconds === undefined
+    ...(normalized.goal.maxLosses === undefined
       ? {}
-      : { timeLimitSeconds: roundForCatalog(normalized.goal.timeLimitSeconds, 4) }),
-    ...(normalized.goal.idealTimeSeconds === undefined
+      : { maxLosses: roundForCatalog(normalized.goal.maxLosses, 4) }),
+  };
+  normalized.economy = {
+    ...(normalized.economy.budgetLimit === undefined
       ? {}
-      : { idealTimeSeconds: roundForCatalog(normalized.goal.idealTimeSeconds, 4) }),
+      : { budgetLimit: roundForCatalog(normalized.economy.budgetLimit, 4) }),
+    machineCosts: {
+      'tracked-conveyor': roundForCatalog(normalized.economy.machineCosts['tracked-conveyor'], 4),
+      spring: roundForCatalog(normalized.economy.machineCosts.spring, 4),
+    },
+    ...(normalized.economy.conveyorSpeedCosts
+      ? {
+          conveyorSpeedCosts: Object.fromEntries(
+            CONVEYOR_SPEEDS.map((speed) => [
+              speed,
+              roundForCatalog(normalized.economy.conveyorSpeedCosts![speed], 4),
+            ]),
+          ) as Record<ConveyorSpeed, number>,
+        }
+      : {}),
   };
   normalized.spawnIntervalSeconds = roundForCatalog(normalized.spawnIntervalSeconds, 4);
   normalized.initialCamera = {
@@ -545,22 +583,23 @@ function cloneContractFields(
     obstacles: definition.obstacles.map((obstacle) => ({ ...obstacle })),
     collectibles: definition.collectibles.map((collectible) => ({ ...collectible })),
     goal: { ...definition.goal },
+    economy: {
+      ...definition.economy,
+      machineCosts: { ...definition.economy.machineCosts },
+      ...(definition.economy.conveyorSpeedCosts
+        ? { conveyorSpeedCosts: { ...definition.economy.conveyorSpeedCosts } }
+        : {}),
+    },
     initialCamera: { ...definition.initialCamera },
   };
 }
 
-function readContractDefinition(value: unknown): ContractDefinition | undefined {
-  return readRawContractDefinition(value, false);
-}
-
-function readVersionOneContractDefinition(value: unknown): ContractDefinition | undefined {
-  return readRawContractDefinition(value, true);
-}
-
-function readRawContractDefinition(
+function readContractDefinition(
   value: unknown,
-  legacyVersionOne: boolean,
+  catalogVersion: 1 | 2 | 3,
 ): ContractDefinition | undefined {
+  const legacyVersionOne = catalogVersion === 1;
+  const legacyEconomy = catalogVersion < CONTRACT_CATALOG_VERSION;
   if (
     !isRecord(value) ||
     !isRecord(value.grid) ||
@@ -603,15 +642,66 @@ function readRawContractDefinition(
   }
   const goal = value.goal;
   const idealTimeSeconds = legacyVersionOne ? goal.parTimeSeconds : goal.idealTimeSeconds;
+  if (typeof goal.deliveries !== 'number' || !isOptionalNumber(goal.maxLosses)) {
+    return undefined;
+  }
   if (
-    typeof goal.deliveries !== 'number' ||
-    typeof goal.maxLosses !== 'number' ||
-    typeof goal.pieceBudget !== 'number' ||
-    !isOptionalNumber(goal.timeLimitSeconds) ||
-    !isOptionalNumber(idealTimeSeconds)
+    legacyEconomy &&
+    (typeof goal.pieceBudget !== 'number' ||
+      !isOptionalNumber(goal.timeLimitSeconds) ||
+      !isOptionalNumber(idealTimeSeconds))
   ) {
     return undefined;
   }
+
+  const economy = value.economy;
+  if (
+    !legacyEconomy &&
+    (!isRecord(economy) ||
+      !isRecord(economy.machineCosts) ||
+      !isOptionalNumber(economy.budgetLimit) ||
+      typeof economy.machineCosts['tracked-conveyor'] !== 'number' ||
+      typeof economy.machineCosts.spring !== 'number' ||
+      (economy.conveyorSpeedCosts !== undefined &&
+        (!isRecord(economy.conveyorSpeedCosts) ||
+          typeof economy.conveyorSpeedCosts.slow !== 'number' ||
+          typeof economy.conveyorSpeedCosts.normal !== 'number' ||
+          typeof economy.conveyorSpeedCosts.fast !== 'number')))
+  ) {
+    return undefined;
+  }
+  const machineCosts =
+    isRecord(economy) && isRecord(economy.machineCosts) ? economy.machineCosts : undefined;
+  const conveyorSpeedCosts =
+    isRecord(economy) && isRecord(economy.conveyorSpeedCosts)
+      ? {
+          slow: economy.conveyorSpeedCosts.slow as number,
+          normal: economy.conveyorSpeedCosts.normal as number,
+          fast: economy.conveyorSpeedCosts.fast as number,
+        }
+      : undefined;
+  const legacyUnitCost = value.availableMachines.reduce((highestCost, type) => {
+    if (type === 'spring') return Math.max(highestCost, DEFAULT_MACHINE_COSTS.spring);
+    if (type === 'tracked-conveyor' || type === 'conveyor') {
+      return Math.max(highestCost, DEFAULT_MACHINE_COSTS['tracked-conveyor']);
+    }
+    return highestCost;
+  }, DEFAULT_MACHINE_COSTS['tracked-conveyor']);
+  const parsedEconomy: ContractEconomy = legacyEconomy
+    ? {
+        budgetLimit: (goal.pieceBudget as number) * legacyUnitCost,
+        machineCosts: { ...DEFAULT_MACHINE_COSTS },
+      }
+    : {
+        ...((economy as Record<string, unknown>).budgetLimit === undefined
+          ? {}
+          : { budgetLimit: (economy as Record<string, unknown>).budgetLimit as number }),
+        machineCosts: {
+          'tracked-conveyor': machineCosts!['tracked-conveyor'] as number,
+          spring: machineCosts!.spring as number,
+        },
+        ...(conveyorSpeedCosts ? { conveyorSpeedCosts } : {}),
+      };
 
   return normalizeContract({
     id: value.id,
@@ -629,11 +719,9 @@ function readRawContractDefinition(
     collectibles,
     goal: {
       deliveries: goal.deliveries,
-      maxLosses: goal.maxLosses,
-      pieceBudget: goal.pieceBudget,
-      ...(goal.timeLimitSeconds === undefined ? {} : { timeLimitSeconds: goal.timeLimitSeconds }),
-      ...(idealTimeSeconds === undefined ? {} : { idealTimeSeconds }),
+      ...(goal.maxLosses === undefined ? {} : { maxLosses: goal.maxLosses }),
     },
+    economy: parsedEconomy,
     spawnIntervalSeconds: value.spawnIntervalSeconds,
     initialCamera: {
       centerX: value.initialCamera.centerX,
@@ -655,8 +743,14 @@ function isMachineState(value: unknown): value is MachineState {
     typeof value.angle === 'number' &&
     Number.isFinite(value.angle) &&
     typeof value.reversed === 'boolean' &&
+    (value.conveyorSpeed === undefined ||
+      CONVEYOR_SPEEDS.includes(value.conveyorSpeed as ConveyorSpeed)) &&
     typeof value.fixed === 'boolean'
   );
+}
+
+function normalizeConveyorSpeed(value: ConveyorSpeed | undefined): ConveyorSpeed {
+  return value && CONVEYOR_SPEEDS.includes(value) ? value : 'normal';
 }
 
 function isObstacleDefinition(value: unknown): value is ObstacleDefinition {
@@ -671,8 +765,7 @@ function isObstacleDefinition(value: unknown): value is ObstacleDefinition {
     Number.isFinite(value.columns) &&
     typeof value.rows === 'number' &&
     Number.isFinite(value.rows) &&
-    (value.angle === undefined ||
-      (typeof value.angle === 'number' && Number.isFinite(value.angle)))
+    (value.angle === undefined || (typeof value.angle === 'number' && Number.isFinite(value.angle)))
   );
 }
 
@@ -741,24 +834,13 @@ function validateInteger(
   }
 }
 
-function validateOptionalPositive(
+function validateOptionalNonNegativeInteger(
   value: number | undefined,
   path: string,
   message: string,
   add: AddIssue,
 ): void {
-  if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-    add('invalid-number', path, message);
-  }
-}
-
-function validateOptionalPositiveInteger(
-  value: number | undefined,
-  path: string,
-  message: string,
-  add: AddIssue,
-): void {
-  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+  if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
     add('invalid-number', path, message);
   }
 }

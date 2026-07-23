@@ -30,7 +30,6 @@ const SPRING_ANGLE = 22;
 const SPRING_COOLDOWN_MS = 360;
 const CONVEYOR_CENTER: Point = { x: 80, y: 52 };
 const SPRING_CENTER: Point = { x: 160, y: 98 };
-const TRACKED_CONVEYOR_ANGULAR_SPEED = 0.336;
 const TRACKED_CONVEYOR_WHEEL_RADIUS = 6.5;
 const TRACKED_CONVEYOR_TRACK_RADIUS = 8.5;
 const TRACKED_CONVEYOR_LINK_WIDTH = 7.5;
@@ -47,7 +46,7 @@ const COLORS = {
   conveyor: 0x40566b,
   blueLight: 0x82a5c5,
   orange: 0xff7629,
-  springGreen: 0x43a96b,
+  springGreen: 0x25c442,
   wood: 0xb47a48,
   white: 0xffffff,
 } as const;
@@ -348,9 +347,6 @@ export class MenuDemoScene extends Phaser.Scene {
       this.matter.body.setPosition(link, pose.center, true);
       this.matter.body.setAngle(link, targetAngle, true);
     }
-    for (const wheel of this.trackedWheels) {
-      this.matter.body.setAngle(wheel, wheel.angle + TRACKED_CONVEYOR_ANGULAR_SPEED, true);
-    }
   }
 
   private updateSpring(): void {
@@ -423,25 +419,25 @@ export class MenuDemoScene extends Phaser.Scene {
   }
 
   private drawTrackedConveyor(graphics: Phaser.GameObjects.Graphics): void {
+    const outlineHeight = TRACKED_CONVEYOR_TRACK_RADIUS * 2 + TRACKED_CONVEYOR_LINK_HEIGHT;
+    const outlineWidth =
+      TRACKED_CONVEYOR_STRAIGHT_LENGTH +
+      TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
+      TRACKED_CONVEYOR_LINK_HEIGHT;
+    graphics.fillStyle(COLORS.graphite, 1);
+    graphics.fillRoundedRect(
+      CONVEYOR_CENTER.x - (outlineWidth - 1) / 2,
+      CONVEYOR_CENTER.y - (outlineHeight - 1) / 2,
+      outlineWidth - 1,
+      outlineHeight - 1,
+      (outlineHeight - 1) / 2,
+    );
+
     for (const wheel of this.trackedWheels) {
       graphics.fillStyle(COLORS.conveyor, 1);
       graphics.fillCircle(wheel.position.x, wheel.position.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
       graphics.lineStyle(1.5, COLORS.blueLight, 0.95);
       graphics.strokeCircle(wheel.position.x, wheel.position.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
-      graphics.lineStyle(1.2, COLORS.white, 0.72);
-      for (const spokeOffset of [0, Math.PI / 2]) {
-        const spokeAngle = wheel.angle + spokeOffset;
-        const dx = Math.cos(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
-        const dy = Math.sin(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
-        graphics.lineBetween(
-          wheel.position.x - dx,
-          wheel.position.y - dy,
-          wheel.position.x + dx,
-          wheel.position.y + dy,
-        );
-      }
-      graphics.fillStyle(COLORS.orange, 1);
-      graphics.fillCircle(wheel.position.x, wheel.position.y, 1.8);
     }
 
     for (let index = 0; index < this.trackedLinks.length; index += 1) {
@@ -453,6 +449,15 @@ export class MenuDemoScene extends Phaser.Scene {
       drawPolygon(graphics, points);
       graphics.lineStyle(0.8, COLORS.graphite, 0.82);
       linePolygon(graphics, points);
+    }
+
+    graphics.fillStyle(COLORS.white, 0.96);
+    for (const wheel of this.trackedWheels) {
+      drawPolygon(graphics, [
+        { x: wheel.position.x + 4, y: wheel.position.y },
+        { x: wheel.position.x - 2.5, y: wheel.position.y - 3.4 },
+        { x: wheel.position.x - 2.5, y: wheel.position.y + 3.4 },
+      ]);
     }
   }
 

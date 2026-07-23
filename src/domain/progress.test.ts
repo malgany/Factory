@@ -2,48 +2,24 @@ import { describe, expect, it } from 'vitest';
 
 import { CONTRACTS, getContract } from './contracts';
 import {
-  applyContractResult,
-  clearContractRecord,
+  clearContractCompletion,
+  completeContract,
   createDefaultProgress,
-  getBestContractResult,
-  getContractResultPosition,
+  isContractCompleted,
   parseProgress,
   reconcileProgress,
   removeContractProgress,
   serializeProgress,
   updateSandbox,
 } from './progress';
-import { createContractResult } from './rules';
-import type { ContractDefinition, ContractResult, MachineState, RunMetrics } from './types';
-
-const metrics = (overrides: Partial<RunMetrics> = {}): RunMetrics => ({
-  delivered: 10,
-  lost: 0,
-  active: 0,
-  elapsedSeconds: 20,
-  placedPieces: 6,
-  collectedStars: 0,
-  ...overrides,
-});
-
-const result = (
-  contract: ContractDefinition,
-  overrides: Partial<ContractResult> = {},
-): ContractResult => ({
-  ...createContractResult(
-    contract,
-    metrics({ delivered: contract.goal.deliveries }),
-    '2026-07-22T10:00:00.000Z',
-  ),
-  ...overrides,
-});
+import type { ContractDefinition, MachineState } from './types';
 
 describe('persistência de progresso', () => {
-  it('começa na versão 3 somente com a fase 1-1 disponível', () => {
+  it('começa na versão 4 somente com a fase 1-1 disponível', () => {
     const progress = createDefaultProgress();
-    expect(progress.version).toBe(3);
+    expect(progress.version).toBe(4);
     expect(progress.unlockedContracts).toEqual(['assembly-line']);
-    expect(progress.rankings).toEqual({});
+    expect(progress.completedContracts).toEqual({});
     expect(progress.sandbox.machines).toEqual([]);
   });
 
@@ -52,136 +28,118 @@ describe('persistência de progresso', () => {
     expect(parseProgress('{quebrado').unlockedContracts).toEqual(['assembly-line']);
   });
 
-  it('preserva desbloqueios conhecidos sem preencher lacunas por ordem', () => {
+  it('reinicia a campanha antiga e preserva configurações e sandbox', () => {
+    const machine: MachineState = {
+      id: 'spring-legacy',
+      type: 'spring',
+      gridX: 4,
+      gridY: 6,
+      angle: 37,
+      reversed: false,
+      fixed: false,
+    };
     const migrated = parseProgress({
-      version: 2,
-      unlockedContracts: ['first-jump', 'inexistente'],
+      version: 3,
+      unlockedContracts: CONTRACTS.map(({ id }) => id),
+      rankings: { 'assembly-line': [{ score: 999_999 }] },
       settings: { muted: true, volume: 9 },
+      sandbox: {
+        machines: [machine],
+        updatedAt: '2026-07-19T00:00:00.000Z',
+      },
     });
 
-    expect(migrated.version).toBe(3);
-    expect(migrated.unlockedContracts).toEqual(['assembly-line', 'first-jump']);
+    expect(migrated.version).toBe(4);
+    expect(migrated.unlockedContracts).toEqual(['assembly-line']);
+    expect(migrated.completedContracts).toEqual({});
     expect(migrated.settings).toEqual({ muted: true, volume: 1 });
+    expect(migrated.sandbox).toEqual({
+      machines: [machine],
+      updatedAt: '2026-07-19T00:00:00.000Z',
+    });
   });
 
-  it('ignora derrotas e desbloqueia somente o slot imediatamente seguinte', () => {
+  it('descarta também conclusões e desbloqueios da versão 2', () => {
+    const migrated = parseProgress({
+      version: 2,
+      unlockedContracts: ['first-jump'],
+      bestResults: { 'assembly-line': { stars: 3 } },
+    });
+
+    expect(migrated.unlockedContracts).toEqual(['assembly-line']);
+    expect(migrated.completedContracts).toEqual({});
+  });
+
+  it('migra esteiras antigas para velocidade normal e preserva o nível escolhido', () => {
+    const legacyConveyor: MachineState = {
+      id: 'legacy-conveyor',
+      type: 'tracked-conveyor',
+      gridX: 8,
+      gridY: 6,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    };
+    const migrated = parseProgress({
+      version: 4,
+      unlockedContracts: ['assembly-line'],
+      completedContracts: {},
+      settings: { muted: false, volume: 0.65 },
+      sandbox: {
+        machines: [legacyConveyor],
+        updatedAt: '2026-07-19T00:00:00.000Z',
+      },
+    });
+    expect(migrated.sandbox.machines[0]?.conveyorSpeed).toBe('normal');
+
+    migrated.sandbox.machines[0]!.conveyorSpeed = 'fast';
+    expect(parseProgress(serializeProgress(migrated)).sandbox.machines[0]?.conveyorSpeed).toBe(
+      'fast',
+    );
+  });
+
+  it('registra a revisão concluída e desbloqueia somente o próximo slot', () => {
     const first = getContract('assembly-line');
     const initial = createDefaultProgress();
-    const defeat = result(first, {
-      metrics: metrics({ delivered: 7, lost: 4 }),
-      score: 0,
-    });
-    expect(applyContractResult(initial, defeat).unlockedContracts).toEqual(['assembly-line']);
-    expect(applyContractResult(initial, defeat).rankings).toEqual({});
 
-    const victory = result(first);
-    const completed = applyContractResult(initial, victory);
+    expect(completeContract(initial, first.id, first.revision + 1).unlockedContracts).toEqual([
+      'assembly-line',
+    ]);
+
+    const completed = completeContract(initial, first.id, first.revision);
     expect(completed.unlockedContracts).toEqual(['assembly-line', 'quality-curve']);
-    expect(completed.rankings['assembly-line']).toHaveLength(1);
+    expect(completed.completedContracts).toEqual({ 'assembly-line': first.revision });
+    expect(isContractCompleted(completed, first)).toBe(true);
     expect(initial.unlockedContracts).toEqual(['assembly-line']);
   });
 
-  it('ordena pelos desempates definidos e limita o ranking a dez tentativas', () => {
-    const contract = getContract('assembly-line');
-    let progress = createDefaultProgress();
-    const attempts = Array.from({ length: 12 }, (_, index) =>
-      result(contract, {
-        score: index < 2 ? 200_000 : 100_000 + index,
-        completedAt: `2026-07-22T10:${String(index).padStart(2, '0')}:00.000Z`,
-        metrics: metrics({
-          collectedStars: index === 0 ? 1 : 2,
-          lost: index === 1 ? 1 : 0,
-          placedPieces: 6,
-          elapsedSeconds: 20,
-        }),
-      }),
-    );
-    for (const attempt of attempts) progress = applyContractResult(progress, attempt);
-
-    const ranking = progress.rankings[contract.id]!;
-    expect(ranking).toHaveLength(10);
-    expect(ranking[0]).toMatchObject({ score: 200_000, completedAt: attempts[1]!.completedAt });
-    expect(getBestContractResult(progress, contract.id)).toEqual(ranking[0]);
-    expect(getContractResultPosition(progress, ranking[0]!)).toBe(1);
-    expect(getContractResultPosition(progress, attempts[0]!)).toBe(2);
-  });
-
-  it('aplica todos os desempates antes da data de conclusão', () => {
-    const contract = getContract('assembly-line');
-    const base = result(contract, { score: 150_000 });
-    const candidates = [
-      { ...base, completedAt: '2026-07-22T10:05:00.000Z' },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 1 }),
-        completedAt: '2026-07-22T10:04:00.000Z',
+  it('reconcilia somente IDs e revisões atuais sem preencher lacunas', () => {
+    const first = getContract('assembly-line');
+    const third = getContract('first-jump');
+    const reconciled = parseProgress({
+      version: 4,
+      unlockedContracts: ['first-jump', 'inexistente'],
+      completedContracts: {
+        [first.id]: first.revision,
+        [third.id]: third.revision + 1,
+        inexistente: 1,
       },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 2, lost: 1 }),
-        completedAt: '2026-07-22T10:03:00.000Z',
-      },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 2, lost: 0, placedPieces: 7 }),
-        completedAt: '2026-07-22T10:02:00.000Z',
-      },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 2, lost: 0, placedPieces: 6, elapsedSeconds: 21 }),
-        completedAt: '2026-07-22T10:01:00.000Z',
-      },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 2, lost: 0, placedPieces: 6, elapsedSeconds: 20 }),
-        completedAt: '2026-07-22T10:06:00.000Z',
-      },
-      {
-        ...base,
-        metrics: metrics({ collectedStars: 2, lost: 0, placedPieces: 6, elapsedSeconds: 20 }),
-        completedAt: '2026-07-22T10:00:00.000Z',
-      },
-    ];
-    let progress = createDefaultProgress();
-    for (const candidate of candidates) progress = applyContractResult(progress, candidate);
-    expect(progress.rankings[contract.id]?.map(({ completedAt }) => completedAt)).toEqual([
-      '2026-07-22T10:00:00.000Z',
-      '2026-07-22T10:06:00.000Z',
-      '2026-07-22T10:01:00.000Z',
-      '2026-07-22T10:02:00.000Z',
-      '2026-07-22T10:03:00.000Z',
-      '2026-07-22T10:04:00.000Z',
-      '2026-07-22T10:05:00.000Z',
-    ]);
-  });
-
-  it('migra um melhor resultado v2 quando as métricas formam uma vitória', () => {
-    const migrated = parseProgress({
-      version: 2,
-      unlockedContracts: ['assembly-line'],
-      bestResults: {
-        'assembly-line': {
-          contractId: 'assembly-line',
-          stars: 3,
-          metrics: metrics({ collectedStars: undefined }),
-        },
-      },
+      settings: { muted: false, volume: 0.5 },
     });
 
-    const migratedResult = migrated.rankings['assembly-line']?.[0];
-    expect(migratedResult).toMatchObject({
-      contractId: 'assembly-line',
-      contractRevision: getContract('assembly-line').revision,
-      completedAt: '1970-01-01T00:00:00.000Z',
-      metrics: { collectedStars: 0 },
-    });
-    expect(migratedResult?.score).toBeGreaterThan(0);
+    expect(reconciled.unlockedContracts).toEqual(['assembly-line', 'quality-curve', 'first-jump']);
+    expect(reconciled.completedContracts).toEqual({ [first.id]: first.revision });
   });
 
   it('libera fase cadastrada depois somente quando ela ocupa o próximo slot', () => {
     const third = getContract('first-jump');
     const firstThree = CONTRACTS.filter(({ world, stage }) => world === 1 && stage <= 3);
-    const completedThird = applyContractResult(createDefaultProgress(), result(third), firstThree);
+    const completedThird = completeContract(
+      createDefaultProgress(firstThree),
+      third.id,
+      third.revision,
+      firstThree,
+    );
     const fourth: ContractDefinition = {
       ...structuredClone(CONTRACTS[0]!),
       id: 'custom-fourth',
@@ -205,23 +163,23 @@ describe('persistência de progresso', () => {
     ).toContain(fourth.id);
   });
 
-  it('limpa ranking por revisão sem revogar fases já desbloqueadas', () => {
+  it('limpa conclusão por revisão sem revogar fases já desbloqueadas', () => {
     const first = getContract('assembly-line');
-    let progress = applyContractResult(createDefaultProgress(), result(first));
-    progress = clearContractRecord(progress, first.id);
-    expect(progress.rankings[first.id]).toBeUndefined();
+    let progress = completeContract(createDefaultProgress(), first.id, first.revision);
+    progress = clearContractCompletion(progress, first.id);
+    expect(progress.completedContracts[first.id]).toBeUndefined();
     expect(progress.unlockedContracts).toContain('quality-curve');
 
-    progress = applyContractResult(progress, result(first));
+    progress = completeContract(progress, first.id, first.revision);
     const edited = { ...structuredClone(first), revision: first.revision + 1 };
     progress = reconcileProgress(progress, [edited, ...CONTRACTS.slice(1)]);
-    expect(progress.rankings[first.id]).toBeUndefined();
+    expect(progress.completedContracts[first.id]).toBeUndefined();
     expect(progress.unlockedContracts).toContain('quality-curve');
   });
 
   it('remove progresso da fase excluída e salva o layout do sandbox', () => {
     const first = getContract('assembly-line');
-    let progress = applyContractResult(createDefaultProgress(), result(first));
+    let progress = completeContract(createDefaultProgress(), first.id, first.revision);
     progress = removeContractProgress(progress, 'quality-curve', [CONTRACTS[0]!, CONTRACTS[2]!]);
     expect(progress.unlockedContracts).not.toContain('quality-curve');
 

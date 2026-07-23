@@ -9,6 +9,7 @@ interface MachineDebugState {
   gridY: number;
   angle: number;
   reversed: boolean;
+  conveyorSpeed?: 'slow' | 'normal' | 'fast';
   fixed: boolean;
 }
 
@@ -17,7 +18,20 @@ interface FactoryDebugState {
   status: 'build' | 'running' | 'paused' | 'success' | 'failure';
   gridEnabled: boolean;
   simulationSpeed: number;
-  metrics: { elapsedSeconds: number };
+  metrics: {
+    delivered: number;
+    collectedStars: number;
+    spent: number;
+  };
+  economy?: {
+    spent: number;
+    budgetLimit?: number;
+    hardLimit?: number;
+    machineCosts: {
+      'tracked-conveyor': number;
+      spring: number;
+    };
+  };
   selection: { machineIds: string[]; obstacleIds: string[]; count: number };
   machines: MachineDebugState[];
   selectedMachine?: MachineDebugState;
@@ -41,6 +55,7 @@ interface FactoryDebugState {
 type DebugWindow = Window & {
   __FACTORY_DEBUG__?: {
     getSnapshot(): Omit<FactoryDebugState, 'machines' | 'camera' | 'worldBounds'>;
+    getSimulationSeconds(): number;
     getMachines(): MachineDebugState[];
     getBoxes(): Array<{ x: number; y: number; velocityX: number; velocityY: number }>;
     getCamera(): FactoryDebugState['camera'];
@@ -54,9 +69,11 @@ type DebugWindow = Window & {
     selectMachine(id: string): boolean;
     selectArea(minX: number, minY: number, maxX: number, maxY: number): number;
     reverseSelected(): boolean;
+    deleteSelected(): boolean;
     copySelected(): boolean;
     cutSelected(): boolean;
     setMachines(machines: MachineDebugState[]): void;
+    pause(): void;
     advance(seconds: number): FactoryDebugState;
     completeContract(): void;
   };
@@ -145,6 +162,9 @@ test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
   await startSandbox(page);
 
   const before = await debugState(page);
+  await expect(
+    page.locator('[data-tool="spring"] .machine-thumbnail-spring path'),
+  ).toHaveAttribute('stroke', '#25c442');
   await page.locator('[data-tool="spring"]').click();
   const bounds = await page.locator('#game-container canvas').boundingBox();
   if (!bounds) throw new Error('Canvas has no bounding box');
@@ -178,9 +198,39 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
   });
 
   const reverse = page.locator('[data-action="reverse"]');
+  const conveyorSpeed = page.locator('#conveyor-speed-control');
   await expect(reverse).not.toHaveClass(/is-hidden/);
+  await expect(conveyorSpeed).toBeVisible();
+  await expect(page.locator('#selection-dock #conveyor-speed-control')).toHaveCount(0);
+  await expect(conveyorSpeed).toHaveAttribute('data-placement', 'bottom');
+  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
   await expect(page.locator('[data-action="mirror-horizontal"]')).toHaveCount(0);
   await expect(page.locator('[data-action="mirror-vertical"]')).toHaveCount(0);
+
+  for (const [label, expected] of [
+    ['Velocidade 1', 'slow'],
+    ['Velocidade 2', 'normal'],
+    ['Velocidade 3', 'fast'],
+  ] as const) {
+    const option = page.getByRole('radio', { name: label });
+    await option.click();
+    await expect(option).toHaveAttribute('aria-checked', 'true');
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          (id) =>
+            (window as DebugWindow).__FACTORY_DEBUG__
+              ?.getMachines()
+              .find((candidate) => candidate.id === id)?.conveyorSpeed,
+          conveyorId,
+        ),
+      )
+      .toBe(expected);
+    await expect(reverse).not.toHaveClass(/is-hidden/);
+  }
 
   await reverse.click();
   await expect
@@ -196,9 +246,22 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('tracked-conveyor', 8, 14, 0)) {
+      throw new Error('Could not place conveyor above the action dock');
+    }
+  });
+  await expect(conveyorSpeed).toHaveAttribute('data-placement', 'top');
+  const speedBounds = await conveyorSpeed.boundingBox();
+  const selectionDockBounds = await page.locator('#selection-dock').boundingBox();
+  if (!speedBounds || !selectionDockBounds) throw new Error('Selection controls have no bounds');
+  expect(speedBounds.y + speedBounds.height).toBeLessThanOrEqual(selectionDockBounds.y - 8);
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug?.placeMachine('spring', 12, 6, 0)) throw new Error('Could not place spring');
   });
   await expect(reverse).toHaveClass(/is-hidden/);
+  await expect(conveyorSpeed).not.toBeVisible();
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
@@ -208,6 +271,76 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
     }
   });
   await expect(reverse).toHaveClass(/is-hidden/);
+});
+
+test('novas esteiras herdam a última velocidade somente dentro da fase atual', async ({
+  page,
+}) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('tracked-conveyor', 6, 6, 0)) {
+      throw new Error('Could not place the first conveyor');
+    }
+  });
+  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+
+  await page.getByRole('radio', { name: 'Velocidade 3' }).click();
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('tracked-conveyor', 10, 6, 0)) {
+      throw new Error('Could not place the fast conveyor');
+    }
+  });
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window as DebugWindow).__FACTORY_DEBUG__
+            ?.getMachines()
+            .find(({ gridX }) => gridX === 10)?.conveyorSpeed,
+      ),
+    )
+    .toBe('fast');
+
+  await page.getByRole('radio', { name: 'Velocidade 1' }).click();
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('tracked-conveyor', 14, 6, 0)) {
+      throw new Error('Could not place the slow conveyor');
+    }
+  });
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window as DebugWindow).__FACTORY_DEBUG__
+            ?.getMachines()
+            .find(({ gridX }) => gridX === 14)?.conveyorSpeed,
+      ),
+    )
+    .toBe('slow');
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.startMode('sandbox');
+    if (!debug.placeMachine('tracked-conveyor', 6, 6, 0)) {
+      throw new Error('Could not place the conveyor in the new phase');
+    }
+  });
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () => (window as DebugWindow).__FACTORY_DEBUG__?.getMachines()[0]?.conveyorSpeed,
+      ),
+    )
+    .toBe('normal');
 });
 
 test('bloqueia a interface até a cena do Phaser ficar pronta', async ({ page }) => {
@@ -550,6 +683,11 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
   await expect(stageMarkers.locator('strong')).toHaveText(['1-1']);
   await expect(playPanel.locator('.campaign-legacy-content')).toBeHidden();
   await expect(playPanel.locator('.campaign-map-back-button')).toBeFocused();
+  await stageMarkers.first().click();
+  const campaignPlay = playPanel.locator('[data-action="campaign-play"]');
+  await expect(campaignPlay).toHaveText('Jogar');
+  await expect(campaignPlay).toHaveClass(/main-menu-action/);
+  await expect(campaignPlay.locator('svg')).toHaveCount(0);
 
   const playCamera = await page.locator('.menu-world').evaluate((world) => {
     const matrix = new DOMMatrix(getComputedStyle(world).transform);
@@ -593,7 +731,6 @@ test('opções alternam tela cheia, modo janela e informam falhas', async ({ pag
   const options = page.locator('[data-menu-panel="options"]');
   const fullscreenButton = options.locator('[data-action="fullscreen"]');
   const optionsTitle = options.locator('[data-fullscreen-title]');
-  const pauseTitle = page.locator('#pause-modal [data-fullscreen-title]');
 
   await expect(optionsTitle).toHaveText('Tela cheia');
   await expect(fullscreenButton).toHaveAttribute('aria-label', 'Entrar em tela cheia');
@@ -605,7 +742,6 @@ test('opções alternam tela cheia, modo janela e informam falhas', async ({ pag
     document.dispatchEvent(new Event('fullscreenchange'));
   });
   await expect(optionsTitle).toHaveText('Modo janela');
-  await expect(pauseTitle).toHaveText('Modo janela');
   await expect(fullscreenButton).toHaveAttribute('aria-label', 'Sair da tela cheia');
   await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'true');
   await expect(options.locator('[data-fullscreen-state]')).toHaveText('Restaurar');
@@ -618,7 +754,6 @@ test('opções alternam tela cheia, modo janela e informam falhas', async ({ pag
     document.dispatchEvent(new Event('fullscreenchange'));
   });
   await expect(optionsTitle).toHaveText('Tela cheia');
-  await expect(pauseTitle).toHaveText('Tela cheia');
   await expect(fullscreenButton).toHaveAttribute('aria-pressed', 'false');
 
   await page.evaluate(() => {
@@ -1001,8 +1136,9 @@ test('cena prepara e avança 40 esteiras físicas sem travar', async ({ page }) 
     debug.advance(1 / 60);
     const initializationMilliseconds = performance.now() - initializationStartedAt;
     const simulationStartedAt = performance.now();
-    const snapshot = debug.advance(0.25);
+    debug.advance(0.25);
     const simulationMilliseconds = performance.now() - simulationStartedAt;
+    const simulationSeconds = debug.getSimulationSeconds();
     const runningFrames = await measureFrames(90);
     return {
       baselineFrames,
@@ -1010,14 +1146,14 @@ test('cena prepara e avança 40 esteiras físicas sem travar', async ({ page }) 
       initializationMilliseconds,
       simulationMilliseconds,
       machineCount: debug.getMachines().length,
-      elapsedSeconds: snapshot.metrics.elapsedSeconds,
+      simulationSeconds,
       meanFrameMilliseconds: runningFrames.mean,
       p95FrameMilliseconds: runningFrames.p95,
     };
   });
 
   expect(benchmark.machineCount).toBe(40);
-  expect(benchmark.elapsedSeconds).toBeCloseTo(16 / 60, 4);
+  expect(benchmark.simulationSeconds).toBeCloseTo(16 / 60, 4);
   expect(benchmark.buildMilliseconds).toBeLessThan(2_500);
   expect(benchmark.initializationMilliseconds).toBeLessThan(2_500);
   expect(benchmark.simulationMilliseconds).toBeLessThan(2_500);
@@ -1361,6 +1497,29 @@ test('controle central oferece sete velocidades reais de simulação', async ({ 
   const speed = page.locator('[data-speed]');
   await expect(speed).toHaveAttribute('aria-valuetext', '1×');
 
+  for (let index = 0; index < 7; index += 1) {
+    await speed.evaluate((input, value) => {
+      (input as HTMLInputElement).value = String(value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, index);
+
+    const alignment = await page.locator('.speed-track-shell').evaluate((shell, value) => {
+      const shellBounds = shell.getBoundingClientRect();
+      const readoutBounds = shell
+        .querySelector<HTMLElement>('[data-speed-label]')!
+        .getBoundingClientRect();
+      const thumbWidth = 44;
+      const expectedCenter =
+        shellBounds.left + thumbWidth / 2 + (shellBounds.width - thumbWidth) * (value / 6);
+      return {
+        actualCenter: readoutBounds.left + readoutBounds.width / 2,
+        expectedCenter,
+      };
+    }, index);
+
+    expect(Math.abs(alignment.actualCenter - alignment.expectedCenter)).toBeLessThanOrEqual(1);
+  }
+
   await speed.evaluate((input) => {
     (input as HTMLInputElement).value = '6';
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1371,7 +1530,7 @@ test('controle central oferece sete velocidades reais de simulação', async ({ 
   await page.locator('[data-action="run"]').click();
   await page.waitForTimeout(400);
   const fastElapsed = await page.evaluate(
-    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
   );
   expect(fastElapsed).toBeGreaterThan(0.75);
   await page.locator('[data-action="run"]').click();
@@ -1387,7 +1546,7 @@ test('controle central oferece sete velocidades reais de simulação', async ({ 
   await page.locator('[data-action="run"]').click();
   await page.waitForTimeout(400);
   const slowElapsed = await page.evaluate(
-    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSnapshot().metrics.elapsedSeconds ?? 0,
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
   );
   expect(slowElapsed).toBeLessThan(0.2);
   await page.locator('[data-action="run"]').click();
@@ -1417,7 +1576,7 @@ test('play e stop continuam confiáveis durante atualizações da interface', as
   for (let attempt = 0; attempt < 5; attempt += 1) {
     await heldClick();
     await expect.poll(async () => (await debugState(page)).status).toBe('running');
-    await expect(control).toHaveAttribute('aria-label', 'Reiniciar simulação');
+    await expect(control).toHaveAttribute('aria-label', 'Parar simulação');
 
     await heldClick();
     await expect.poll(async () => (await debugState(page)).status).toBe('build');
@@ -1425,38 +1584,399 @@ test('play e stop continuam confiáveis durante atualizações da interface', as
   }
 });
 
-test('menu de pausa interrompe a linha e oferece salvar e configurações', async ({ page }) => {
+test('pause preserva a simulação e retoma sem substituir o stop', async ({ page }) => {
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  const runControl = page.locator('[data-action="run"]');
+  const pauseControl = page.locator('[data-action="pause-toggle"]');
+  await expect(pauseControl).toBeHidden();
+  const playColors = await runControl.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { background: style.backgroundColor, foreground: style.color };
+  });
+  expect(playColors.foreground).toBe('rgb(255, 255, 255)');
+
+  await runControl.click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+  await expect(runControl).toHaveAttribute('aria-label', 'Parar simulação');
+  await expect(pauseControl).toBeVisible();
+  await expect(pauseControl).toHaveAttribute('aria-label', 'Pausar simulação');
+
+  await pauseControl.click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('paused');
+  await expect(runControl).toHaveAttribute('aria-label', 'Parar simulação');
+  await expect(pauseControl).toHaveAttribute('aria-label', 'Retomar simulação');
+  await expect(pauseControl).toHaveClass(/is-resume/);
+  await page.mouse.move(0, 0);
+  const resumeColors = await pauseControl.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { background: style.backgroundColor, foreground: style.color };
+  });
+  expect(resumeColors).toEqual(playColors);
+  await pauseControl.hover();
+  await expect
+    .poll(() => pauseControl.evaluate((button) => getComputedStyle(button).backgroundColor))
+    .toBe('rgb(52, 123, 97)');
+  await expect
+    .poll(() => pauseControl.evaluate((button) => getComputedStyle(button).color))
+    .toBe('rgb(255, 255, 255)');
+  const pausedAt = await page.evaluate(
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
+  );
+  await page.waitForTimeout(250);
+  const stillPausedAt = await page.evaluate(
+    () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
+  );
+  expect(stillPausedAt - pausedAt).toBeLessThan(0.03);
+
+  await pauseControl.click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+  await expect(pauseControl).toHaveAttribute('aria-label', 'Pausar simulação');
+
+  await runControl.click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('build');
+  await expect(runControl).toHaveAttribute('aria-label', 'Iniciar simulação');
+  await expect(pauseControl).toBeHidden();
+});
+
+test('menu de pausa oferece som, opções e salvamento automático ao sair', async ({ page }) => {
   await openApp(page);
   await openPlayMenu(page);
   await page.locator('#contract-list .contract-card').first().click();
 
   const control = page.locator('[data-action="run"]');
+  const pauseMenuButton = page.locator('[data-action="pause-menu"]');
+  await expect(pauseMenuButton).toHaveCSS('width', '72px');
+  await expect(pauseMenuButton).toHaveCSS('height', '72px');
+  await expect(pauseMenuButton).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(pauseMenuButton.locator('svg')).toHaveCSS('width', '52px');
+  await expect(pauseMenuButton.locator('svg path')).toHaveAttribute('d', 'M20 12H4m7-7-7 7 7 7');
   await control.click();
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
-  await expect(control).toHaveAttribute('aria-label', 'Reiniciar simulação');
+  await expect(control).toHaveAttribute('aria-label', 'Parar simulação');
 
   await page.locator('[data-action="pause-menu"]').click();
   await expect(page.locator('#pause-modal')).toBeVisible();
-  await expect(page.locator('#pause-title')).toHaveText('Pausado');
   await expect.poll(async () => (await debugState(page)).status).toBe('paused');
 
-  const sound = page.locator('#pause-modal [data-action="mute"]');
-  await expect(page.locator('#pause-modal [data-action="fullscreen"]')).toBeVisible();
+  const pause = page.locator('#pause-modal');
+  const sound = pause.locator('[data-action="mute"]');
+  const actions = pause.locator('.pause-menu-actions button');
+  await expect(pause).not.toContainText('MENU DA SIMULAÇÃO');
+  await expect(pause).not.toContainText('Pausado');
+  await expect(pause.locator('#pause-title')).toHaveCount(0);
+  await expect(pause.locator('[data-action="save-progress"]')).toHaveCount(0);
+  await expect(pause.locator('[data-action="fullscreen"]')).toHaveCount(1);
+  await expect(actions).toHaveCount(4);
+  await expect(actions.nth(0)).toHaveText('Continuar');
+  await expect(actions.nth(1)).toHaveText('Opções');
+  await expect(actions.nth(2)).toHaveText('Sair para a campanha');
+  await expect(actions.nth(3)).toHaveText('Menu principal');
+  await expect(actions.nth(0)).toBeFocused();
+  await expect(actions.nth(0)).toHaveClass(/main-menu-action/);
+  await expect(pause.locator('.pause-card')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await expect(pause.locator('.pause-card')).toHaveCSS('border-top-width', '0px');
+
+  await actions.nth(0).click();
+  await expect(pause).toBeHidden();
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+  await page.locator('[data-action="pause-menu"]').click();
+  await expect(pause).toBeVisible();
+  await expect.poll(async () => (await debugState(page)).status).toBe('paused');
+
   await expect(sound).toHaveAttribute('aria-label', 'Silenciar');
   await sound.click();
   await expect(sound).toHaveAttribute('aria-label', 'Ativar som');
-  await page.locator('[data-action="save-progress"]').click();
-  const toast = page.locator('#toast');
-  await expect(toast).toHaveText('Jogo salvo.');
-  await expect(toast).toBeVisible();
-  const layerOrder = await page.evaluate(() => ({
-    toast: Number(getComputedStyle(document.querySelector('#toast')!).zIndex),
-    modal: Number(getComputedStyle(document.querySelector('#pause-modal')!).zIndex),
-  }));
-  expect(layerOrder.toast).toBeGreaterThan(layerOrder.modal);
-  await page.locator('[data-action="menu"]').click();
-  await expect(page.locator('#pause-modal')).toBeHidden();
-  await expect(page.locator('#menu-screen')).not.toHaveClass(/is-hidden/);
+  await page.evaluate((key) => localStorage.removeItem(key), STORAGE_KEY);
+
+  await actions.nth(1).click();
+  await expect(pause).toBeHidden();
+  await waitForMenuView(page, 'options');
+  await expect
+    .poll(() => page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY))
+    .not.toBeNull();
+});
+
+test('menu de pausa navega diretamente para campanha e menu principal', async ({ page }) => {
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  await page.locator('[data-action="pause-menu"]').click();
+  await page.locator('#pause-modal [data-action="pause-campaign"]').click();
+  await waitForMenuView(page, 'play');
+  await expect(page.locator('[data-menu-panel="play"]')).toHaveAttribute('aria-hidden', 'false');
+
+  await page.locator('#contract-list .contract-card').first().click();
+  await page.locator('[data-action="pause-menu"]').click();
+  await page.locator('#pause-modal [data-action="pause-home"]').click();
+  await waitForMenuView(page, 'home');
+  await expect(page.locator('[data-action="menu-play"]')).toBeFocused();
+});
+
+test('exibe o orçamento e só conclui a meta dentro do limite nominal', async ({ page }) => {
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  const meter = page.locator('#budget-meter');
+  const track = meter.locator('[data-budget-track]');
+  await expect(meter).not.toHaveClass(/is-hidden/);
+  await expect(meter.locator('[data-budget-spent]')).toHaveText('$0');
+  await expect(meter.locator('[data-budget-limit]')).toHaveText('$10,000');
+  await expect(track).toHaveAttribute('aria-valuenow', '0');
+  await expect(track).toHaveAttribute('aria-valuemax', '20000');
+  await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
+    'aria-label',
+    /Custo \$2,500/,
+  );
+  await expect(page.locator('[data-metric="time"], [data-result="time"]')).toHaveCount(0);
+
+  const lastMachineId = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    const positions = [
+      [18, 4],
+      [21, 4],
+      [24, 4],
+      [27, 4],
+      [18, 8],
+    ] as const;
+    for (const [gridX, gridY] of positions) {
+      if (!debug.placeMachine('tracked-conveyor', gridX, gridY)) {
+        throw new Error(`Could not place conveyor at ${gridX}, ${gridY}`);
+      }
+    }
+    const placed = debug.getMachines().filter(({ fixed }) => !fixed);
+    return placed.at(-1)?.id;
+  });
+  expect(lastMachineId).toBeTruthy();
+
+  await expect(meter.locator('[data-budget-spent]')).toHaveText('$12,500');
+  await expect(meter).toHaveClass(/is-over-budget/);
+  await expect(track).toHaveAttribute('aria-valuenow', '12500');
+  await expect(track).toHaveAttribute('aria-valuetext', '$12,500 gastos de $10,000 de orçamento');
+
+  await page.evaluate((machineId) => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !machineId || !debug.selectMachine(machineId)) {
+      throw new Error('Could not select the conveyor to adjust its cost');
+    }
+  }, lastMachineId);
+  for (const [label, expectedSpent] of [
+    ['Velocidade 1', '$12,000'],
+    ['Velocidade 3', '$13,000'],
+    ['Velocidade 2', '$12,500'],
+  ] as const) {
+    await page.getByRole('radio', { name: label }).click();
+    await expect(meter.locator('[data-budget-spent]')).toHaveText(expectedSpent);
+  }
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.completeContract();
+  });
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
+  await expect(page.locator('#result-modal')).toHaveClass(/is-hidden/);
+  await expect(page.locator('#toast')).toContainText('o orçamento foi ultrapassado');
+
+  await page.evaluate((machineId) => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !machineId) throw new Error('Factory debug API is unavailable');
+    debug.pause();
+    if (!debug.selectMachine(machineId) || !debug.deleteSelected()) {
+      throw new Error('Could not refund the last conveyor');
+    }
+    debug.advance(1 / 60);
+  }, lastMachineId);
+
+  await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('.result-card')).toHaveClass(/is-success/);
+  await expect(page.locator('#result-kicker')).toHaveText('FASE 1-1');
+  await expect(page.locator('#result-title')).toHaveText('Contrato concluído');
+  await expect(page.locator('.result-status-badge')).toHaveCount(0);
+  await expect(page.locator('[data-result="delivered"] strong')).toHaveText('8 / 8');
+  await expect(page.locator('[data-result="collected-stars"] strong')).toHaveText('1 / 1');
+  await expect(page.locator('[data-result="budget"] strong')).toHaveText('$10,000 / $10,000');
+  await expect(page.locator('[data-result-budget-percent]')).toHaveText('100%');
+  await expect(page.locator('[data-result-budget-track]')).toHaveAttribute(
+    'aria-valuenow',
+    '100',
+  );
+  const resultMetricStyles = await page.evaluate(() => {
+    const coin = document.querySelector<HTMLElement>(
+      '.result-metric-budget .result-metric-icon',
+    )!;
+    const budgetFill = document.querySelector<HTMLElement>('[data-result-budget-fill]')!;
+    const value = document.querySelector<HTMLElement>('[data-result="delivered"] strong')!;
+    return {
+      coin: getComputedStyle(coin).backgroundColor,
+      budgetFill: getComputedStyle(budgetFill).backgroundColor,
+      valueColor: getComputedStyle(value).color,
+      valueWeight: Number(getComputedStyle(value).fontWeight),
+    };
+  });
+  expect(resultMetricStyles.coin).toBe('rgb(37, 196, 66)');
+  expect(resultMetricStyles.budgetFill).toBe('rgb(37, 196, 66)');
+  expect(resultMetricStyles.valueColor).toBe('rgb(52, 77, 99)');
+  expect(resultMetricStyles.valueWeight).toBeLessThanOrEqual(760);
+  const resultActions = page.locator('.result-actions .main-menu-action');
+  await expect(resultActions).toHaveCount(3);
+  await expect(resultActions).toHaveText(['Menu', 'Repetir', 'Próximo contrato']);
+  await expect(page.locator('#result-summary')).toContainText('dentro do orçamento');
+  const resultLayout = await page.evaluate(() => {
+    const card = document.querySelector<HTMLElement>('.result-card')!;
+    const metricTops = [...document.querySelectorAll<HTMLElement>('.result-metric:not(.is-hidden)')].map(
+      (metric) => metric.getBoundingClientRect().top,
+    );
+    const actionTops = [...document.querySelectorAll<HTMLElement>('.result-actions button')].map(
+      (action) => action.getBoundingClientRect().top,
+    );
+    return {
+      cardBackground: getComputedStyle(card).backgroundColor,
+      metricTopSpread: Math.max(...metricTops) - Math.min(...metricTops),
+      actionTops,
+    };
+  });
+  expect(resultLayout.cardBackground).toBe('rgba(0, 0, 0, 0)');
+  expect(resultLayout.metricTopSpread).toBeLessThan(2);
+  expect(resultLayout.actionTops[1]).toBeGreaterThan(resultLayout.actionTops[0]!);
+  expect(resultLayout.actionTops[2]).toBeGreaterThan(resultLayout.actionTops[1]!);
+});
+
+test('trava novas máquinas no dobro do orçamento e libera verba ao excluir', async ({ page }) => {
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  const placement = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    const positions = [
+      [18, 4],
+      [21, 4],
+      [24, 4],
+      [27, 4],
+      [18, 8],
+      [21, 8],
+      [24, 8],
+      [27, 8],
+    ] as const;
+    const accepted = positions.map(([gridX, gridY]) =>
+      debug.placeMachine('tracked-conveyor', gridX, gridY),
+    );
+    const lastId = debug
+      .getMachines()
+      .filter(({ fixed }) => !fixed)
+      .at(-1)?.id;
+    const rejectedAtDouble = debug.placeMachine('tracked-conveyor', 30, 8);
+    return { accepted, lastId, rejectedAtDouble, snapshot: debug.getSnapshot() };
+  });
+
+  expect(placement.accepted).toEqual(Array(8).fill(true));
+  expect(placement.rejectedAtDouble).toBe(false);
+  expect(placement.snapshot.metrics.spent).toBe(20_000);
+  expect(placement.snapshot.economy).toMatchObject({
+    spent: 20_000,
+    budgetLimit: 10_000,
+    hardLimit: 20_000,
+  });
+  await expect(page.locator('#budget-meter')).toHaveClass(/is-at-hard-limit/);
+  await expect(page.locator('[data-budget-spent]')).toHaveText('$20,000');
+  await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  );
+  await page.evaluate((machineId) => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !machineId || !debug.selectMachine(machineId)) {
+      throw new Error('Could not select a conveyor at the hard limit');
+    }
+  }, placement.lastId);
+  await page.getByRole('radio', { name: 'Velocidade 3' }).click();
+  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(20_000);
+  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+
+  const replacementAccepted = await page.evaluate((machineId) => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !machineId) throw new Error('Factory debug API is unavailable');
+    if (!debug.selectMachine(machineId) || !debug.deleteSelected()) {
+      throw new Error('Could not delete a conveyor at the hard limit');
+    }
+    return debug.placeMachine('tracked-conveyor', 30, 8);
+  }, placement.lastId);
+
+  expect(replacementAccepted).toBe(true);
+  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(20_000);
+});
+
+test('oculta orçamento sem limite e omite estrelas e perdas do HUD', async ({ page }) => {
+  await page.route('**/data/contracts.json', async (route) => {
+    const response = await route.fetch();
+    const catalog = (await response.json()) as {
+      contracts: Array<{
+        id: string;
+        goal: { maxLosses?: number };
+        economy: { budgetLimit?: number };
+      }>;
+    };
+    const contract = catalog.contracts.find(({ id }) => id === 'assembly-line');
+    if (!contract) throw new Error('Assembly line contract was not found');
+    delete contract.goal.maxLosses;
+    delete contract.economy.budgetLimit;
+    await route.fulfill({ response, json: catalog });
+  });
+
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  await expect(page.locator('#budget-meter')).toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-metric="stars"]')).toHaveCount(0);
+  await expect(page.locator('[data-metric="losses"]')).toHaveCount(0);
+
+  const placement = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    const positions = [
+      [18, 4],
+      [21, 4],
+      [24, 4],
+      [27, 4],
+      [18, 8],
+      [21, 8],
+      [24, 8],
+      [27, 8],
+      [18, 12],
+      [21, 12],
+      [24, 12],
+      [27, 12],
+    ] as const;
+    const accepted = positions.map(([gridX, gridY]) =>
+      debug.placeMachine('tracked-conveyor', gridX, gridY),
+    );
+    return { accepted, snapshot: debug.getSnapshot() };
+  });
+
+  expect(placement.accepted).toEqual(Array(12).fill(true));
+  expect(placement.snapshot.metrics.spent).toBe(30_000);
+  expect(placement.snapshot.economy).toEqual({
+    spent: 30_000,
+    machineCosts: {
+      'tracked-conveyor': 2_500,
+      spring: 5_000,
+    },
+  });
+  await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
+    'aria-disabled',
+    'false',
+  );
 });
 
 test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ page }) => {
@@ -1497,7 +2017,13 @@ test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ pa
 
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
   await expect.poll(async () => (await debugState(page)).selectedMachine).toBeUndefined();
-  await expect.poll(async () => (await debugState(page)).metrics.elapsedSeconds).toBeGreaterThan(0);
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
 });
 
 test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
@@ -1575,7 +2101,7 @@ test('repetir retorna à construção sem iniciar outra simulação', async ({ p
   );
 });
 
-test('conclui os três primeiros contratos, registra o ranking e restaura o progresso', async ({ page }) => {
+test('conclui os três primeiros contratos e restaura o progresso v4', async ({ page }) => {
   test.setTimeout(45_000);
   await openApp(page);
   await openPlayMenu(page);
@@ -1596,9 +2122,9 @@ test('conclui os três primeiros contratos, registra o ranking e restaura o prog
       debug.completeContract();
     });
     await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
-    await expect(page.locator('[data-result-score]')).not.toHaveText('0');
-    await expect(page.locator('[data-result-ranking]')).toHaveText('1º lugar no Top 10 local');
-    await expect(page.locator('#score-breakdown')).not.toHaveClass(/is-hidden/);
+    await expect(page.locator('[data-result="budget"] strong')).toHaveText(
+      `$0 / $${[10_000, 15_000, 20_000][contractIndex]!.toLocaleString('en-US')}`,
+    );
 
     if (contractIndex < 2) {
       await page.locator('[data-action="next"]').click();
@@ -1616,35 +2142,18 @@ test('conclui os três primeiros contratos, registra o ranking e restaura o prog
   const storedProgress = JSON.parse(stored!) as {
     version: number;
     unlockedContracts: string[];
-    rankings: Record<
-      string,
-      Array<{
-        contractId: string;
-        contractRevision: number;
-        score: number;
-        metrics: { collectedStars: number };
-      }>
-    >;
+    completedContracts: Record<string, number>;
   };
-  expect(storedProgress.version).toBe(3);
+  expect(storedProgress.version).toBe(4);
   expect(storedProgress.unlockedContracts).toHaveLength(4);
   expect(storedProgress.unlockedContracts).toEqual(
     expect.arrayContaining(['assembly-line', 'quality-curve', 'first-jump']),
   );
-  expect(Object.keys(storedProgress.rankings)).toEqual([
-    'assembly-line',
-    'quality-curve',
-    'first-jump',
-  ]);
-  for (const [contractId, ranking] of Object.entries(storedProgress.rankings)) {
-    expect(ranking).toHaveLength(1);
-    expect(ranking[0]).toMatchObject({
-      contractId,
-      metrics: { collectedStars: 0 },
-    });
-    expect(ranking[0]!.contractRevision).toBeGreaterThanOrEqual(1);
-    expect(ranking[0]!.score).toBeGreaterThan(0);
-  }
+  expect(storedProgress.completedContracts).toEqual({
+    'assembly-line': 3,
+    'quality-curve': 4,
+    'first-jump': 5,
+  });
 
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
@@ -1671,9 +2180,9 @@ test('restaura o layout persistido do sandbox e migra a esteira antiga', async (
       localStorage.setItem(
         key,
         JSON.stringify({
-          version: 3,
+          version: 4,
           unlockedContracts: ['assembly-line'],
-          rankings: {},
+          completedContracts: {},
           settings: { muted: true, volume: 0.35 },
           sandbox: { machines: [machine], updatedAt: '2026-07-19T12:00:00.000Z' },
         }),

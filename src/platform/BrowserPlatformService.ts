@@ -13,7 +13,7 @@ import type {
 } from '../domain/types';
 
 // Keep the original key so existing installations can be migrated in place.
-// The version inside the payload is now v2.
+// The version inside the payload is migrated independently.
 const PROGRESS_STORAGE_KEY = 'factory-flow.progress.v1';
 const CONTRACT_CATALOG_URL = `${import.meta.env.BASE_URL}data/contracts.json`;
 const CONTRACT_CATALOG_WRITE_URL = '/__factory-admin/contracts';

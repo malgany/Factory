@@ -3,8 +3,9 @@ import Phaser from 'phaser';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import { appEvents } from '../core/events';
 import { getContract, SANDBOX_DEFINITION } from '../domain/contracts';
+import { resolveConveyorSpeedCosts } from '../domain/economy';
 import { CommandHistory, createSnapshotCommand } from '../domain/history';
-import { evaluateRun, isWithinPieceBudget } from '../domain/rules';
+import { evaluateRun } from '../domain/rules';
 import {
   CELL_SIZE,
   COLLECTIBLE_STAR_RADIUS,
@@ -17,6 +18,7 @@ import {
   type ContractCamera,
   type ContractDefinition,
   type ContractId,
+  type ConveyorSpeed,
   type CollectibleDefinition,
   type GameMode,
   type GameSnapshot,
@@ -47,6 +49,7 @@ import {
 import { DISPLAY_DENSITY, fromCameraZoom, toCameraZoom } from './display';
 import {
   boxTouchesOrientedSurface,
+  conveyorSpeedFactor,
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
@@ -75,7 +78,6 @@ const STAR_PICKUP_RADIUS = 30;
 const STAR_RENDER_RADIUS = COLLECTIBLE_STAR_RADIUS;
 const CONVEYOR_SPEED = 4.2;
 const SPRING_SPEED = 11.5;
-const TRACKED_CONVEYOR_ANGULAR_SPEED = 0.336;
 const TRACKED_CONVEYOR_WHEEL_RADIUS = 6.5;
 const TRACKED_CONVEYOR_TRACK_RADIUS = 8.5;
 const TRACKED_CONVEYOR_LINK_WIDTH = 7.5;
@@ -101,7 +103,7 @@ const COLORS = {
   receiverBorder: 0x258bc4,
   receiverBezel: 0xe4e7e9,
   conveyor: 0x40566b,
-  springGreen: 0x43a96b,
+  springGreen: 0x25c442,
   wood: 0xb47a48,
   orange: 0xff7629,
   white: 0xffffff,
@@ -124,7 +126,6 @@ interface TrackedConveyorRuntime {
   wheels: MatterJS.BodyType[];
   links: MatterJS.BodyType[];
   phase: number;
-  wheelAngle: number;
 }
 
 interface TrackedConveyorLinkLayout {
@@ -193,7 +194,10 @@ interface DragState {
   lastScreenY: number;
 }
 
-type MachineClipboard = Pick<MachineState, 'type' | 'angle' | 'reversed' | 'fixed'>;
+type MachineClipboard = Pick<
+  MachineState,
+  'type' | 'angle' | 'reversed' | 'conveyorSpeed' | 'fixed'
+>;
 type ObstacleClipboard = Pick<ObstacleDefinition, 'columns' | 'rows' | 'angle'>;
 type CollectibleClipboard = Pick<CollectibleDefinition, 'type'>;
 
@@ -236,6 +240,7 @@ interface EditorAuthoringState {
 
 export interface FactoryDebugApi {
   getSnapshot(): GameSnapshot;
+  getSimulationSeconds(): number;
   getMachines(): MachineState[];
   getObstacles(): ObstacleDefinition[];
   getCollectibles(): CollectibleDefinition[];
@@ -315,6 +320,20 @@ function activeMachineType(type: MachineType): MachineType {
   return type === 'conveyor' ? 'tracked-conveyor' : type;
 }
 
+function isConveyorType(type: MachineType): boolean {
+  return type === 'conveyor' || type === 'tracked-conveyor';
+}
+
+function conveyorSpeed(machine: Pick<MachineState, 'type' | 'conveyorSpeed'>): ConveyorSpeed {
+  return isConveyorType(machine.type) ? (machine.conveyorSpeed ?? 'normal') : 'normal';
+}
+
+function conveyorSpeedMultiplier(
+  machine: Pick<MachineState, 'type' | 'conveyorSpeed'>,
+): number {
+  return conveyorSpeedFactor(conveyorSpeed(machine));
+}
+
 function normalizeAvailableMachineTypes(types: readonly MachineType[]): MachineType[] {
   return [...new Set(types.map(activeMachineType))];
 }
@@ -324,6 +343,13 @@ function cloneContract(contract: ContractDefinition): ContractDefinition {
     ...contract,
     grid: { ...contract.grid },
     goal: { ...contract.goal },
+    economy: {
+      ...contract.economy,
+      machineCosts: { ...contract.economy.machineCosts },
+      ...(contract.economy.conveyorSpeedCosts
+        ? { conveyorSpeedCosts: { ...contract.economy.conveyorSpeedCosts } }
+        : {}),
+    },
     initialCamera: { ...contract.initialCamera },
     availableMachines: normalizeAvailableMachineTypes(contract.availableMachines),
     fixedMachines: cloneMachines(contract.fixedMachines).map((machine) => ({
@@ -343,6 +369,7 @@ function sameMachineState(a: MachineState, b: MachineState): boolean {
     a.gridY === b.gridY &&
     a.angle === b.angle &&
     a.reversed === b.reversed &&
+    conveyorSpeed(a) === conveyorSpeed(b) &&
     a.fixed === b.fixed
   );
 }
@@ -557,9 +584,9 @@ export class FactoryScene extends Phaser.Scene {
     delivered: 0,
     lost: 0,
     active: 0,
-    elapsedSeconds: 0,
     placedPieces: 0,
     collectedStars: 0,
+    spent: 0,
   };
 
   private selectedTool?: MachineType;
@@ -590,6 +617,7 @@ export class FactoryScene extends Phaser.Scene {
   private muted = false;
   private gridEnabled = true;
   private simulationSpeed = 1;
+  private preferredConveyorSpeed: ConveyorSpeed = 'normal';
   private spawnAccumulator = 0;
   private physicsAccumulator = 0;
   private simulationTimeMs = 0;
@@ -598,6 +626,7 @@ export class FactoryScene extends Phaser.Scene {
   private lastIdleRenderSignature = '';
   private machineSequence = 0;
   private boxSequence = 0;
+  private budgetCompletionWarningShown = false;
   private lastGridZoom = -1;
   private currentCamera?: ContractCamera;
   private contextMenuHandler?: (event: MouseEvent) => void;
@@ -739,6 +768,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostObstacle = undefined;
     this.ghostCollectible = undefined;
     this.simulationSpeed = 1;
+    this.preferredConveyorSpeed = 'normal';
     this.history.clear();
     this.editorHistory.clear();
     this.resetSimulation('build');
@@ -778,6 +808,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostCollectible = undefined;
     this.setDragState(undefined);
     this.simulationSpeed = 1;
+    this.preferredConveyorSpeed = 'normal';
     this.history.clear();
     this.editorHistory.clear();
     this.resetSimulation('build');
@@ -801,6 +832,7 @@ export class FactoryScene extends Phaser.Scene {
       collectibles: cloneCollectibles(this.collectibles),
     };
     this.contract = this.editorContract;
+    this.updateMachineMetrics();
     this.emitEditorChanged();
     this.emitSnapshot();
   }
@@ -967,11 +999,6 @@ export class FactoryScene extends Phaser.Scene {
     if (!this.canBuild() || (!this.isAuthoring() && !this.availableMachines.includes(type))) {
       return false;
     }
-    if (!this.isAuthoring() && !this.canPlaceAnotherPiece()) {
-      this.toast('Orçamento de peças esgotado.', 'danger');
-      this.audio('error');
-      return false;
-    }
 
     const snapToGrid = (value: number, step: number) => Math.round(value / step) * step;
     const machine: MachineState = {
@@ -981,8 +1008,14 @@ export class FactoryScene extends Phaser.Scene {
       gridY: this.isAuthoring() ? snapToGrid(gridY, GRID_POSITION_STEP) : gridY,
       angle: normalizeAngle(angle),
       reversed: false,
+      conveyorSpeed: isConveyorType(type) ? this.preferredConveyorSpeed : undefined,
       fixed: this.isAuthoring(),
     };
+    if (!this.canAffordMachines([machine])) {
+      this.toast('Limite de orçamento atingido. Remova um item para liberar verba.', 'danger');
+      this.audio('error');
+      return false;
+    }
     if (!this.isMachinePlacementValid(machine)) {
       this.toast('Essa posição está ocupada.', 'danger');
       this.audio('error');
@@ -1044,6 +1077,41 @@ export class FactoryScene extends Phaser.Scene {
       { ...selected, reversed: !selected.reversed },
       'Inverter esteira',
     );
+    this.audio('place');
+    this.emitEditorChanged();
+    return true;
+  }
+
+  public setSelectedConveyorSpeed(speed: ConveyorSpeed): boolean {
+    if (!this.canBuild() || this.selectionCount() !== 1) return false;
+    const selected = this.getSelectedMachine();
+    if (!selected || !this.canEditMachine(selected) || !isConveyorType(selected.type)) {
+      return false;
+    }
+    if (conveyorSpeed(selected) === speed) {
+      this.preferredConveyorSpeed = speed;
+      return true;
+    }
+    const candidate = { ...selected, conveyorSpeed: speed };
+    const nextMachines = this.machines.map((machine) =>
+      machine.id === selected.id ? candidate : machine,
+    );
+    const budgetLimit = this.getBudgetLimit();
+    if (
+      !this.isAuthoring() &&
+      budgetLimit !== undefined &&
+      this.calculateSpentBudget(nextMachines) > budgetLimit * 2
+    ) {
+      this.toast('Esse nível de velocidade ultrapassa o limite máximo do orçamento.', 'danger');
+      this.audio('error');
+      return false;
+    }
+    this.replaceMachineWithHistory(
+      selected,
+      candidate,
+      'Ajustar velocidade da esteira',
+    );
+    this.preferredConveyorSpeed = speed;
     this.audio('place');
     this.emitEditorChanged();
     return true;
@@ -1221,7 +1289,7 @@ export class FactoryScene extends Phaser.Scene {
       gridY: machine.gridY,
     };
     this.ghostValid =
-      (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+      this.canAffordMachines([this.ghostMachine]) &&
       this.isMachinePlacementValid(this.ghostMachine);
     this.emitSnapshot();
   }
@@ -1332,15 +1400,15 @@ export class FactoryScene extends Phaser.Scene {
       gridY: obstacle.gridY + deltaY,
     }));
     this.ghostValid =
-      this.canPlaceMachineGroup(this.ghostGroupMachines.length) &&
+      this.canAffordMachines(this.ghostGroupMachines) &&
       this.isGroupPlacementValid(this.ghostGroupMachines, this.ghostGroupObstacles);
   }
 
   private placeGroupFromClipboardAt(world: Point): boolean {
     if (!this.canBuild() || !this.groupClipboard) return false;
     this.updateGroupGhostAt(world);
-    if (!this.canPlaceMachineGroup(this.ghostGroupMachines.length)) {
-      this.toast('Orçamento de peças esgotado.', 'danger');
+    if (!this.canAffordMachines(this.ghostGroupMachines)) {
+      this.toast('Limite de orçamento atingido. Remova itens para liberar verba.', 'danger');
       this.audio('error');
       return false;
     }
@@ -1500,11 +1568,6 @@ export class FactoryScene extends Phaser.Scene {
 
   private placeMachineFromClipboardAt(gridX: number, gridY: number): boolean {
     if (!this.canBuild() || !this.machineClipboard) return false;
-    if (!this.isAuthoring() && !this.canPlaceAnotherPiece()) {
-      this.toast('Orçamento de peças esgotado.', 'danger');
-      this.audio('error');
-      return false;
-    }
 
     const machine: MachineState = {
       id: this.createMachineId(),
@@ -1512,6 +1575,11 @@ export class FactoryScene extends Phaser.Scene {
       gridX,
       gridY,
     };
+    if (!this.canAffordMachines([machine])) {
+      this.toast('Limite de orçamento atingido. Remova um item para liberar verba.', 'danger');
+      this.audio('error');
+      return false;
+    }
     if (!this.isMachinePlacementValid(machine)) {
       this.toast('Essa posição está ocupada.', 'danger');
       this.audio('error');
@@ -1876,7 +1944,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedMachineId = undefined;
     this.history.clear();
     this.rebuildStaticBodies();
-    this.updatePlacedPieces();
+    this.updateMachineMetrics();
     this.emitSnapshot();
     this.emitSandboxChange();
   }
@@ -1888,6 +1956,7 @@ export class FactoryScene extends Phaser.Scene {
       this.matter.world.resume();
     }
     this.metrics.delivered = this.contract.goal.deliveries;
+    this.metrics.collectedStars = this.collectibles.length;
     this.evaluateContract();
   }
 
@@ -1896,6 +1965,8 @@ export class FactoryScene extends Phaser.Scene {
     const selectedObstacles = this.getSelectedObstacles();
     const selected = selectedMachines[0];
     const selectedObstacle = selectedObstacles[0];
+    const economy = this.contract?.economy;
+    const budgetLimit = this.getBudgetLimit();
     return {
       mode: this.mode,
       ...(this.contract ? { contractId: this.contract.id } : {}),
@@ -1904,7 +1975,24 @@ export class FactoryScene extends Phaser.Scene {
       status: this.status,
       metrics: { ...this.metrics },
       ...(this.contract ? { goal: { ...this.contract.goal } } : {}),
+      ...(economy
+        ? {
+            economy: {
+              spent: this.metrics.spent,
+              ...(budgetLimit !== undefined
+                ? { budgetLimit, hardLimit: budgetLimit * 2 }
+                : {}),
+              machineCosts: { ...economy.machineCosts },
+              ...(economy.conveyorSpeedCosts
+                ? { conveyorSpeedCosts: { ...economy.conveyorSpeedCosts } }
+                : {}),
+            },
+          }
+        : {}),
       ...(selected ? { selectedMachine: { ...selected } } : {}),
+      ...(selected
+        ? { selectedMachineClientBounds: this.machineClientBounds(selected) }
+        : {}),
       ...(selectedObstacle ? { selectedObstacle: { ...selectedObstacle } } : {}),
       selection: {
         machineIds: selectedMachines.map((machine) => machine.id),
@@ -1950,6 +2038,9 @@ export class FactoryScene extends Phaser.Scene {
       appEvents.on('ui:copy-selected', () => this.copySelected()),
       appEvents.on('ui:cut-selected', () => this.cutSelected()),
       appEvents.on('ui:reverse-selected', () => this.reverseSelected()),
+      appEvents.on('ui:set-conveyor-speed', ({ speed }) =>
+        this.setSelectedConveyorSpeed(speed),
+      ),
       appEvents.on('ui:toggle-grid', () => this.toggleGrid()),
       appEvents.on('ui:set-simulation-speed', ({ speed }) => {
         this.setSimulationSpeed(speed);
@@ -2124,10 +2215,13 @@ export class FactoryScene extends Phaser.Scene {
         gridY: grid.y,
         angle: 0,
         reversed: false,
+        conveyorSpeed: isConveyorType(payload.type)
+          ? this.preferredConveyorSpeed
+          : undefined,
         fixed: this.isAuthoring(),
       };
       this.ghostValid =
-        (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+        this.canAffordMachines([this.ghostMachine]) &&
         this.isMachinePlacementValid(this.ghostMachine);
       this.ghostObstacle = undefined;
       this.ghostCollectible = undefined;
@@ -2633,7 +2727,7 @@ export class FactoryScene extends Phaser.Scene {
         gridY: grid.y,
       };
       this.ghostValid =
-        (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+        this.canAffordMachines([this.ghostMachine]) &&
         this.isMachinePlacementValid(this.ghostMachine);
       this.ghostObstacle = undefined;
       return;
@@ -2680,10 +2774,13 @@ export class FactoryScene extends Phaser.Scene {
           gridY: grid.y,
           angle: 0,
           reversed: false,
+          conveyorSpeed: isConveyorType(this.selectedTool)
+            ? this.preferredConveyorSpeed
+            : undefined,
           fixed: this.isAuthoring(),
         };
         this.ghostValid =
-          (this.isAuthoring() || this.canPlaceAnotherPiece()) &&
+          this.canAffordMachines([this.ghostMachine]) &&
           this.isMachinePlacementValid(this.ghostMachine);
       }
     } else {
@@ -2863,7 +2960,6 @@ export class FactoryScene extends Phaser.Scene {
 
   private simulateFixedStep(): void {
     this.simulationTimeMs += FIXED_PHYSICS_STEP_MS;
-    this.metrics.elapsedSeconds += FIXED_PHYSICS_STEP_SECONDS;
     this.spawnAccumulator += FIXED_PHYSICS_STEP_SECONDS;
     this.updateSources();
     this.updateConveyors();
@@ -2930,7 +3026,12 @@ export class FactoryScene extends Phaser.Scene {
         }
         this.matter.body.setVelocity(
           box.body,
-          conveyorVelocity(box.body.velocity, conveyor.angle, conveyor.reversed, CONVEYOR_SPEED),
+          conveyorVelocity(
+            box.body.velocity,
+            conveyor.angle,
+            conveyor.reversed,
+            CONVEYOR_SPEED * conveyorSpeedMultiplier(conveyor),
+          ),
         );
       }
     }
@@ -2939,10 +3040,12 @@ export class FactoryScene extends Phaser.Scene {
   private updateTrackedConveyors(): void {
     for (const runtime of this.trackedConveyors.values()) {
       const direction = runtime.machine.reversed ? -1 : 1;
+      const speedMultiplier = conveyorSpeedMultiplier(runtime.machine);
       runtime.phase =
-        (runtime.phase + TRACKED_CONVEYOR_SPEED * direction + TRACKED_CONVEYOR_TRACK_LENGTH) %
+        (runtime.phase +
+          TRACKED_CONVEYOR_SPEED * speedMultiplier * direction +
+          TRACKED_CONVEYOR_TRACK_LENGTH) %
         TRACKED_CONVEYOR_TRACK_LENGTH;
-      runtime.wheelAngle += TRACKED_CONVEYOR_ANGULAR_SPEED * direction;
       const center = machineCenter(runtime.machine);
       for (let index = 0; index < runtime.links.length; index += 1) {
         const link = runtime.links[index]!;
@@ -2958,9 +3061,6 @@ export class FactoryScene extends Phaser.Scene {
         // gives Matter the surface velocity it needs to resolve friction against boxes.
         this.matter.body.setPosition(link, pose.center, true);
         this.matter.body.setAngle(link, targetAngle, true);
-      }
-      for (const wheel of runtime.wheels) {
-        this.matter.body.setAngle(wheel, runtime.wheelAngle, true);
       }
     }
   }
@@ -3081,7 +3181,28 @@ export class FactoryScene extends Phaser.Scene {
 
   private evaluateContract(): void {
     if (!this.contract || this.status !== 'running') return;
-    const evaluation = evaluateRun(this.metrics, this.contract.goal);
+    const budgetLimit = this.getBudgetLimit();
+    const evaluation = evaluateRun(
+      this.metrics,
+      this.contract.goal,
+      this.collectibles.length,
+      budgetLimit,
+    );
+    if (
+      !evaluation.resolution &&
+      !this.budgetCompletionWarningShown &&
+      budgetLimit !== undefined &&
+      this.metrics.spent > budgetLimit &&
+      this.metrics.delivered >= this.contract.goal.deliveries &&
+      this.metrics.collectedStars >= this.collectibles.length
+    ) {
+      this.budgetCompletionWarningShown = true;
+      this.toast(
+        'Meta atingida, mas o orçamento foi ultrapassado. Pause e remova itens para concluir.',
+        'danger',
+      );
+      this.audio('error');
+    }
     if (!evaluation.resolution) return;
 
     this.status = evaluation.resolution;
@@ -3101,9 +3222,7 @@ export class FactoryScene extends Phaser.Scene {
       }
       this.audio('success');
     } else {
-      const reason =
-        evaluation.reason === 'time' ? 'O tempo acabou.' : 'Muitas caixas foram perdidas.';
-      this.toast(reason, 'danger');
+      this.toast('Muitas caixas foram perdidas.', 'danger');
       this.audio('error');
     }
     if (!this.editorActive) {
@@ -3162,8 +3281,8 @@ export class FactoryScene extends Phaser.Scene {
     const camera = this.cameras.main;
     const machines = this.machines
       .map(
-        ({ id, type, gridX, gridY, angle, reversed, fixed }) =>
-          `${id}:${type}:${gridX}:${gridY}:${angle}:${Number(reversed)}:${Number(fixed)}`,
+        ({ id, type, gridX, gridY, angle, reversed, conveyorSpeed: speed, fixed }) =>
+          `${id}:${type}:${gridX}:${gridY}:${angle}:${Number(reversed)}:${speed ?? 'normal'}:${Number(fixed)}`,
       )
       .join(';');
     const obstacles = this.obstacles
@@ -3198,7 +3317,32 @@ export class FactoryScene extends Phaser.Scene {
     const groupObstacleIds = new Set(
       groupDrag?.previewObstacles?.map((obstacle) => obstacle.id) ?? [],
     );
+    const drawCollectibles = (): void => {
+      for (const collectible of this.collectibles) {
+        const disappearing = this.collectibleDisappear.get(collectible.id);
+        if (this.collectedCollectibleIds.has(collectible.id) && disappearing === undefined) {
+          continue;
+        }
+        const preview =
+          this.drag?.collectibleId === collectible.id
+            ? this.drag.previewCollectible
+            : undefined;
+        if (!preview) {
+          const progress = disappearing === undefined ? 0 : 1 - disappearing / 0.28;
+          this.drawCollectible(graphics, collectible, 1 - progress, 1 - progress * 0.75);
+        }
+      }
+      if (this.drag?.previewCollectible) {
+        this.drawCollectible(
+          graphics,
+          this.drag.previewCollectible,
+          1,
+          this.drag.valid === false ? 0.45 : 1,
+        );
+      }
+    };
 
+    if (!this.isAuthoring()) drawCollectibles();
     for (const obstacle of this.obstacles) {
       if (groupObstacleIds.has(obstacle.id)) continue;
       const preview = this.drag?.obstacleId === obstacle.id ? this.drag.previewObstacle : undefined;
@@ -3220,26 +3364,7 @@ export class FactoryScene extends Phaser.Scene {
     for (const machine of groupDrag?.previewMachines ?? []) {
       this.drawMachine(graphics, machine, 1, groupDrag?.valid !== false);
     }
-    for (const collectible of this.collectibles) {
-      const disappearing = this.collectibleDisappear.get(collectible.id);
-      if (this.collectedCollectibleIds.has(collectible.id) && disappearing === undefined) continue;
-      const preview =
-        this.drag?.collectibleId === collectible.id
-          ? this.drag.previewCollectible
-          : undefined;
-      if (!preview) {
-        const progress = disappearing === undefined ? 0 : 1 - disappearing / 0.28;
-        this.drawCollectible(graphics, collectible, 1 - progress, 1 - progress * 0.75);
-      }
-    }
-    if (this.drag?.previewCollectible) {
-      this.drawCollectible(
-        graphics,
-        this.drag.previewCollectible,
-        1,
-        this.drag.valid === false ? 0.45 : 1,
-      );
-    }
+    if (this.isAuthoring()) drawCollectibles();
     const effects = this.effectsGraphics;
     effects.clear();
     for (const particle of this.particles) {
@@ -3348,9 +3473,10 @@ export class FactoryScene extends Phaser.Scene {
     alpha = 1,
   ): void {
     const center = this.collectibleCenter(collectible);
-    const facing = this.isAuthoring()
-      ? 1
-      : Math.cos(this.time.now * 0.0042 + this.collectiblePhase(collectible.id));
+    // The visual clock only advances while the simulation is running. This keeps
+    // stars facing forward during construction and freezes their current frame
+    // when paused instead of letting pointer-driven redraws animate them.
+    const facing = Math.cos(this.simulationVisualTimeMs * 0.0042);
     const widthScale = 0.2 + Math.abs(facing) * 0.8;
     const radius = STAR_RENDER_RADIUS * Math.max(0, scale);
     if (radius <= 0.1 || alpha <= 0.01) return;
@@ -3441,8 +3567,6 @@ export class FactoryScene extends Phaser.Scene {
         this.drawSource(graphics, machine, center, alpha, valid);
         break;
       case 'conveyor':
-        this.drawConveyor(graphics, machine, center, alpha, color);
-        break;
       case 'tracked-conveyor':
         this.drawTrackedConveyor(graphics, machine, center, alpha, valid);
         break;
@@ -3698,38 +3822,6 @@ export class FactoryScene extends Phaser.Scene {
     }
   }
 
-  private drawConveyor(
-    graphics: Phaser.GameObjects.Graphics,
-    machine: MachineState,
-    center: Point,
-    alpha: number,
-    color: number,
-  ): void {
-    const dimensions = MACHINE_DIMENSIONS.conveyor;
-    const background = color === COLORS.blue ? COLORS.conveyor : color;
-    graphics.fillStyle(background, alpha);
-    drawPolygon(
-      graphics,
-      rectangleCorners(center, dimensions.width, dimensions.height, machine.angle),
-    );
-    graphics.lineStyle(2, COLORS.graphite, alpha * 0.5);
-    linePolygon(
-      graphics,
-      rectangleCorners(center, dimensions.width, dimensions.height, machine.angle),
-    );
-
-    const direction = machine.reversed ? -1 : 1;
-    const phase = (((this.simulationVisualTimeMs * 0.055 * direction) % 24) + 24) % 24;
-    graphics.fillStyle(COLORS.white, alpha * 0.94);
-    for (let offset = -60 + phase; offset <= 60; offset += 24) {
-      if (Math.abs(offset) > dimensions.width / 2 - 7) continue;
-      const tip = localToWorld(center, machine.angle, offset + 6 * direction, 0);
-      const upper = localToWorld(center, machine.angle, offset - 5 * direction, -7);
-      const lower = localToWorld(center, machine.angle, offset - 5 * direction, 7);
-      drawPolygon(graphics, [tip, upper, lower]);
-    }
-  }
-
   private drawTrackedConveyor(
     graphics: Phaser.GameObjects.Graphics,
     machine: MachineState,
@@ -3761,31 +3853,30 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     const wheelCenters = trackedConveyorWheelCenters(center, machine.angle);
-    const wheelAngles = wheelCenters.map(() =>
-      drawRuntime ? runtime!.wheelAngle : degreesToRadians(machine.angle),
+    const outlineHeight = TRACKED_CONVEYOR_TRACK_RADIUS * 2 + TRACKED_CONVEYOR_LINK_HEIGHT;
+    const outlineWidth =
+      TRACKED_CONVEYOR_STRAIGHT_LENGTH +
+      TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
+      TRACKED_CONVEYOR_LINK_HEIGHT;
+    graphics.fillStyle(valid ? COLORS.machinePanel : COLORS.graphite, alpha);
+    drawPolygon(
+      graphics,
+      roundedRectanglePoints(
+        center,
+        outlineWidth - 1,
+        outlineHeight - 1,
+        (outlineHeight - 1) / 2,
+        machine.angle,
+        5,
+      ),
     );
 
     for (let index = 0; index < wheelCenters.length; index += 1) {
       const wheelCenter = wheelCenters[index]!;
-      const wheelAngle = wheelAngles[index]!;
       graphics.fillStyle(valid ? COLORS.conveyor : COLORS.red, alpha);
       graphics.fillCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
       graphics.lineStyle(1.5, valid ? COLORS.blueLight : COLORS.graphite, alpha * 0.95);
       graphics.strokeCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
-      graphics.lineStyle(1.2, valid ? COLORS.white : COLORS.graphite, alpha * 0.72);
-      for (const spokeOffset of [0, Math.PI / 2]) {
-        const spokeAngle = wheelAngle + spokeOffset;
-        const dx = Math.cos(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
-        const dy = Math.sin(spokeAngle) * (TRACKED_CONVEYOR_WHEEL_RADIUS - 2);
-        graphics.lineBetween(
-          wheelCenter.x - dx,
-          wheelCenter.y - dy,
-          wheelCenter.x + dx,
-          wheelCenter.y + dy,
-        );
-      }
-      graphics.fillStyle(valid ? COLORS.orange : COLORS.graphite, alpha);
-      graphics.fillCircle(wheelCenter.x, wheelCenter.y, 1.8);
     }
 
     const links = Array.from(
@@ -3810,11 +3901,6 @@ export class FactoryScene extends Phaser.Scene {
       drawPolygons(graphics, links, 0);
       graphics.fillStyle(COLORS.conveyor, alpha);
       drawPolygons(graphics, links, 1);
-      const outlineHeight = TRACKED_CONVEYOR_TRACK_RADIUS * 2 + TRACKED_CONVEYOR_LINK_HEIGHT;
-      const outlineWidth =
-        TRACKED_CONVEYOR_STRAIGHT_LENGTH +
-        TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
-        TRACKED_CONVEYOR_LINK_HEIGHT;
       graphics.lineStyle(0.9, COLORS.graphite, alpha * 0.86);
       linePolygon(
         graphics,
@@ -3830,6 +3916,15 @@ export class FactoryScene extends Phaser.Scene {
     } else {
       graphics.fillStyle(COLORS.red, alpha);
       drawPolygons(graphics, links);
+    }
+
+    const direction = machine.reversed ? -1 : 1;
+    graphics.fillStyle(valid ? COLORS.white : COLORS.graphite, alpha * 0.96);
+    for (const wheelCenter of wheelCenters) {
+      const tip = localToWorld(wheelCenter, machine.angle, 4 * direction, 0);
+      const upper = localToWorld(wheelCenter, machine.angle, -2.5 * direction, -3.4);
+      const lower = localToWorld(wheelCenter, machine.angle, -2.5 * direction, 3.4);
+      drawPolygon(graphics, [tip, upper, lower]);
     }
   }
 
@@ -4115,7 +4210,6 @@ export class FactoryScene extends Phaser.Scene {
       wheels,
       links,
       phase: 0,
-      wheelAngle: degreesToRadians(machine.angle),
     };
   }
 
@@ -4325,7 +4419,7 @@ export class FactoryScene extends Phaser.Scene {
 
   private applyMachines(snapshot: readonly MachineState[]): void {
     this.machines = cloneMachines(snapshot);
-    this.updatePlacedPieces();
+    this.updateMachineMetrics();
     this.rebuildStaticBodies();
     this.emitSandboxChange();
     this.emitEditorChanged();
@@ -4364,7 +4458,7 @@ export class FactoryScene extends Phaser.Scene {
     this.collectibles = cloneCollectibles(document.collectibles);
     this.collectedCollectibleIds.clear();
     this.collectibleDisappear.clear();
-    this.updatePlacedPieces();
+    this.updateMachineMetrics();
     this.rebuildStaticBodies();
     if (notify) this.emitEditorChanged();
   }
@@ -4418,6 +4512,7 @@ export class FactoryScene extends Phaser.Scene {
     this.physicsAccumulator = 0;
     this.simulationTimeMs = 0;
     this.simulationVisualTimeMs = 0;
+    this.budgetCompletionWarningShown = false;
     this.status = nextStatus;
     this.matter.world.pause();
   }
@@ -4427,9 +4522,9 @@ export class FactoryScene extends Phaser.Scene {
       delivered: 0,
       lost: 0,
       active: 0,
-      elapsedSeconds: 0,
       placedPieces: this.machines.filter((machine) => !machine.fixed).length,
       collectedStars: 0,
+      spent: this.calculateSpentBudget(),
     };
   }
 
@@ -4649,14 +4744,6 @@ export class FactoryScene extends Phaser.Scene {
     return gridToWorld({ x: collectible.gridX, y: collectible.gridY });
   }
 
-  private collectiblePhase(id: string): number {
-    let hash = 0;
-    for (let index = 0; index < id.length; index += 1) {
-      hash = (hash * 31 + id.charCodeAt(index)) | 0;
-    }
-    return (Math.abs(hash) % 628) / 100;
-  }
-
   private snapEditorPosition(value: number): number {
     return Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
   }
@@ -4714,18 +4801,40 @@ export class FactoryScene extends Phaser.Scene {
     return this.status === 'build' || this.status === 'paused';
   }
 
-  private canPlaceAnotherPiece(): boolean {
-    if (!this.contract) return true;
-    return isWithinPieceBudget(this.metrics.placedPieces, this.contract.goal);
+  private getBudgetLimit(): number | undefined {
+    const limit = this.contract?.economy.budgetLimit;
+    if (limit === undefined || !Number.isFinite(limit)) return undefined;
+    return Math.max(0, limit);
   }
 
-  private canPlaceMachineGroup(count: number): boolean {
-    if (this.isAuthoring() || !this.contract) return true;
-    return this.metrics.placedPieces + count <= this.contract.goal.pieceBudget;
+  private machineCost(
+    machine: Pick<MachineState, 'type' | 'fixed' | 'conveyorSpeed'>,
+  ): number {
+    if (machine.fixed || !this.contract) return 0;
+    const type = activeMachineType(machine.type);
+    const rawCost =
+      type === 'tracked-conveyor'
+        ? resolveConveyorSpeedCosts(this.contract.economy)[conveyorSpeed(machine)]
+        : type === 'spring'
+          ? this.contract.economy.machineCosts.spring
+          : 0;
+    return Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0;
   }
 
-  private updatePlacedPieces(): void {
+  private calculateSpentBudget(machines: readonly MachineState[] = this.machines): number {
+    return machines.reduce((total, machine) => total + this.machineCost(machine), 0);
+  }
+
+  private canAffordMachines(machines: readonly MachineState[]): boolean {
+    if (this.isAuthoring()) return true;
+    const budgetLimit = this.getBudgetLimit();
+    if (budgetLimit === undefined) return true;
+    return this.calculateSpentBudget() + this.calculateSpentBudget(machines) <= budgetLimit * 2;
+  }
+
+  private updateMachineMetrics(): void {
     this.metrics.placedPieces = this.machines.filter((machine) => !machine.fixed).length;
+    this.metrics.spent = this.calculateSpentBudget();
   }
 
   private getSpawnInterval(): number {
@@ -4827,6 +4936,7 @@ export class FactoryScene extends Phaser.Scene {
         id,
         type: activeMachineType(machine.type),
         angle: normalizeAngle(machine.angle),
+        conveyorSpeed: isConveyorType(machine.type) ? conveyorSpeed(machine) : undefined,
         fixed: preserveFixed ? machine.fixed : false,
       };
     });
@@ -4834,6 +4944,39 @@ export class FactoryScene extends Phaser.Scene {
 
   private emitSnapshot(): void {
     appEvents.emit('game:snapshot', this.getSnapshot());
+  }
+
+  private machineClientBounds(machine: MachineState): {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  } {
+    const camera = this.cameras.main;
+    const canvasBounds = this.game.canvas.getBoundingClientRect();
+    const scaleX = canvasBounds.width / this.game.canvas.width;
+    const scaleY = canvasBounds.height / this.game.canvas.height;
+    const dimensions = MACHINE_DIMENSIONS[machine.type];
+    const corners = rectangleCorners(
+      machineCenter(machine),
+      dimensions.width + 14,
+      dimensions.height + 14,
+      machine.angle,
+    );
+    const clientPoints = corners.map((point) => ({
+      x:
+        canvasBounds.left +
+        (camera.x + (point.x - camera.worldView.x) * camera.zoom) * scaleX,
+      y:
+        canvasBounds.top +
+        (camera.y + (point.y - camera.worldView.y) * camera.zoom) * scaleY,
+    }));
+    return {
+      left: Math.min(...clientPoints.map(({ x }) => x)),
+      top: Math.min(...clientPoints.map(({ y }) => y)),
+      right: Math.max(...clientPoints.map(({ x }) => x)),
+      bottom: Math.max(...clientPoints.map(({ y }) => y)),
+    };
   }
 
   private serializeEditorContract(contract: ContractDefinition): string {
@@ -5012,6 +5155,7 @@ export class FactoryScene extends Phaser.Scene {
   private installDebugApi(): void {
     window.__FACTORY_DEBUG__ = {
       getSnapshot: () => this.getSnapshot(),
+      getSimulationSeconds: () => this.simulationTimeMs / 1000,
       getMachines: () => cloneMachines(this.machines),
       getObstacles: () => cloneObstacles(this.obstacles),
       getCollectibles: () => cloneCollectibles(this.collectibles),

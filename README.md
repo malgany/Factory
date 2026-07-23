@@ -3,8 +3,9 @@
 Puzzle desktop de automação física construído com Vite, TypeScript strict, Phaser 4 e Matter.
 
 Em cada contrato, o jogador monta uma linha com a física pausada, inicia a simulação e
-ajusta o projeto até conduzir as caixas laranjas das saídas às entradas. A campanha
-possui dez fases progressivas no primeiro mundo e o modo livre fica disponível desde o início.
+ajusta o projeto até conduzir as caixas laranjas das saídas às entradas, coletar todas
+as estrelas e respeitar o orçamento da fábrica. A campanha possui dez fases progressivas
+no primeiro mundo e o modo livre fica disponível desde o início.
 
 ## Conteúdo
 
@@ -13,15 +14,15 @@ possui dez fases progressivas no primeiro mundo e o modo livre fica disponível 
 - **Primeiro salto:** use um trampolim para atravessar uma parede baixa.
 - **Por cima ou por volta:** escolha entre um salto econômico e um desvio seguro.
 - **Salto calibrado:** atravesse uma abertura entre o teto e o piso.
-- **Rota das estrelas:** compare uma rota segura com um desvio de maior pontuação.
+- **Rota das estrelas:** planeje um percurso que alcance todas as estrelas.
 - **Encontro de linhas:** una duas saídas sem congestionar a produção.
-- **Ritmo de produção:** cumpra uma cota alta antes do tempo acabar.
+- **Ritmo de produção:** cumpra uma cota alta dentro do orçamento.
 - **Corredores industriais:** conduza dois fluxos entre bloqueios.
-- **Inspeção final:** combine fluxos, saltos, paredes, estrelas, tempo e perdas.
-- **Modo Livre:** use saída, esteira, entrada e trampolim sem limite de peças ou tempo.
+- **Inspeção final:** combine fluxos, saltos, paredes, estrelas, orçamento e perdas.
+- **Modo Livre:** use saída, esteira, entrada e trampolim sem limite de orçamento.
 
-O progresso, os melhores resultados, o volume e o layout do modo livre são salvos no
-próprio navegador.
+O progresso, o volume e o layout do modo livre são salvos no próprio navegador. As fases
+e seus orçamentos podem ser configurados pelo admin no servidor local de desenvolvimento.
 
 ## Controles
 

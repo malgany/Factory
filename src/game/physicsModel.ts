@@ -1,6 +1,16 @@
+import type { ConveyorSpeed } from '../domain/types';
 import { degreesToRadians, worldToLocal, type Point } from './geometry';
 
 export const FIXED_PHYSICS_STEP_SECONDS = 1 / 60;
+const CONVEYOR_SPEED_FACTORS: Record<ConveyorSpeed, number> = {
+  slow: 0.1,
+  normal: 1,
+  fast: 3,
+};
+
+export function conveyorSpeedFactor(speed: ConveyorSpeed = 'normal'): number {
+  return CONVEYOR_SPEED_FACTORS[speed];
+}
 
 export interface KinematicState extends Point {
   velocityX: number;

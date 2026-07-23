@@ -26,7 +26,7 @@ import {
 
 function seededCatalog(): ContractCatalogFile {
   return {
-    version: 2,
+    version: 3,
     contracts: CONTRACTS.map((contract) => structuredClone(contract)),
     updatedAt: new Date(0).toISOString(),
   };
@@ -49,7 +49,10 @@ describe('catálogo JSON de contratos', () => {
   it('mantém válidas todas as dez fases cadastradas', () => {
     expect(CONTRACTS).toHaveLength(10);
     for (const contract of CONTRACTS) {
-      expect(validateContractDefinition(contract), contract.id).toEqual({ valid: true, issues: [] });
+      expect(validateContractDefinition(contract), contract.id).toEqual({
+        valid: true,
+        issues: [],
+      });
     }
   });
 
@@ -107,35 +110,65 @@ describe('catálogo JSON de contratos', () => {
     ).toEqual([]);
   });
 
-  it('migra catálogo v1 para mundo 1 preservando IDs e tempo ideal', () => {
-    const legacy = structuredClone(seededCatalog()) as unknown as Record<string, unknown>;
-    const legacyIdealTimeSeconds = CONTRACTS[1]!.goal.idealTimeSeconds;
-    legacy.version = 1;
-    const contracts = legacy.contracts as Array<Record<string, unknown>>;
-    for (const contract of contracts) {
-      delete contract.world;
-      delete contract.stage;
-      delete contract.revision;
-      delete contract.collectibles;
-      const goal = contract.goal as Record<string, unknown>;
-      goal.parPieces = 7;
-      goal.parTimeSeconds = goal.idealTimeSeconds;
-      delete goal.idealTimeSeconds;
-    }
+  it('migra catálogos v1 e v2 para orçamento com custos padrão', () => {
+    for (const version of [1, 2] as const) {
+      const legacy = structuredClone(seededCatalog()) as unknown as Record<string, unknown>;
+      legacy.version = version;
+      const contracts = legacy.contracts as Array<Record<string, unknown>>;
+      for (const contract of contracts) {
+        const economy = contract.economy as Record<string, unknown>;
+        const goal = contract.goal as Record<string, unknown>;
+        goal.pieceBudget = Number(economy.budgetLimit) / 2_500;
+        goal.idealTimeSeconds = 30;
+        delete contract.economy;
+        if (version === 1) {
+          delete contract.world;
+          delete contract.stage;
+          delete contract.revision;
+          delete contract.collectibles;
+          goal.parTimeSeconds = goal.idealTimeSeconds;
+          delete goal.idealTimeSeconds;
+        }
+      }
 
-    const migrated = readContractCatalogFile(legacy);
-    expect(migrated.ok).toBe(true);
-    expect(migrated.value.version).toBe(2);
-    expect(migrated.value.contracts[1]).toMatchObject({
-      id: 'quality-curve',
-      world: 1,
-      stage: 2,
-      revision: 1,
-      order: 2,
-      title: '2-1',
-      collectibles: [],
-      goal: { idealTimeSeconds: legacyIdealTimeSeconds },
-    });
+      const migrated = readContractCatalogFile(legacy);
+      expect(migrated.ok).toBe(true);
+      expect(migrated.value.version).toBe(3);
+      expect(migrated.value.contracts[1]).toMatchObject({
+        id: 'quality-curve',
+        world: 1,
+        stage: 2,
+        revision: version === 1 ? 1 : CONTRACTS[1]!.revision,
+        order: 2,
+        title: '2-1',
+        economy: {
+          budgetLimit: 15_000,
+          machineCosts: {
+            'tracked-conveyor': 2_500,
+            spring: 5_000,
+          },
+        },
+      });
+      expect(migrated.value.contracts[1]?.collectibles).toHaveLength(version === 1 ? 0 : 2);
+    }
+  });
+
+  it('preserva a capacidade de fases legadas com trampolim e orçamento zero', () => {
+    const migrateLegacyBudget = (pieceBudget: number) => {
+      const contract = structuredClone(CONTRACTS[2]!) as unknown as Record<string, unknown>;
+      const goal = contract.goal as Record<string, unknown>;
+      goal.pieceBudget = pieceBudget;
+      goal.idealTimeSeconds = 30;
+      delete contract.economy;
+      return readContractCatalogFile({
+        version: 2,
+        updatedAt: new Date(0).toISOString(),
+        contracts: [contract],
+      });
+    };
+
+    expect(migrateLegacyBudget(3).value.contracts[0]?.economy.budgetLimit).toBe(15_000);
+    expect(migrateLegacyBudget(0).value.contracts[0]?.economy.budgetLimit).toBe(0);
   });
 
   it('serializa formatado e normaliza dados derivados, câmera e estrela', () => {
@@ -150,10 +183,20 @@ describe('catálogo JSON de contratos', () => {
     source.contracts[0]!.collectibles = [
       { id: 'star-1', type: 'star', gridX: 8.25001, gridY: 9.49999 },
     ];
+    source.contracts[0]!.fixedMachines.push({
+      id: 'speed-test',
+      type: 'tracked-conveyor',
+      gridX: 12,
+      gridY: 12,
+      angle: 0,
+      reversed: false,
+      conveyorSpeed: 'fast',
+      fixed: true,
+    });
     const serialized = serializeContractCatalogFile(source);
     const restored = readContractCatalogFile(serialized);
 
-    expect(serialized).toContain('\n  "version": 2');
+    expect(serialized).toContain('\n  "version": 3');
     expect(serialized.endsWith('\n')).toBe(true);
     expect(restored.ok).toBe(true);
     expect(restored.value.contracts[0]).toMatchObject({ title: '1-1', order: 1 });
@@ -166,6 +209,9 @@ describe('catálogo JSON de contratos', () => {
       gridX: 8.25,
       gridY: 9.5,
     });
+    expect(
+      restored.value.contracts[0]?.fixedMachines.find(({ id }) => id === 'speed-test'),
+    ).toMatchObject({ conveyorSpeed: 'fast' });
   });
 
   it('rejeita slots duplicados ao ler ou salvar', () => {
@@ -207,8 +253,9 @@ describe('catálogo JSON de contratos', () => {
     invalid.world = 0;
     invalid.stage = 11 as typeof invalid.stage;
     invalid.revision = 0;
-    invalid.goal.idealTimeSeconds = 0;
-    invalid.goal.timeLimitSeconds = 1.5;
+    invalid.goal.maxLosses = -1;
+    invalid.economy.budgetLimit = 1.5;
+    invalid.economy.machineCosts.spring = -1;
     invalid.spawnIntervalSeconds = 10.01;
     invalid.initialCamera.zoom = 3;
     invalid.fixedMachines[1] = {

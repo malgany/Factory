@@ -25,7 +25,7 @@ function fakeStorage(initial: Record<string, string> = {}): Storage {
 
 function catalog(): ContractCatalogFile {
   return {
-    version: 2,
+    version: 3,
     updatedAt: new Date(0).toISOString(),
     contracts: CONTRACTS.map((contract) => structuredClone(contract)),
   };

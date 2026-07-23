@@ -24,7 +24,7 @@ function catalog(deliveries = CONTRACTS[0]!.goal.deliveries): ContractCatalogFil
   const contract = structuredClone(CONTRACTS[0]!);
   contract.goal.deliveries = deliveries;
   return {
-    version: 2,
+    version: 3,
     updatedAt: '2026-07-21T00:00:00.000Z',
     contracts: [contract],
   };
@@ -80,7 +80,7 @@ describe('contractCatalogPlugin', () => {
     const response = await fetch(`${url}${CONTRACT_CATALOG_ROUTE}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: url },
-      body: JSON.stringify({ version: 2, contracts: [{ id: 'incompleta' }] }),
+      body: JSON.stringify({ version: 3, contracts: [{ id: 'incompleta' }] }),
     });
     const after = await fs.readFile(catalogPath, 'utf8');
 

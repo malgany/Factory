@@ -126,8 +126,10 @@ test('editor keeps authored scenario fixed and restores it after a disposable pr
       goal: {
         deliveries: 1,
         maxLosses: 1,
-        pieceBudget: 3,
-        parPieces: 1,
+      },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
       },
       spawnIntervalSeconds: 1,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
@@ -226,7 +228,11 @@ test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ 
       availableMachines: ['tracked-conveyor'],
       fixedMachines: [],
       obstacles: [],
-      goal: { deliveries: 1, maxLosses: 3, pieceBudget: 6, parPieces: 2 },
+      goal: { deliveries: 1, maxLosses: 3 },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
       spawnIntervalSeconds: 1,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });
@@ -312,7 +318,11 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
       availableMachines: ['tracked-conveyor'],
       fixedMachines: [],
       obstacles: [],
-      goal: { deliveries: 1, maxLosses: 3, pieceBudget: 6, parPieces: 2 },
+      goal: { deliveries: 1, maxLosses: 3 },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
       spawnIntervalSeconds: 1,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });
@@ -407,7 +417,11 @@ test('editor collectible is non-solid, collected once and restored on restart', 
       ],
       obstacles: [{ id: 'star-obstacle', gridX: 10, gridY: 10, columns: 2, rows: 2 }],
       collectibles: [],
-      goal: { deliveries: 99, maxLosses: 99, pieceBudget: 3 },
+      goal: { deliveries: 99, maxLosses: 99 },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
       spawnIntervalSeconds: 1,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });

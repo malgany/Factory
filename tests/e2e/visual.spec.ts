@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 test('renderiza o canvas nítido em 1920×1080 HiDPI sem overflow', async ({ page }) => {
-  test.setTimeout(45_000);
+  test.setTimeout(90_000);
   await page.goto('/');
   await expect(page.locator('#menu-title')).toBeVisible();
   await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));

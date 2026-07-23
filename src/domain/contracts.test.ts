@@ -26,17 +26,14 @@ describe('contratos', () => {
       })),
     );
     expect(
-      CONTRACTS.every(
-        (contract) => Number.isInteger(contract.revision) && contract.revision >= 1,
-      ),
+      CONTRACTS.every((contract) => Number.isInteger(contract.revision) && contract.revision >= 1),
     ).toBe(true);
     expect(CONTRACTS.every((contract) => contract.grid.columns === 30)).toBe(true);
     expect(CONTRACTS.every((contract) => contract.grid.rows === 18)).toBe(true);
     expect(
       CONTRACTS.every((contract) =>
         contract.fixedMachines.every(
-          (machine) =>
-            Number.isInteger(machine.gridX * 4) && Number.isInteger(machine.gridY * 4),
+          (machine) => Number.isInteger(machine.gridX * 4) && Number.isInteger(machine.gridY * 4),
         ),
       ),
     ).toBe(true);
@@ -46,27 +43,26 @@ describe('contratos', () => {
     expect(getContract('assembly-line').goal).toMatchObject({
       deliveries: 8,
       maxLosses: 3,
-      pieceBudget: 4,
+    });
+    expect(getContract('assembly-line').economy).toEqual({
+      budgetLimit: 10_000,
+      machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
     });
     expect(getContract('assembly-line').availableMachines).toEqual(['tracked-conveyor']);
 
     expect(getContract('first-jump').goal).toMatchObject({
       deliveries: 10,
       maxLosses: 3,
-      pieceBudget: 5,
     });
+    expect(getContract('first-jump').economy.budgetLimit).toBe(20_000);
     expect(getContract('first-jump').obstacles).not.toHaveLength(0);
-    expect(getContract('first-jump').availableMachines).toEqual([
-      'tracked-conveyor',
-      'spring',
-    ]);
+    expect(getContract('first-jump').availableMachines).toEqual(['tracked-conveyor', 'spring']);
 
     expect(getContract('final-inspection').goal).toMatchObject({
       deliveries: 25,
       maxLosses: 1,
-      pieceBudget: 12,
-      timeLimitSeconds: 42,
     });
+    expect(getContract('final-inspection').economy.budgetLimit).toBe(45_000);
     expect(
       getContract('final-inspection').fixedMachines.filter(({ type }) => type === 'source'),
     ).toHaveLength(2);
@@ -84,6 +80,29 @@ describe('contratos', () => {
       'receiver',
       'spring',
     ]);
-    expect(SANDBOX_DEFINITION.pieceBudget).toBeUndefined();
+    expect(SANDBOX_DEFINITION.economy).toBeUndefined();
+  });
+
+  it('define o balanceamento de orçamento e as estrelas reposicionadas', () => {
+    expect(CONTRACTS.map(({ economy }) => economy.budgetLimit)).toEqual([
+      10_000, 15_000, 20_000, 25_000, 20_000, 25_000, 30_000, 35_000, 40_000, 45_000,
+    ]);
+    expect(
+      CONTRACTS.every(
+        ({ economy }) =>
+          economy.machineCosts['tracked-conveyor'] === 2_500 &&
+          economy.machineCosts.spring === 5_000,
+      ),
+    ).toBe(true);
+    expect(
+      getContract('industrial-corridors').collectibles.find(
+        ({ id }) => id === 'industrial-corridors-star-b',
+      ),
+    ).toMatchObject({ gridX: 18.25, gridY: 13.5 });
+    expect(
+      getContract('final-inspection').collectibles.find(
+        ({ id }) => id === 'final-inspection-star-a',
+      ),
+    ).toMatchObject({ gridX: 6.25, gridY: 7.25 });
   });
 });

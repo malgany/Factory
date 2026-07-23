@@ -9,13 +9,11 @@ import {
   validateContractDefinition,
 } from './domain/catalog';
 import {
-  applyContractResult,
-  clearContractRecord,
-  getContractResultPosition,
+  clearContractCompletion,
+  completeContract,
   reconcileProgress,
   removeContractProgress,
 } from './domain/progress';
-import { createContractResult } from './domain/rules';
 import type {
   ContractCatalogFile,
   ContractDefinition,
@@ -38,6 +36,7 @@ const catalogLoad = await platform.loadContractCatalog();
 let catalog: ContractCatalogFile = catalogLoad.value;
 let contracts: ContractDefinition[] = mergeContractCatalog(catalog);
 let progress: ProgressSave = reconcileProgress(platform.loadProgress(contracts), contracts);
+const initialProgressSave = platform.saveProgress(progress);
 
 const ui = new AppUI({
   root,
@@ -61,6 +60,11 @@ if (!catalogLoad.ok) {
     appEvents.emit('game:toast', { message: catalogLoad.error, tone: 'danger' });
   });
 }
+if (!initialProgressSave.ok) {
+  queueMicrotask(() => {
+    appEvents.emit('game:toast', { message: initialProgressSave.error, tone: 'danger' });
+  });
+}
 
 const eventUnsubscribers = [
   appEvents.on('game:result', ({ contractId, snapshot }) => {
@@ -71,26 +75,19 @@ const eventUnsubscribers = [
       return;
     }
 
-    const result = createContractResult(contract, snapshot.metrics);
-    progress = applyContractResult(progress, result, contracts);
+    progress = completeContract(progress, contract.id, contract.revision, contracts);
     const saved = platform.saveProgress(progress);
     ui.updateProgress(progress);
 
-    const rankingPosition = getContractResultPosition(progress, result) ?? null;
-    const isNewRecord = rankingPosition === 1;
-
-    appEvents.emit('game:result-recorded', {
-      result,
+    appEvents.emit('game:completion-recorded', {
+      contractId: contract.id,
       snapshot,
-      rankingPosition,
-      isNewRecord,
     });
 
     if (!saved.ok) {
       appEvents.emit('game:toast', { message: saved.error, tone: 'danger' });
     }
     void platform.unlockAchievement(`contract:${contractId}`);
-    if (isNewRecord) void platform.unlockAchievement(`contract:${contractId}:record`);
   }),
   appEvents.on('ui:admin-create-contract', () => {
     try {
@@ -169,7 +166,7 @@ async function saveEditorContract(contract: ContractDefinition): Promise<void> {
     return;
   }
 
-  progress = reconcileProgress(clearContractRecord(progress, contract.id), contracts);
+  progress = reconcileProgress(clearContractCompletion(progress, contract.id), contracts);
   const progressSaved = platform.saveProgress(progress);
   ui.setCatalogSaving(false, 'editor');
   refreshUI();
@@ -179,7 +176,7 @@ async function saveEditorContract(contract: ContractDefinition): Promise<void> {
   if (!progressSaved.ok) {
     ui.setEditorMessage({
       tone: 'danger',
-      message: `A fase foi salva, mas o recorde não pôde ser atualizado. ${progressSaved.error}`,
+      message: `A fase foi salva, mas o progresso não pôde ser atualizado. ${progressSaved.error}`,
     });
   }
 }

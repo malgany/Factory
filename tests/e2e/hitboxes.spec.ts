@@ -41,7 +41,11 @@ test('a entrada recebe a caixa assim que os contornos visuais se encostam', asyn
       ],
       obstacles: [],
       collectibles: [],
-      goal: { deliveries: 1, maxLosses: 1, pieceBudget: 1 },
+      goal: { deliveries: 1, maxLosses: 1 },
+      economy: {
+        budgetLimit: 10_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
       spawnIntervalSeconds: 0.8,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });
@@ -97,7 +101,11 @@ test('o trampolim espera a caixa alcançar a superfície antes de impulsioná-la
       ],
       obstacles: [],
       collectibles: [],
-      goal: { deliveries: 1, maxLosses: 1, pieceBudget: 1 },
+      goal: { deliveries: 1, maxLosses: 1 },
+      economy: {
+        budgetLimit: 10_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
       spawnIntervalSeconds: 0.8,
       initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
     });

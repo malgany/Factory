@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { localToWorld, MACHINE_PHYSICS_DIMENSIONS } from './geometry';
 import {
   boxTouchesOrientedSurface,
+  conveyorSpeedFactor,
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
@@ -11,6 +12,13 @@ import {
 } from './physicsModel';
 
 describe('modelo físico determinístico', () => {
+  it('oferece três níveis progressivos de velocidade da esteira', () => {
+    const normal = conveyorSpeedFactor('normal');
+    expect(normal).toBe(1);
+    expect(conveyorSpeedFactor('slow')).toBe(normal * 0.1);
+    expect(conveyorSpeedFactor('fast')).toBe(normal * 3);
+  });
+
   it('integra gravidade em passos fixos de 60 Hz de forma repetível', () => {
     const initial = { x: 10, y: 20, velocityX: 3, velocityY: 0 };
     const firstRun = stepGravity(initial, 900, 120);

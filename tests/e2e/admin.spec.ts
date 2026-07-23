@@ -61,17 +61,26 @@ interface AdminContract {
   }>;
   goal: {
     deliveries: number;
-    maxLosses: number;
-    pieceBudget: number;
-    timeLimitSeconds?: number;
-    idealTimeSeconds?: number;
+    maxLosses?: number;
+  };
+  economy: {
+    budgetLimit?: number;
+    machineCosts: {
+      'tracked-conveyor': number;
+      spring: number;
+    };
+    conveyorSpeedCosts?: {
+      slow: number;
+      normal: number;
+      fast: number;
+    };
   };
   spawnIntervalSeconds: number;
   initialCamera: AdminCamera;
 }
 
 interface AdminCatalog {
-  version: 2;
+  version: 3;
   updatedAt: string;
   contracts: AdminContract[];
 }
@@ -88,6 +97,7 @@ type AdminWindow = Window & {
     selectMachine(id: string): boolean;
     rotateSelected(angle: number): boolean;
     placeObstacle(gridX: number, gridY: number, columns?: number, rows?: number): boolean;
+    placeCollectible(gridX: number, gridY: number): boolean;
     selectObstacle(id: string): boolean;
     moveSelectedObstacle(gridX: number, gridY: number): boolean;
     resizeSelectedObstacle(columns: number, rows: number): boolean;
@@ -156,8 +166,13 @@ function makeContract(
     goal: {
       deliveries: 10,
       maxLosses: 3,
-      pieceBudget: 8,
-      idealTimeSeconds: 32,
+    },
+    economy: {
+      budgetLimit: 25_000,
+      machineCosts: {
+        'tracked-conveyor': 2_500,
+        spring: 5_000,
+      },
     },
     spawnIntervalSeconds: 1.25,
     initialCamera: { ...initialCamera },
@@ -166,7 +181,7 @@ function makeContract(
 
 function makeCatalog(...contracts: AdminContract[]): AdminCatalog {
   return normalizeHarnessCatalog({
-    version: 2,
+    version: 3,
     updatedAt: new Date(0).toISOString(),
     contracts,
   });
@@ -270,34 +285,13 @@ async function installCatalogHarness(
 async function seedProgress(page: Page, contracts: AdminContract[]): Promise<void> {
   await page.addInitScript(
     ({ key, seededContracts }) => {
-      const makeResult = (contract: { id: string; revision: number }) => ({
-        contractId: contract.id,
-        contractRevision: contract.revision,
-        score: 100_000,
-        breakdown: {
-          deliveryPoints: 100_000,
-          timeBonus: 0,
-          efficiencyBonus: 0,
-          starBonus: 0,
-          lossPenalty: 0,
-        },
-        metrics: {
-          delivered: 10,
-          lost: 0,
-          active: 0,
-          elapsedSeconds: 20,
-          placedPieces: 6,
-          collectedStars: 0,
-        },
-        completedAt: new Date(0).toISOString(),
-      });
       localStorage.setItem(
         key,
         JSON.stringify({
-          version: 3,
+          version: 4,
           unlockedContracts: seededContracts.map(({ id }) => id),
-          rankings: Object.fromEntries(
-            seededContracts.map((contract) => [contract.id, [makeResult(contract)]]),
+          completedContracts: Object.fromEntries(
+            seededContracts.map(({ id, revision }) => [id, revision]),
           ),
           settings: { muted: false, volume: 0.65 },
           sandbox: { machines: [], updatedAt: new Date(0).toISOString() },
@@ -414,10 +408,28 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
 
   await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+  await page.evaluate(() => {
+    const debug = (window as AdminWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeCollectible(8, 8)) throw new Error('Could not add an editor star');
+  });
+  await expect(page.locator('[data-metric="stars"]')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as AdminWindow).__FACTORY_DEBUG__?.getCollectibles().length ?? 0,
+      ),
+    )
+    .toBe(1);
   await page.locator('[data-action="editor-configure"]').first().click();
   await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
   await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('1');
   await page.locator('#editor-contract-form input[name="deliveries"]').fill('11');
+  await page.locator('#editor-contract-form input[name="lossesEnabled"]').uncheck();
+  await page.locator('#editor-contract-form input[name="budgetLimit"]').fill('30000');
+  await page.locator('#editor-contract-form input[name="conveyorSlowCost"]').fill('2200');
+  await page.locator('#editor-contract-form input[name="conveyorNormalCost"]').fill('3000');
+  await page.locator('#editor-contract-form input[name="conveyorFastCost"]').fill('3600');
+  await page.locator('#editor-contract-form input[name="springCost"]').fill('6000');
   await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect.poll(() => harness.posts().length).toBe(1);
@@ -428,12 +440,27 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
     order: 1,
     title: '1-1',
     goal: { deliveries: 11 },
+    economy: {
+      budgetLimit: 30_000,
+      machineCosts: {
+        'tracked-conveyor': 3_000,
+        spring: 6_000,
+      },
+      conveyorSpeedCosts: {
+        slow: 2_200,
+        normal: 3_000,
+        fast: 3_600,
+      },
+    },
+  });
+  expect(harness.current().contracts.find(({ id }) => id === first.id)?.goal).toEqual({
+    deliveries: 11,
   });
 
   const progressAfterEdit = await getProgress(page);
-  const rankingsAfterEdit = progressAfterEdit.rankings as Record<string, unknown>;
-  expect(rankingsAfterEdit[first.id]).toBeUndefined();
-  expect(rankingsAfterEdit[second.id]).toBeTruthy();
+  const completionsAfterEdit = progressAfterEdit.completedContracts as Record<string, number>;
+  expect(completionsAfterEdit[first.id]).toBeUndefined();
+  expect(completionsAfterEdit[second.id]).toBe(second.revision);
   expect(progressAfterEdit.unlockedContracts).toEqual(
     expect.arrayContaining([first.id, second.id]),
   );
@@ -451,6 +478,9 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
   await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('3');
   await expect(page.locator('#editor-contract-form [data-stage-label]')).toHaveText('3-1');
+  await expect(page.locator('input[name="conveyorSlowCost"]')).toHaveValue('2000');
+  await expect(page.locator('input[name="conveyorNormalCost"]')).toHaveValue('2500');
+  await expect(page.locator('input[name="conveyorFastCost"]')).toHaveValue('3000');
 
   const progressBeforePreview = await page.evaluate(
     (key) => localStorage.getItem(key),
@@ -534,9 +564,9 @@ test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ 
   });
 
   const progress = await getProgress(page);
-  expect(progress.version).toBe(3);
+  expect(progress.version).toBe(4);
   expect(progress.unlockedContracts).toEqual([recreatedId]);
-  expect(progress.rankings).toEqual({});
+  expect(progress.completedContracts).toEqual({});
   await page.locator('[data-action="editor-cancel"]').click();
   await page.locator('#admin-toggle').click();
   const playerCard = page.locator('#contract-list .stage-contract-card');

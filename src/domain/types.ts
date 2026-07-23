@@ -8,12 +8,8 @@ export const PLAY_AREA_MAX_COLUMN = GRID_COLUMNS * (PLAY_AREA_MARGIN_STAGES + 1)
 export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
 export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
-export type MachineType =
-  | 'source'
-  | 'conveyor'
-  | 'tracked-conveyor'
-  | 'receiver'
-  | 'spring';
+export type MachineType = 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring';
+export type ConveyorSpeed = 'slow' | 'normal' | 'fast';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
 export type ContractId = string;
@@ -36,6 +32,7 @@ export interface MachineState {
   gridY: number;
   angle: number;
   reversed: boolean;
+  conveyorSpeed?: ConveyorSpeed;
   fixed: boolean;
 }
 
@@ -57,10 +54,20 @@ export interface CollectibleDefinition {
 
 export interface ContractGoal {
   deliveries: number;
-  maxLosses: number;
-  pieceBudget: number;
-  timeLimitSeconds?: number;
-  idealTimeSeconds?: number;
+  maxLosses?: number;
+}
+
+export interface ContractMachineCosts {
+  'tracked-conveyor': number;
+  spring: number;
+}
+
+export type ConveyorSpeedCosts = Record<ConveyorSpeed, number>;
+
+export interface ContractEconomy {
+  budgetLimit?: number;
+  machineCosts: ContractMachineCosts;
+  conveyorSpeedCosts?: ConveyorSpeedCosts;
 }
 
 export interface ContractCamera {
@@ -84,6 +91,7 @@ export interface ContractDefinition {
   obstacles: ObstacleDefinition[];
   collectibles: CollectibleDefinition[];
   goal: ContractGoal;
+  economy: ContractEconomy;
   spawnIntervalSeconds: number;
   initialCamera: ContractCamera;
 }
@@ -92,26 +100,9 @@ export interface RunMetrics {
   delivered: number;
   lost: number;
   active: number;
-  elapsedSeconds: number;
   placedPieces: number;
   collectedStars: number;
-}
-
-export interface ScoreBreakdown {
-  deliveryPoints: number;
-  timeBonus: number;
-  efficiencyBonus: number;
-  starBonus: number;
-  lossPenalty: number;
-}
-
-export interface ContractResult {
-  contractId: ContractId;
-  contractRevision: number;
-  score: number;
-  breakdown: ScoreBreakdown;
-  metrics: RunMetrics;
-  completedAt: string;
+  spent: number;
 }
 
 export interface SandboxSave {
@@ -120,9 +111,9 @@ export interface SandboxSave {
 }
 
 export interface ProgressSave {
-  version: 3;
+  version: 4;
   unlockedContracts: ContractId[];
-  rankings: Partial<Record<ContractId, ContractResult[]>>;
+  completedContracts: Partial<Record<ContractId, number>>;
   settings: {
     muted: boolean;
     volume: number;
@@ -131,7 +122,7 @@ export interface ProgressSave {
 }
 
 export interface ContractCatalogFile {
-  version: 2;
+  version: 3;
   contracts: ContractDefinition[];
   updatedAt: string;
 }
@@ -157,7 +148,20 @@ export interface GameSnapshot {
   status: SimulationStatus;
   metrics: RunMetrics;
   goal?: ContractGoal;
+  economy?: {
+    spent: number;
+    budgetLimit?: number;
+    hardLimit?: number;
+    machineCosts: ContractMachineCosts;
+    conveyorSpeedCosts?: ConveyorSpeedCosts;
+  };
   selectedMachine?: MachineState;
+  selectedMachineClientBounds?: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  };
   selectedObstacle?: ObstacleDefinition;
   selection: {
     machineIds: string[];

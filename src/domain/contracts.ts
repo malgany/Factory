@@ -27,13 +27,12 @@ export interface SandboxDefinition {
   readonly grid: GridSize;
   readonly availableMachines: readonly MachineType[];
   readonly fixedMachines: readonly MachineState[];
-  readonly pieceBudget?: never;
-  readonly timeLimitSeconds?: never;
+  readonly economy?: never;
 }
 
 export const SANDBOX_DEFINITION: SandboxDefinition = {
   title: 'Modo Livre',
-  description: 'Construa sem orçamento, cronômetro ou condição de vitória.',
+  description: 'Construa sem limite de orçamento ou condição de vitória.',
   grid: DEFAULT_GRID,
   availableMachines: ['source', 'tracked-conveyor', 'receiver', 'spring'],
   fixedMachines: [],

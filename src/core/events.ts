@@ -1,7 +1,7 @@
 import type {
   ContractDefinition,
+  ConveyorSpeed,
   ContractId,
-  ContractResult,
   GameMode,
   GameSnapshot,
   MachineState,
@@ -17,11 +17,9 @@ export interface AppEvents {
   'game:camera': { zoom: number; scrollX: number; scrollY: number };
   'game:toast': { message: string; tone: 'neutral' | 'success' | 'danger' };
   'game:result': { contractId: ContractId; snapshot: GameSnapshot };
-  'game:result-recorded': {
-    result: ContractResult;
+  'game:completion-recorded': {
+    contractId: ContractId;
     snapshot: GameSnapshot;
-    rankingPosition: number | null;
-    isNewRecord: boolean;
   };
   'game:sandbox-changed': MachineState[];
   'game:editor-changed': { contract: ContractDefinition; dirty: boolean };
@@ -65,6 +63,7 @@ export interface AppEvents {
   'ui:copy-selected': undefined;
   'ui:cut-selected': undefined;
   'ui:reverse-selected': undefined;
+  'ui:set-conveyor-speed': { speed: ConveyorSpeed };
   'ui:toggle-grid': undefined;
   'ui:set-simulation-speed': { speed: number };
   'ui:set-muted': { muted: boolean };

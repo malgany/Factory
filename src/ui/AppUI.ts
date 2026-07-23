@@ -1,11 +1,11 @@
 import { appEvents } from '../core/events';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import factoryCampaignEnvironmentUrl from '../assets/factory-campaign-environment.webp?url';
-import { createContractResult } from '../domain/rules';
+import { resolveConveyorSpeedCosts } from '../domain/economy';
 import type {
   ContractDefinition,
   ContractId,
-  ContractResult,
+  ConveyorSpeed,
   GameSnapshot,
   MachineState,
   MachineType,
@@ -42,7 +42,14 @@ type OptionsCategory = 'audio-video' | 'controls';
 type IconName =
   | MachineType
   | 'play'
+  | 'pause'
   | 'stop'
+  | 'check'
+  | 'warning'
+  | 'home'
+  | 'map'
+  | 'replay'
+  | 'arrow-right'
   | 'reset'
   | 'undo'
   | 'redo'
@@ -62,7 +69,6 @@ type IconName =
   | 'clear'
   | 'lock'
   | 'star'
-  | 'ranking'
   | 'edit'
   | 'settings'
   | 'close'
@@ -83,6 +89,12 @@ const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
 };
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
+const CONVEYOR_SPEEDS: readonly ConveyorSpeed[] = ['slow', 'normal', 'fast'];
+const CONVEYOR_SPEED_LABELS: Record<ConveyorSpeed, string> = {
+  slow: 'Devagar',
+  normal: 'Normal',
+  fast: 'Rápido',
+};
 const DRAG_UI_RESTORE_DELAY_MS = 300;
 const MINIMUM_LOADING_DURATION_MS = 360;
 const MENU_CAMERA_DURATION_MS = 650;
@@ -259,7 +271,6 @@ export class AppUI {
     menu.classList.remove('is-hidden');
     menu.removeAttribute('inert');
     this.element('#result-modal').classList.add('is-hidden');
-    this.element('#ranking-modal').classList.add('is-hidden');
     this.closePauseMenu();
     this.setMenuView(view);
     this.root.classList.add('is-menu-open');
@@ -435,19 +446,36 @@ export class AppUI {
         <header class="top-rail">
             <div class="top-left-controls">
               <button class="icon-button menu-button" data-action="pause-menu" aria-label="Abrir menu de pausa" title="Menu de pausa">
-                ${icon('menu')}
+                ${icon('back')}
               </button>
             </div>
 
-            <div class="top-right-controls">
-              <div class="metric-strip" role="status" aria-live="polite">
-                ${metric('Tempo', '00:00', 'time', 'time')}
-                ${metric('Perdas', '0 / 0', 'losses', 'losses')}
+            <div id="budget-meter" class="budget-meter is-hidden" role="status" aria-live="polite">
+              <strong data-budget-spent>$0</strong>
+              <div
+                class="budget-track"
+                data-budget-track
+                role="progressbar"
+                aria-label="Orçamento utilizado"
+                aria-valuemin="0"
+                aria-valuenow="0"
+              >
+                <span class="budget-fill" data-budget-fill></span>
               </div>
+              <span data-budget-limit>$0</span>
+            </div>
+
+            <div class="top-right-controls">
               <div class="simulation-controls" aria-label="Controles da simulação">
+                <button class="simulation-pause is-hidden" data-action="pause-toggle" type="button" aria-label="Pausar simulação" title="Pausar · Espaço">
+                  <span data-pause-icon data-icon="pause">${icon('pause')}</span>
+                </button>
                 <label class="speed-control" title="Velocidade da simulação">
-                  <span class="speed-readout" data-speed-label>1×</span>
-                  <input data-speed type="range" min="0" max="6" step="1" value="3" aria-label="Velocidade da simulação" aria-valuetext="1×" />
+                  <span class="speed-track-shell">
+                    <span class="speed-track-visual" aria-hidden="true"></span>
+                    <input data-speed type="range" min="0" max="6" step="1" value="3" aria-label="Velocidade da simulação" aria-valuetext="1×" />
+                    <output class="speed-readout" data-speed-label>1×</output>
+                  </span>
                 </label>
                 <button class="simulation-play" data-action="run" type="button" aria-label="Iniciar simulação" title="Iniciar · Espaço">
                   <span data-run-icon data-icon="play">${icon('play')}</span>
@@ -495,6 +523,14 @@ export class AppUI {
           <section class="build-dock glass-panel" aria-label="Ferramentas de construção">
             <div id="hotbar" class="hotbar" role="toolbar" aria-label="Máquinas"></div>
           </section>
+          <aside id="conveyor-speed-control" class="conveyor-speed-popover glass-panel is-hidden" aria-label="Velocidade da esteira selecionada">
+            <span>VELOCIDADE</span>
+            <div class="conveyor-speed-toggle" role="radiogroup" aria-label="Velocidade da esteira">
+              <button class="conveyor-speed-option" data-action="conveyor-speed-slow" data-conveyor-speed-option="slow" type="button" role="radio" aria-label="Velocidade 1" aria-checked="false">1</button>
+              <button class="conveyor-speed-option" data-action="conveyor-speed-normal" data-conveyor-speed-option="normal" type="button" role="radio" aria-label="Velocidade 2" aria-checked="true">2</button>
+              <button class="conveyor-speed-option" data-action="conveyor-speed-fast" data-conveyor-speed-option="fast" type="button" role="radio" aria-label="Velocidade 3" aria-checked="false">3</button>
+            </div>
+          </aside>
           <section id="selection-dock" class="selection-dock glass-panel is-hidden" aria-label="Ações da seleção">
             <button class="selection-action" data-action="copy" type="button" aria-label="Copiar item" title="Copiar · Ctrl+C">
               ${icon('copy')}
@@ -529,13 +565,22 @@ export class AppUI {
               <fieldset class="field-group">
                 <legend>Objetivo</legend>
                 <label class="field"><span>Meta de entregas *</span><input name="deliveries" type="number" min="1" step="1" inputmode="numeric" required /></label>
-                <label class="field"><span>Perdas máximas *</span><input name="maxLosses" type="number" min="0" step="1" required /></label>
-                <label class="field"><span>Limite de peças *</span><input name="pieceBudget" type="number" min="0" step="1" inputmode="numeric" required /></label>
-                <label class="field"><span>Tempo limite (s)</span><input name="timeLimitSeconds" type="number" min="1" step="1" inputmode="numeric" placeholder="Sem limite" /></label>
+                <label class="check-field"><input name="lossesEnabled" type="checkbox" /><span>Limitar perdas</span></label>
+                <label class="field field-wide optional-setting-field" data-losses-setting><span>Perdas máximas</span><input name="maxLosses" type="number" min="0" step="1" inputmode="numeric" /></label>
+                <p class="field-note field-wide">Todas as estrelas posicionadas no mapa fazem parte da meta.</p>
+              </fieldset>
+              <fieldset class="field-group economy-fields">
+                <legend>Orçamento</legend>
+                <label class="check-field field-wide"><input name="budgetEnabled" type="checkbox" /><span>Limitar orçamento da fase</span></label>
+                <label class="field field-wide optional-setting-field" data-budget-setting><span>Orçamento máximo (US$)</span><input name="budgetLimit" type="number" min="0" step="1" inputmode="numeric" placeholder="Sem limite" /></label>
+                <label class="field"><span>Esteira · velocidade 1 (US$) *</span><input name="conveyorSlowCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Esteira · velocidade 2 (US$) *</span><input name="conveyorNormalCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Esteira · velocidade 3 (US$) *</span><input name="conveyorFastCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Custo do trampolim (US$) *</span><input name="springCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <p class="field-note field-wide">Sem orçamento máximo, o jogador pode gastar sem limite e o medidor fica oculto.</p>
               </fieldset>
               <fieldset class="field-group">
-                <legend>Ritmo e pontuação</legend>
-                <label class="field field-wide"><span>Tempo ideal (s)</span><input name="idealTimeSeconds" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="Automático" /></label>
+                <legend>Ritmo</legend>
                 <label class="field field-wide spawn-interval-field">
                   <span>Intervalo de geração <output data-spawn-interval-output>1,25 s</output></span>
                   <input name="spawnIntervalSeconds" type="range" min="0.8" max="10" step="0.05" value="1.25" required />
@@ -580,7 +625,7 @@ export class AppUI {
                       ${icon('back')}
                     </button>
                     <section id="campaign-stage-actions" class="campaign-stage-actions is-hidden" aria-live="polite">
-                      <button class="primary-action" data-action="campaign-play" type="button">${icon('play')} Jogar</button>
+                      <button class="main-menu-action campaign-stage-play" data-action="campaign-play" type="button">Jogar</button>
                     </section>
                   </div>
 
@@ -603,7 +648,7 @@ export class AppUI {
                         </button>
                         <button class="sandbox-card" data-start-sandbox>
                           <span class="sandbox-mark">∞</span>
-                          <span><strong>Modo livre</strong><small>Todos os módulos, sem limite ou cronômetro.</small></span>
+                          <span><strong>Modo livre</strong><small>Todos os módulos, sem limite de orçamento.</small></span>
                           <span class="card-arrow" aria-hidden="true">→</span>
                         </button>
                       </div>
@@ -702,77 +747,70 @@ export class AppUI {
         </div>
         <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-        <section id="pause-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <section id="pause-modal" class="modal-layer pause-layer is-hidden" role="dialog" aria-modal="true" aria-label="Menu de pausa">
           <div class="modal-scrim"></div>
           <div class="pause-card">
-            <header class="pause-card-heading">
-              <div><span class="eyebrow accent">MENU DA SIMULAÇÃO</span><h2 id="pause-title">Pausado</h2></div>
-              <button class="icon-button" data-action="close-pause-menu" type="button" aria-label="Fechar menu de pausa" title="Fechar">
-                ${icon('close')}
+            <nav class="pause-menu-actions" aria-label="Navegação da pausa">
+              <button class="main-menu-action pause-menu-action pause-continue-action" data-action="close-pause-menu" type="button">
+                Continuar
               </button>
-            </header>
-            <button class="primary-action pause-save" data-action="save-progress" type="button">
-              ${icon('save')} <span>Salvar</span>
-            </button>
-            <div class="pause-setting">
-              <div><strong>Som</strong><span>Ativar efeitos sonoros</span></div>
-              <button class="icon-button sound-button" data-action="mute" type="button" aria-label="Silenciar" title="Som" aria-pressed="false">
-                <span data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
+              <button class="main-menu-action pause-menu-action" data-action="pause-options" type="button">
+                Opções
+              </button>
+              <button class="main-menu-action pause-menu-action" data-action="pause-campaign" type="button">
+                Sair para a campanha
+              </button>
+              <button class="main-menu-action pause-menu-action" data-action="pause-home" type="button">
+                Menu principal
+              </button>
+            </nav>
+            <div class="pause-quick-actions" aria-label="Atalhos da pausa">
+              <button class="pause-quick-action sound-button" data-action="mute" type="button" aria-label="Silenciar" aria-pressed="false">
+                <span class="pause-quick-icon" data-sound-icon>${icon(this.progress.settings.muted ? 'muted' : 'sound')}</span>
+                <span class="pause-quick-copy">
+                  <strong>Áudio</strong>
+                  <small data-sound-state>Ligado</small>
+                </span>
+              </button>
+              <button class="pause-quick-action" data-action="fullscreen" type="button" aria-label="Entrar em tela cheia" aria-pressed="false">
+                <span class="pause-quick-icon" data-fullscreen-icon>${icon('fullscreen')}</span>
+                <span class="pause-quick-copy">
+                  <strong data-fullscreen-title>Tela cheia</strong>
+                  <small data-fullscreen-state>Ativar</small>
+                </span>
               </button>
             </div>
-            <div class="pause-setting">
-              <div><strong data-fullscreen-title>Tela cheia</strong><span data-fullscreen-description>Expandir visualização</span></div>
-              <button class="icon-button" data-action="fullscreen" type="button" aria-label="Entrar em tela cheia" title="Tela cheia" aria-pressed="false">
-                <span data-fullscreen-icon>${icon('fullscreen')}</span>
-              </button>
-            </div>
-            <button class="soft-button pause-main-menu" data-action="menu" type="button">Menu principal</button>
           </div>
         </section>
 
-        <section id="result-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
+        <section id="result-modal" class="modal-layer result-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
           <div class="modal-scrim"></div>
           <div class="result-card">
-            <span class="eyebrow accent" id="result-kicker">CONTRATO CONCLUÍDO</span>
-            <h2 id="result-title">Fluxo estabelecido</h2>
-            <div class="result-score" aria-live="polite">
-              <span>PONTUAÇÃO</span>
-              <strong data-result-score>0</strong>
-              <small data-result-ranking>Fora do ranking</small>
-            </div>
-            <p id="result-summary">A linha encontrou seu ritmo.</p>
+            <header class="result-heading">
+              <span id="result-kicker">FASE</span>
+              <h2 id="result-title">Contrato concluído</h2>
+              <p id="result-summary">As metas de entregas e os serviços foram concluídos.</p>
+            </header>
             <div class="result-metrics">
-              ${resultMetric('Entregues', '0', 'delivered')}
-              ${resultMetric('Perdidas', '0', 'lost')}
-              ${resultMetric('Tempo', '00:00', 'elapsed')}
-              ${resultMetric('Peças', '0', 'pieces')}
-              ${resultMetric('Estrelas', '0', 'collected-stars')}
+              ${resultMetric('Entregas', '0 / 0', 'delivered', 'deliveries')}
+              ${resultMetric('Estrelas', '0 / 0', 'collected-stars', 'stars')}
+              ${resultMetric('Orçamento', '$0 / Sem limite', 'budget', 'budget')}
+              ${resultMetric('Perdas', '0', 'lost', 'losses', true)}
             </div>
-            <dl class="score-breakdown is-hidden" id="score-breakdown">
-              <div><dt>Entregas</dt><dd data-score-part="deliveries">+0</dd></div>
-              <div><dt>Velocidade</dt><dd data-score-part="time">+0</dd></div>
-              <div><dt>Eficiência</dt><dd data-score-part="efficiency">+0</dd></div>
-              <div><dt>Estrelas</dt><dd data-score-part="stars">+0</dd></div>
-              <div class="is-penalty"><dt>Perdas</dt><dd data-score-part="losses">−0</dd></div>
-            </dl>
-            <div class="result-actions">
-              <button class="soft-button" data-action="result-menu">Menu</button>
-              <button class="soft-button" data-action="replay">Repetir</button>
-              <button class="primary-action" data-action="next">Próximo contrato <span>→</span></button>
-            </div>
+            <nav class="result-actions" aria-label="Ações do contrato">
+              <button class="main-menu-action result-menu-action" data-action="result-menu" type="button">
+                <span>Menu</span>
+              </button>
+              <button class="main-menu-action result-menu-action" data-action="replay" type="button">
+                <span>Repetir</span>
+              </button>
+              <button class="main-menu-action result-menu-action result-menu-action-primary" data-action="next" type="button">
+                <span>Próximo contrato</span>
+              </button>
+            </nav>
           </div>
         </section>
 
-        <section id="ranking-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="ranking-title">
-          <div class="modal-scrim" data-action="campaign-ranking-close"></div>
-          <div class="ranking-card">
-            <header>
-              <div><span class="eyebrow accent">TOP 10 LOCAL</span><h2 id="ranking-title">Ranking da fase 1-1</h2></div>
-              <button class="icon-button" data-action="campaign-ranking-close" type="button" aria-label="Fechar ranking">${icon('close')}</button>
-            </header>
-            <div id="ranking-list" class="ranking-list"></div>
-          </div>
-        </section>
         <section id="editor-confirm-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="editor-confirm-title">
           <div class="modal-scrim"></div>
           <div class="confirm-card">
@@ -831,6 +869,11 @@ export class AppUI {
       },
       { signal: this.domEvents.signal },
     );
+    this.element('#conveyor-speed-control').addEventListener(
+      'pointerdown',
+      (event) => event.stopPropagation(),
+      { signal: this.domEvents.signal },
+    );
     this.root.addEventListener(
       'pointerover',
       (event) => {
@@ -875,6 +918,9 @@ export class AppUI {
     };
     window.addEventListener('beforeunload', preventDirtyUnload);
     this.unsubs.push(() => window.removeEventListener('beforeunload', preventDirtyUnload));
+    window.addEventListener('pagehide', () => this.persistProgress(), {
+      signal: this.domEvents.signal,
+    });
     document.addEventListener('fullscreenchange', () => this.updateFullscreenControls(), {
       signal: this.domEvents.signal,
     });
@@ -882,18 +928,12 @@ export class AppUI {
     this.root.addEventListener(
       'keydown',
       (event) => {
-        const rankingModal = this.element('#ranking-modal');
         const resultModal = this.element('#result-modal');
-        const activeModal = !rankingModal.classList.contains('is-hidden')
-          ? rankingModal
-          : !resultModal.classList.contains('is-hidden')
-            ? resultModal
-            : undefined;
+        const activeModal = !resultModal.classList.contains('is-hidden') ? resultModal : undefined;
         if (!activeModal) return;
         if (event.key === 'Escape') {
           event.preventDefault();
-          if (activeModal === rankingModal) this.closeCampaignRanking();
-          else this.handleAction('result-menu');
+          this.handleAction('result-menu');
           return;
         }
         if (event.key !== 'Tab') return;
@@ -954,15 +994,10 @@ export class AppUI {
       appEvents.on('game:audio', ({ kind }) => this.audio.play(kind)),
       appEvents.on('game:result', ({ contractId, snapshot }) => {
         if (snapshot.status === 'success' && snapshot.mode === 'campaign') return;
-        const contract = this.contracts.find(({ id }) => id === contractId) ?? this.editorContract;
-        const result =
-          snapshot.status === 'success' && contract
-            ? createContractResult(contract, snapshot.metrics)
-            : undefined;
-        this.renderResult({ contractId, snapshot, result });
+        this.renderResult({ contractId, snapshot });
       }),
-      appEvents.on('game:result-recorded', ({ result, snapshot, rankingPosition, isNewRecord }) => {
-        const contract = this.contracts.find(({ id }) => id === result.contractId);
+      appEvents.on('game:completion-recorded', ({ contractId, snapshot }) => {
+        const contract = this.contracts.find(({ id }) => id === contractId);
         const next = contract
           ? this.contracts.find(
               (candidate) =>
@@ -974,11 +1009,8 @@ export class AppUI {
           this.renderCampaignMap();
         }
         this.renderResult({
-          contractId: result.contractId,
+          contractId,
           snapshot,
-          result,
-          rankingPosition,
-          isNewRecord,
         });
       }),
       appEvents.on('game:editor-changed', ({ contract, dirty }) => {
@@ -1055,12 +1087,6 @@ export class AppUI {
       case 'campaign-play':
         this.startSelectedCampaign();
         break;
-      case 'campaign-ranking':
-        this.openCampaignRanking();
-        break;
-      case 'campaign-ranking-close':
-        this.closeCampaignRanking();
-        break;
       case 'options-audio-video':
         this.setOptionsCategory('audio-video');
         break;
@@ -1075,6 +1101,15 @@ export class AppUI {
       case 'close-pause-menu':
         this.closePauseMenu();
         break;
+      case 'pause-options':
+        this.leaveSimulationToMenu('options');
+        break;
+      case 'pause-campaign':
+        this.leaveSimulationToMenu('play');
+        break;
+      case 'pause-home':
+        this.leaveSimulationToMenu('home');
+        break;
       case 'menu':
       case 'result-menu':
         if (this.editorContract) {
@@ -1085,8 +1120,14 @@ export class AppUI {
         this.showMenu();
         break;
       case 'run':
-        if (this.snapshot?.status === 'running') appEvents.emit('ui:reset', undefined);
+        if (this.snapshot?.status === 'running' || this.snapshot?.status === 'paused') {
+          appEvents.emit('ui:reset', undefined);
+        }
         else appEvents.emit('ui:run', undefined);
+        break;
+      case 'pause-toggle':
+        if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+        else if (this.snapshot?.status === 'paused') appEvents.emit('ui:run', undefined);
         break;
       case 'clear':
         appEvents.emit('ui:clear', undefined);
@@ -1109,6 +1150,14 @@ export class AppUI {
       case 'reverse':
         appEvents.emit('ui:reverse-selected', undefined);
         break;
+      case 'conveyor-speed-slow':
+      case 'conveyor-speed-normal':
+      case 'conveyor-speed-fast': {
+        const speed = action.replace('conveyor-speed-', '') as ConveyorSpeed;
+        this.renderConveyorSpeed(speed);
+        appEvents.emit('ui:set-conveyor-speed', { speed });
+        break;
+      }
       case 'toggle-grid':
         appEvents.emit('ui:toggle-grid', undefined);
         break;
@@ -1167,10 +1216,6 @@ export class AppUI {
         if (this.catalogSaving) break;
         this.confirmAdminAction();
         break;
-      case 'save-progress':
-        this.onProgressChange?.(this.progress);
-        this.showToast('Jogo salvo.', 'success');
-        break;
       case 'mute': {
         const muted = this.audio.toggleMuted();
         this.commitSettings({ muted });
@@ -1198,10 +1243,26 @@ export class AppUI {
   private openPauseMenu(): void {
     if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
     this.element('#pause-modal').classList.remove('is-hidden');
+    window.requestAnimationFrame(() =>
+      this.root
+        .querySelector<HTMLButtonElement>('#pause-modal [data-action="close-pause-menu"]')
+        ?.focus({ preventScroll: true }),
+    );
   }
 
   private closePauseMenu(): void {
     this.element('#pause-modal').classList.add('is-hidden');
+    if (this.snapshot?.status === 'paused') appEvents.emit('ui:run', undefined);
+  }
+
+  private leaveSimulationToMenu(view: MenuView): void {
+    this.persistProgress();
+    appEvents.emit('ui:menu', undefined);
+    this.showMenu(view);
+  }
+
+  private persistProgress(): void {
+    this.onProgressChange?.(this.progress);
   }
 
   private renderMenuCards(): void {
@@ -1231,8 +1292,8 @@ export class AppUI {
       this.renderCatalogSavingState();
       return;
     }
-    const completed = this.contracts.filter(
-      (contract) => (this.progress.rankings[contract.id]?.length ?? 0) > 0,
+    const completed = this.contracts.filter((contract) =>
+      isContractCompleted(this.progress, contract),
     ).length;
     this.element('#campaign-progress').textContent =
       `${completed} de ${this.contracts.length} concluídos`;
@@ -1246,10 +1307,10 @@ export class AppUI {
 
     this.contracts.forEach((contract, index) => {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
-      const best = this.progress.rankings[contract.id]?.[0];
+      const isCompleted = isContractCompleted(this.progress, contract);
       const label = contractLabel(contract);
       const button = document.createElement('button');
-      button.className = `contract-card stage-contract-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
+      button.className = `contract-card stage-contract-card${unlocked ? '' : ' is-locked'}${isCompleted ? ' is-complete' : ''}`;
       button.disabled = !unlocked;
       button.dataset.contractIndex = String(index);
       button.setAttribute(
@@ -1261,14 +1322,14 @@ export class AppUI {
           ${contractStagePreview(contract)}
           ${unlocked ? '' : `<span class="stage-card-lock">${icon('lock')}</span>`}
         </span>
-        <span class="stage-card-details">
-          <span class="stage-card-kicker">MUNDO ${contract.world}</span>
-          <span class="contract-title-row"><strong>${label}</strong>${best ? `<i>${formatScore(best.score)} pts</i>` : ''}</span>
-          <span class="contract-tags">
-            <i>${contract.goal.deliveries} caixas</i>
-            <i>${contract.goal.pieceBudget} peças</i>
-            ${contract.goal.timeLimitSeconds ? `<i>${formatTime(contract.goal.timeLimitSeconds)}</i>` : ''}
-          </span>
+          <span class="stage-card-details">
+            <span class="stage-card-kicker">MUNDO ${contract.world}</span>
+            <span class="contract-title-row"><strong>${label}</strong></span>
+            <span class="contract-tags">
+              <i>${contract.goal.deliveries} caixas</i>
+              <i>${contract.collectibles.length} estrelas</i>
+              <i>${formatBudgetLabel(contract.economy.budgetLimit)}</i>
+            </span>
           <span class="stage-card-cta">${unlocked ? `Jogar ${icon('play')}` : `Bloqueada ${icon('lock')}`}</span>
         </span>
       `;
@@ -1287,7 +1348,7 @@ export class AppUI {
 
       const dot = document.createElement('button');
       dot.type = 'button';
-      dot.className = `contract-dot${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
+      dot.className = `contract-dot${unlocked ? '' : ' is-locked'}${isCompleted ? ' is-complete' : ''}`;
       dot.dataset.contractDot = contract.id;
       dot.setAttribute(
         'aria-label',
@@ -1325,7 +1386,7 @@ export class AppUI {
     );
     if (!currentSelection) {
       const firstIncomplete = unlockedContracts.find(
-        (contract) => (this.progress.rankings[contract.id]?.length ?? 0) === 0,
+        (contract) => !isContractCompleted(this.progress, contract),
       );
       this.selectedCampaignContractId =
         firstIncomplete?.id ?? unlockedContracts.at(-1)?.id ?? unlockedContracts[0]?.id;
@@ -1345,7 +1406,7 @@ export class AppUI {
       const contract = contractsByStage.get(position.stage);
       const unlocked = Boolean(contract && this.progress.unlockedContracts.includes(contract.id));
       const selected = unlocked && contract?.id === this.selectedCampaignContractId;
-      const completed = Boolean(contract && this.progress.rankings[contract.id]?.length);
+      const completed = Boolean(contract && isContractCompleted(this.progress, contract));
       const label = `${position.stage}-${CAMPAIGN_WORLD}`;
       const ariaLabel = !contract
         ? `Fase ${label}, não cadastrada`
@@ -1408,45 +1469,6 @@ export class AppUI {
     });
   }
 
-  private openCampaignRanking(): void {
-    const contract = this.contracts.find(({ id }) => id === this.selectedCampaignContractId);
-    if (!contract) return;
-    this.element('#ranking-title').textContent = `Ranking da fase ${contractLabel(contract)}`;
-    const ranking = this.progress.rankings[contract.id] ?? [];
-    const list = this.element('#ranking-list');
-    list.innerHTML = ranking.length
-      ? ranking
-          .map(
-            (result, index) => `<article class="ranking-entry">
-              <strong class="ranking-position">${index + 1}º</strong>
-              <div><b>${formatScore(result.score)} pts</b><span>${formatRankingDate(result.completedAt)}</span></div>
-              <dl>
-                <div><dt>Tempo</dt><dd>${formatTime(result.metrics.elapsedSeconds)}</dd></div>
-                <div><dt>Perdas</dt><dd>${result.metrics.lost}</dd></div>
-                <div><dt>Peças</dt><dd>${result.metrics.placedPieces}</dd></div>
-                <div><dt>Estrelas</dt><dd>${result.metrics.collectedStars}</dd></div>
-              </dl>
-            </article>`,
-          )
-          .join('')
-      : '<div class="ranking-empty"><strong>Ainda não há pontuações</strong><span>Conclua a fase para entrar no Top 10 local.</span></div>';
-    this.element('#ranking-modal').classList.remove('is-hidden');
-    this.element('#menu-screen').toggleAttribute('inert', true);
-    window.requestAnimationFrame(() =>
-      this.root
-        .querySelector<HTMLButtonElement>('#ranking-modal [data-action="campaign-ranking-close"]')
-        ?.focus(),
-    );
-  }
-
-  private closeCampaignRanking(): void {
-    this.element('#ranking-modal').classList.add('is-hidden');
-    this.element('#menu-screen').removeAttribute('inert');
-    this.root
-      .querySelector<HTMLButtonElement>('[data-action="campaign-ranking"]')
-      ?.focus({ preventScroll: true });
-  }
-
   private selectMenuContract(
     index: number,
     scroll: boolean,
@@ -1468,20 +1490,20 @@ export class AppUI {
   }
 
   private renderAdminMenuCards(list: HTMLElement): void {
-    const completed = this.contracts.filter(
-      (contract) => (this.progress.rankings[contract.id]?.length ?? 0) > 0,
+    const completed = this.contracts.filter((contract) =>
+      isContractCompleted(this.progress, contract),
     ).length;
     this.element('#campaign-progress').textContent =
       `${completed} de ${this.contracts.length} concluídos`;
 
     for (const contract of this.contracts) {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
-      const best = this.progress.rankings[contract.id]?.[0];
+      const completedContract = isContractCompleted(this.progress, contract);
       const label = contractLabel(contract);
       const entry = document.createElement('article');
       entry.className = 'contract-entry';
       const button = document.createElement('button');
-      button.className = `contract-card is-admin-card${unlocked ? '' : ' is-locked'}${best ? ' is-complete' : ''}`;
+      button.className = `contract-card is-admin-card${unlocked ? '' : ' is-locked'}${completedContract ? ' is-complete' : ''}`;
       button.setAttribute('aria-label', `Editar fase ${label}`);
       button.innerHTML = `
         <span class="contract-index">${label}</span>
@@ -1491,8 +1513,8 @@ export class AppUI {
           </span>
           <span class="contract-tags">
             <i>${contract.goal.deliveries} caixas</i>
-            <i>${contract.goal.pieceBudget} peças</i>
-            ${contract.goal.timeLimitSeconds ? `<i>${formatTime(contract.goal.timeLimitSeconds)}</i>` : ''}
+            <i>${contract.collectibles.length} estrelas</i>
+            <i>${formatBudgetLabel(contract.economy.budgetLimit)}</i>
           </span>
         </span>
         <span class="card-arrow" aria-hidden="true">${icon('edit')}</span>`;
@@ -1517,30 +1539,36 @@ export class AppUI {
 
   private renderSnapshot(snapshot: GameSnapshot): void {
     this.snapshot = snapshot;
-    this.element('[data-metric="time"] strong').textContent = formatTime(
-      snapshot.metrics.elapsedSeconds,
-    );
-    this.element('[data-metric="losses"] strong').textContent = snapshot.goal
-      ? `${snapshot.metrics.lost} / ${snapshot.goal.maxLosses}`
-      : `${snapshot.metrics.lost}`;
+    this.renderBudgetMeter(snapshot.economy);
     const runIcon = this.element('[data-run-icon]');
     const runButton = this.element<HTMLButtonElement>('[data-action="run"]');
     const running = snapshot.status === 'running';
-    const runIconName = running ? 'stop' : 'play';
+    const paused = snapshot.status === 'paused';
+    const active = running || paused;
+    const runIconName = active ? 'stop' : 'play';
     if (runIcon.dataset.icon !== runIconName) {
       runIcon.innerHTML = icon(runIconName);
       runIcon.dataset.icon = runIconName;
     }
-    runButton.classList.toggle('is-stop', running);
-    const runAction = running
-      ? 'Reiniciar simulação'
-      : snapshot.status === 'paused'
-        ? 'Continuar simulação'
-        : 'Iniciar simulação';
+    runButton.classList.toggle('is-stop', active);
+    const runAction = active ? 'Parar simulação' : 'Iniciar simulação';
     runButton.setAttribute('aria-label', runAction);
-    runButton.title = `${runAction} · Espaço`;
+    runButton.title = active ? runAction : `${runAction} · Espaço`;
     // Terminal states are restartable through runSimulation, just like the Space shortcut.
     runButton.disabled = false;
+
+    const pauseButton = this.element<HTMLButtonElement>('[data-action="pause-toggle"]');
+    const pauseIcon = this.element('[data-pause-icon]');
+    const pauseIconName = paused ? 'play' : 'pause';
+    if (pauseIcon.dataset.icon !== pauseIconName) {
+      pauseIcon.innerHTML = icon(pauseIconName);
+      pauseIcon.dataset.icon = pauseIconName;
+    }
+    pauseButton.classList.toggle('is-hidden', !active);
+    pauseButton.classList.toggle('is-resume', paused);
+    const pauseAction = paused ? 'Retomar simulação' : 'Pausar simulação';
+    pauseButton.setAttribute('aria-label', pauseAction);
+    pauseButton.title = `${pauseAction} · Espaço`;
     this.renderSimulationSpeed(snapshot.simulationSpeed);
 
     this.element<HTMLButtonElement>('[data-action="undo"]').disabled = !snapshot.canUndo;
@@ -1557,7 +1585,7 @@ export class AppUI {
       snapshot.mode !== 'sandbox',
     );
     if (this.editorContract && !this.editorPreviewActive) this.renderEditorPalette();
-    else this.renderHotbar(snapshot.availableMachines);
+    else this.renderHotbar(snapshot.availableMachines, snapshot.economy);
     if (snapshot.selection.count > 0) {
       this.element('#hotbar')
         .querySelectorAll('.tool-button')
@@ -1567,31 +1595,96 @@ export class AppUI {
       snapshot.selectedMachine,
       snapshot.selectedObstacle,
       snapshot.selection.count,
+      snapshot.selectedMachineClientBounds,
     );
   }
 
-  private renderHotbar(machines: MachineType[]): void {
+  private renderBudgetMeter(economy: GameSnapshot['economy']): void {
+    const meter = this.element('#budget-meter');
+    const limit = economy?.budgetLimit;
+    const visible = limit !== undefined;
+    meter.classList.toggle('is-hidden', !visible);
+    if (!visible || !economy) return;
+
+    const spent = Math.max(0, economy.spent);
+    const hardLimit = economy.hardLimit ?? limit * 2;
+    const overBudget = limit > 0 && spent >= limit;
+    const fillRatio = limit > 0 ? (overBudget ? (spent - limit) / limit : spent / limit) : 0;
+    const fill = this.element<HTMLElement>('[data-budget-fill]');
+    fill.style.setProperty('--budget-fill', `${Math.min(1, Math.max(0, fillRatio)) * 100}%`);
+    meter.classList.toggle('is-over-budget', overBudget);
+    meter.classList.toggle('is-at-hard-limit', spent >= hardLimit);
+    this.element('[data-budget-spent]').textContent = formatCurrency(spent);
+    this.element('[data-budget-limit]').textContent = formatCurrency(limit);
+
+    const track = this.element('[data-budget-track]');
+    track.setAttribute('aria-valuenow', String(Math.round(spent)));
+    track.setAttribute('aria-valuemax', String(Math.round(hardLimit)));
+    track.setAttribute(
+      'aria-valuetext',
+      `${formatCurrency(spent)} gastos de ${formatCurrency(limit)} de orçamento`,
+    );
+  }
+
+  private renderHotbar(
+    machines: MachineType[],
+    economy: GameSnapshot['economy'],
+  ): void {
     const hotbar = this.element('#hotbar');
     const wasEditor = hotbar.dataset.mode === 'editor';
     hotbar.dataset.mode = 'player';
     const currentTypes = [...hotbar.querySelectorAll<HTMLElement>('[data-tool]')].map(
       (node) => node.dataset.tool,
     );
-    if (!wasEditor && currentTypes.join('|') === machines.join('|')) return;
+    const costSignature = machines.map((machine) => machineCost(economy, machine)).join('|');
+    const needsRebuild =
+      wasEditor ||
+      currentTypes.join('|') !== machines.join('|') ||
+      hotbar.dataset.costSignature !== costSignature;
 
-    hotbar.innerHTML = '';
-    for (const machine of machines) {
-      const copy = MACHINE_COPY[machine];
-      const button = document.createElement('button');
-      button.className = 'tool-button';
-      button.dataset.tool = machine;
-      button.setAttribute('aria-label', `${copy.name}: ${copy.hint}`);
-      button.title = `${copy.name} · Arraste para posicionar`;
-      button.innerHTML = `
-        <span class="tool-glyph tool-${machine}">${machineThumbnail(machine)}</span>`;
-      this.bindPaletteDrag(button, hotbar, machine);
-      hotbar.append(button);
+    if (needsRebuild) {
+      hotbar.innerHTML = '';
+      hotbar.dataset.costSignature = costSignature;
+      for (const machine of machines) {
+        const copy = MACHINE_COPY[machine];
+        const cost = machineCost(economy, machine);
+        const tooltipId = `tool-tooltip-${machine}`;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tool-button';
+        button.dataset.tool = machine;
+        button.setAttribute(
+          'aria-label',
+          `${copy.name}: ${copy.hint}. Custo ${formatCurrency(cost)}`,
+        );
+        button.setAttribute('aria-describedby', tooltipId);
+        button.innerHTML = `
+          <span class="tool-glyph tool-${machine}">${machineThumbnail(machine)}</span>
+          ${toolTooltip(tooltipId, copy.name, copy.hint, formatCurrency(cost))}`;
+        this.bindPaletteDrag(button, hotbar, machine);
+        hotbar.append(button);
+      }
     }
+
+    const spent = economy?.spent ?? 0;
+    const hardLimit = economy?.hardLimit;
+    hotbar.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((button) => {
+      const machine = button.dataset.tool as MachineType;
+      const cost = machineCost(economy, machine);
+      const unavailable = hardLimit !== undefined && spent + cost > hardLimit;
+      button.classList.toggle('is-unaffordable', unavailable);
+      button.setAttribute('aria-disabled', String(unavailable));
+      const tooltip = button.querySelector<HTMLElement>('.tool-tooltip');
+      tooltip?.classList.toggle('is-unaffordable', unavailable);
+      const status = tooltip?.querySelector<HTMLElement>('[data-tool-status]');
+      if (status) {
+        status.textContent = unavailable
+          ? 'Limite máximo atingido'
+          : economy?.budgetLimit === undefined
+            ? 'Sem limite'
+            : '';
+      }
+    });
   }
 
   private renderEditorPalette(): void {
@@ -1623,13 +1716,14 @@ export class AppUI {
       button.type = 'button';
       button.className = 'tool-button editor-tool-button';
       button.dataset.editorTool = tool.type;
-      button.title = `${tool.label} · Arraste para posicionar`;
       button.setAttribute('aria-label', `${tool.label}: ${tool.hint}`);
+      const tooltipId = `editor-tool-tooltip-${tool.type}`;
+      button.setAttribute('aria-describedby', tooltipId);
       button.innerHTML = `<span class="tool-glyph tool-${tool.type}">${
         tool.type === 'obstacle' || tool.type === 'star'
           ? icon(tool.icon)
           : machineThumbnail(tool.type)
-      }</span>`;
+      }</span>${toolTooltip(tooltipId, tool.label, tool.hint)}`;
       this.bindPaletteDrag(button, hotbar, tool.type);
       hotbar.append(button);
     }
@@ -1661,7 +1755,7 @@ export class AppUI {
     };
 
     button.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || button.getAttribute('aria-disabled') === 'true') return;
       event.preventDefault();
       origin = { x: event.clientX, y: event.clientY };
       dragging = false;
@@ -1700,6 +1794,7 @@ export class AppUI {
     machine?: MachineState,
     obstacle?: ObstacleDefinition,
     selectionCount = 0,
+    machineClientBounds?: GameSnapshot['selectedMachineClientBounds'],
   ): void {
     const editing = Boolean(this.editorContract && !this.editorPreviewActive);
     const canManipulate = Boolean(
@@ -1712,6 +1807,7 @@ export class AppUI {
     const copy = this.element<HTMLButtonElement>('[data-action="copy"]');
     const cut = this.element<HTMLButtonElement>('[data-action="cut"]');
     const reverse = this.element<HTMLButtonElement>('[data-action="reverse"]');
+    const speedControl = this.element('#conveyor-speed-control');
     remove.disabled = !canManipulate;
     copy.disabled = !canManipulate;
     cut.disabled = !canManipulate;
@@ -1724,6 +1820,12 @@ export class AppUI {
     );
     reverse.classList.toggle('is-hidden', !canReverse);
     reverse.disabled = !canReverse;
+    const showSpeed = Boolean(canReverse && machine && machineClientBounds);
+    speedControl.classList.toggle('is-hidden', !showSpeed);
+    if (showSpeed && machine && machineClientBounds) {
+      this.renderConveyorSpeed(machine.conveyorSpeed ?? 'normal');
+      this.positionConveyorSpeed(speedControl, machineClientBounds);
+    }
     remove.setAttribute(
       'aria-label',
       multiple ? `Excluir ${selectionCount} itens` : 'Excluir item',
@@ -1752,6 +1854,52 @@ export class AppUI {
     this.root.classList.toggle('has-selection-actions', canManipulate);
   }
 
+  private positionConveyorSpeed(
+    control: HTMLElement,
+    bounds: NonNullable<GameSnapshot['selectedMachineClientBounds']>,
+  ): void {
+    const containerBounds = this.element('#game-ui').getBoundingClientRect();
+    const safeEdge = 16;
+    const verticalGap = 14;
+    const rotationClearance = 54;
+    const width = control.offsetWidth || 176;
+    const height = control.offsetHeight || 72;
+    const centeredLeft =
+      (bounds.left + bounds.right) / 2 - containerBounds.left - width / 2;
+    const maximumLeft = Math.max(safeEdge, containerBounds.width - width - safeEdge);
+    const left = Math.min(Math.max(centeredLeft, safeEdge), maximumLeft);
+    const belowTop = bounds.bottom - containerBounds.top + verticalGap;
+    const selectionDockBounds = this.element('#selection-dock').getBoundingClientRect();
+    const selectionDockTop = selectionDockBounds.top - containerBounds.top;
+    const bottomLimit = Math.min(containerBounds.height - 104, selectionDockTop - verticalGap);
+    const fitsBelow = belowTop + height <= bottomLimit;
+    const aboveTop =
+      bounds.top - containerBounds.top - height - rotationClearance;
+    const top = fitsBelow
+      ? belowTop
+      : Math.max(96, Math.min(aboveTop, bottomLimit - height));
+
+    control.dataset.placement = fitsBelow ? 'bottom' : 'top';
+    control.style.left = `${Math.round(left)}px`;
+    control.style.top = `${Math.round(top)}px`;
+  }
+
+  private renderConveyorSpeed(speed: ConveyorSpeed): void {
+    const normalized = CONVEYOR_SPEEDS.includes(speed) ? speed : 'normal';
+    const control = this.element('#conveyor-speed-control');
+    control.dataset.level = normalized;
+    control
+      .querySelectorAll<HTMLButtonElement>('[data-conveyor-speed-option]')
+      .forEach((button) => {
+        const active = button.dataset.conveyorSpeedOption === normalized;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-checked', String(active));
+        button.title = active
+          ? `${CONVEYOR_SPEED_LABELS[normalized]} selecionado`
+          : `Usar velocidade ${button.textContent?.trim().toLocaleLowerCase('pt-BR') ?? ''}`;
+      });
+  }
+
   private renderSimulationSpeed(speed: number): void {
     const nearestIndex = SIMULATION_SPEEDS.reduce(
       (bestIndex, candidate, index) =>
@@ -1766,6 +1914,11 @@ export class AppUI {
     input.value = String(nearestIndex);
     input.setAttribute('aria-valuetext', label);
     this.element('[data-speed-label]').textContent = label;
+    const progress = nearestIndex / (SIMULATION_SPEEDS.length - 1);
+    const thumbHalfWidth = 22;
+    const control = this.element<HTMLElement>('.speed-control');
+    control.style.setProperty('--speed-position', `${progress * 100}%`);
+    control.style.setProperty('--speed-offset', `${thumbHalfWidth * (1 - 2 * progress)}px`);
   }
 
   private setDragUiOccluded(occluded: boolean): void {
@@ -1802,67 +1955,69 @@ export class AppUI {
   private renderResult(payload: {
     contractId: ContractId;
     snapshot: GameSnapshot;
-    result?: ContractResult;
-    rankingPosition?: number | null;
-    isNewRecord?: boolean;
   }): void {
-    const { snapshot, result } = payload;
+    const { snapshot } = payload;
     const success = snapshot.status === 'success';
     const contract =
-      this.contracts.find((item) => item.id === payload.contractId) ?? this.editorContract;
+      this.editorContract && (snapshot.mode === 'editor' || snapshot.mode === 'preview')
+        ? this.editorContract
+        : this.contracts.find((item) => item.id === payload.contractId);
+    const totalStars = contract?.collectibles.length ?? 0;
+    const goalDeliveries = snapshot.goal?.deliveries ?? contract?.goal.deliveries ?? 0;
+    const spent = snapshot.economy?.spent ?? snapshot.metrics.spent;
+    const budgetLimit = snapshot.economy?.budgetLimit ?? contract?.economy.budgetLimit;
+    const tracksLosses = snapshot.goal?.maxLosses !== undefined;
 
     this.resultContractId = payload.contractId;
-    this.element('#result-kicker').textContent = success
-      ? 'CONTRATO CONCLUÍDO'
-      : 'TENTATIVA ENCERRADA';
+    const resultCard = this.element('.result-card');
+    resultCard.classList.toggle('is-success', success);
+    resultCard.classList.toggle('is-failure', !success);
+    this.element('#result-kicker').textContent = contract
+      ? `FASE ${contractLabel(contract)}`
+      : 'CONTRATO';
     this.element('#result-title').textContent = success
-      ? contract
-        ? `Fase ${contractLabel(contract)}`
-        : 'Fluxo estabelecido'
-      : 'A linha parou';
+      ? 'Contrato concluído'
+      : 'Contrato não concluído';
     this.element('#result-summary').textContent = success
-      ? payload.isNewRecord
-        ? 'Novo recorde local. O fluxo encontrou um ritmo excepcional.'
-        : 'A meta foi concluída. Tente novamente para subir no ranking.'
-      : snapshot.goal && snapshot.metrics.lost > snapshot.goal.maxLosses
+      ? budgetLimit === undefined
+        ? 'As metas de entregas e os serviços foram concluídos.'
+        : 'As metas de entregas e os serviços foram concluídos dentro do orçamento.'
+      : tracksLosses && snapshot.metrics.lost > snapshot.goal!.maxLosses!
         ? 'Muitas caixas foram perdidas. Ajuste os ângulos e tente de novo.'
-        : 'O tempo terminou. Encurte o percurso e mantenha o ritmo.';
+        : budgetLimit !== undefined && spent > budgetLimit
+          ? 'O orçamento nominal foi ultrapassado. Reduza os itens para concluir a fase.'
+          : 'A meta não foi concluída. Ajuste a linha e tente de novo.';
 
-    this.element('[data-result-score]').textContent = formatScore(result?.score ?? 0);
-    this.element('[data-result-ranking]').textContent = success
-      ? payload.rankingPosition
-        ? `${payload.rankingPosition}º lugar no Top 10 local`
-        : snapshot.mode === 'campaign'
-          ? 'Resultado fora do Top 10 local'
-          : 'Prévia do editor · não salva'
-      : 'Tentativa não classificada';
     this.element('[data-result="delivered"] strong').textContent = String(
-      snapshot.metrics.delivered,
-    );
-    this.element('[data-result="lost"] strong').textContent = String(snapshot.metrics.lost);
-    this.element('[data-result="elapsed"] strong').textContent = formatTime(
-      snapshot.metrics.elapsedSeconds,
-    );
-    this.element('[data-result="pieces"] strong').textContent = String(
-      snapshot.metrics.placedPieces,
+      `${snapshot.metrics.delivered} / ${goalDeliveries}`,
     );
     this.element('[data-result="collected-stars"] strong').textContent = String(
-      snapshot.metrics.collectedStars,
+      `${snapshot.metrics.collectedStars} / ${totalStars}`,
     );
-
-    const breakdown = this.element('#score-breakdown');
-    breakdown.classList.toggle('is-hidden', !success || !result);
-    if (result) {
-      this.element('[data-score-part="deliveries"]').textContent =
-        `+${formatScore(result.breakdown.deliveryPoints)}`;
-      this.element('[data-score-part="time"]').textContent =
-        `+${formatScore(result.breakdown.timeBonus)}`;
-      this.element('[data-score-part="efficiency"]').textContent =
-        `+${formatScore(result.breakdown.efficiencyBonus)}`;
-      this.element('[data-score-part="stars"]').textContent =
-        `+${formatScore(result.breakdown.starBonus)}`;
-      this.element('[data-score-part="losses"]').textContent =
-        `−${formatScore(result.breakdown.lossPenalty)}`;
+    this.element('[data-result="budget"] strong').textContent =
+      budgetLimit === undefined
+        ? `${formatCurrency(spent)} / Sem limite`
+        : `${formatCurrency(spent)} / ${formatCurrency(budgetLimit)}`;
+    const budgetPercent =
+      budgetLimit === undefined || budgetLimit <= 0 ? 0 : Math.round((spent / budgetLimit) * 100);
+    const budgetTrack = this.element('[data-result-budget-track]');
+    budgetTrack.setAttribute('aria-valuenow', String(Math.min(budgetPercent, 100)));
+    budgetTrack.setAttribute('aria-valuemax', '100');
+    this.element<HTMLElement>('[data-result-budget-fill]').style.width =
+      `${Math.min(budgetPercent, 100)}%`;
+    this.element('[data-result-budget-percent]').textContent =
+      budgetLimit === undefined ? 'Sem limite' : `${budgetPercent}%`;
+    const budgetMetric = this.element('[data-result="budget"]');
+    budgetMetric.classList.toggle(
+      'is-over-budget',
+      budgetLimit !== undefined && spent > budgetLimit,
+    );
+    const lostMetric = this.element('[data-result="lost"]');
+    lostMetric.classList.toggle('is-hidden', !tracksLosses);
+    this.element('.result-metrics').classList.toggle('without-losses', !tracksLosses);
+    if (tracksLosses) {
+      lostMetric.querySelector('strong')!.textContent =
+        `${snapshot.metrics.lost} / ${snapshot.goal!.maxLosses}`;
     }
 
     const next = this.element<HTMLButtonElement>('[data-action="next"]');
@@ -1934,11 +2089,17 @@ export class AppUI {
     setFormControlValue(form, 'world', contract.world);
     setFormControlValue(form, 'stage', contract.stage);
     setFormControlValue(form, 'deliveries', contract.goal.deliveries);
-    setFormControlValue(form, 'maxLosses', contract.goal.maxLosses);
-    setFormControlValue(form, 'pieceBudget', contract.goal.pieceBudget);
-    setFormControlValue(form, 'timeLimitSeconds', contract.goal.timeLimitSeconds ?? '');
-    setFormControlValue(form, 'idealTimeSeconds', contract.goal.idealTimeSeconds ?? '');
+    setFormControlChecked(form, 'lossesEnabled', contract.goal.maxLosses !== undefined);
+    setFormControlValue(form, 'maxLosses', contract.goal.maxLosses ?? '');
+    setFormControlChecked(form, 'budgetEnabled', contract.economy.budgetLimit !== undefined);
+    setFormControlValue(form, 'budgetLimit', contract.economy.budgetLimit ?? '');
+    const conveyorCosts = resolveConveyorSpeedCosts(contract.economy);
+    setFormControlValue(form, 'conveyorSlowCost', conveyorCosts.slow);
+    setFormControlValue(form, 'conveyorNormalCost', conveyorCosts.normal);
+    setFormControlValue(form, 'conveyorFastCost', conveyorCosts.fast);
+    setFormControlValue(form, 'springCost', contract.economy.machineCosts.spring);
     setFormControlValue(form, 'spawnIntervalSeconds', contract.spawnIntervalSeconds);
+    this.syncEditorOptionalFields(form);
     this.updateEditorFormOutputs(contract);
     setFormControlChecked(
       form,
@@ -1952,6 +2113,15 @@ export class AppUI {
   private handleEditorFormInput(): void {
     if (!this.editorContract || this.catalogSaving) return;
     const form = this.element<HTMLFormElement>('#editor-contract-form');
+    const lossesEnabled = formCheckbox(form, 'lossesEnabled').checked;
+    const budgetEnabled = formCheckbox(form, 'budgetEnabled').checked;
+    if (lossesEnabled && formValue(form, 'maxLosses').trim() === '') {
+      setFormControlValue(form, 'maxLosses', 3);
+    }
+    if (budgetEnabled && formValue(form, 'budgetLimit').trim() === '') {
+      setFormControlValue(form, 'budgetLimit', 25_000);
+    }
+    this.syncEditorOptionalFields(form);
     const availableMachines: MachineType[] = [];
     if (formCheckbox(form, 'availableTrackedConveyor').checked) {
       availableMachines.push('tracked-conveyor');
@@ -1970,10 +2140,19 @@ export class AppUI {
       goal: {
         ...this.editorContract.goal,
         deliveries: numberFormValue(form, 'deliveries'),
-        maxLosses: numberFormValue(form, 'maxLosses'),
-        pieceBudget: numberFormValue(form, 'pieceBudget'),
-        timeLimitSeconds: optionalNumberFormValue(form, 'timeLimitSeconds'),
-        idealTimeSeconds: optionalNumberFormValue(form, 'idealTimeSeconds'),
+        maxLosses: lossesEnabled ? numberFormValue(form, 'maxLosses') : undefined,
+      },
+      economy: {
+        budgetLimit: budgetEnabled ? numberFormValue(form, 'budgetLimit') : undefined,
+        machineCosts: {
+          'tracked-conveyor': numberFormValue(form, 'conveyorNormalCost'),
+          spring: numberFormValue(form, 'springCost'),
+        },
+        conveyorSpeedCosts: {
+          slow: numberFormValue(form, 'conveyorSlowCost'),
+          normal: numberFormValue(form, 'conveyorNormalCost'),
+          fast: numberFormValue(form, 'conveyorFastCost'),
+        },
       },
       spawnIntervalSeconds: numberFormValue(form, 'spawnIntervalSeconds'),
     };
@@ -2009,19 +2188,34 @@ export class AppUI {
     )
       errors.push(`A fase ${contractLabel(contract)} já está cadastrada.`);
     if (contract.goal.deliveries < 1) errors.push('Entregas deve ser pelo menos 1.');
-    if (contract.goal.maxLosses < 0) errors.push('Perdas máximas não pode ser negativa.');
-    if (contract.goal.pieceBudget < 0) errors.push('O orçamento não pode ser negativo.');
+    if (!Number.isInteger(contract.goal.deliveries))
+      errors.push('Entregas deve usar um número inteiro.');
+    if (contract.goal.maxLosses !== undefined && contract.goal.maxLosses < 0)
+      errors.push('Perdas máximas não pode ser negativa.');
+    if (contract.goal.maxLosses !== undefined && !Number.isInteger(contract.goal.maxLosses))
+      errors.push('Perdas máximas deve usar um número inteiro.');
+    if (contract.economy.budgetLimit !== undefined && contract.economy.budgetLimit < 0)
+      errors.push('O orçamento máximo não pode ser negativo.');
+    if (
+      contract.economy.budgetLimit !== undefined &&
+      !Number.isInteger(contract.economy.budgetLimit)
+    )
+      errors.push('O orçamento máximo deve usar dólares inteiros.');
+    if (contract.economy.conveyorSpeedCosts) {
+      for (const [index, speed] of CONVEYOR_SPEEDS.entries()) {
+        const cost = contract.economy.conveyorSpeedCosts[speed];
+        if (cost < 0 || !Number.isInteger(cost)) {
+          errors.push(`O custo da velocidade ${index + 1} deve ser um inteiro não negativo.`);
+        }
+      }
+    }
+    if (
+      contract.economy.machineCosts.spring < 0 ||
+      !Number.isInteger(contract.economy.machineCosts.spring)
+    )
+      errors.push('O custo do trampolim deve ser um inteiro não negativo.');
     if (contract.spawnIntervalSeconds < 0.8 || contract.spawnIntervalSeconds > 10)
       errors.push('O intervalo de geração deve ficar entre 0,80 e 10 segundos.');
-    if (contract.goal.timeLimitSeconds !== undefined && contract.goal.timeLimitSeconds <= 0)
-      errors.push('O tempo limite deve ser positivo.');
-    if (
-      contract.goal.timeLimitSeconds !== undefined &&
-      !Number.isInteger(contract.goal.timeLimitSeconds)
-    )
-      errors.push('O tempo limite deve usar segundos inteiros.');
-    if (contract.goal.idealTimeSeconds !== undefined && contract.goal.idealTimeSeconds <= 0)
-      errors.push('O tempo ideal deve ser positivo.');
     if (!contract.fixedMachines.some((machine) => machine.type === 'source'))
       errors.push('Adicione pelo menos uma saída.');
     if (!contract.fixedMachines.some((machine) => machine.type === 'receiver'))
@@ -2041,6 +2235,19 @@ export class AppUI {
       'true',
     );
     return false;
+  }
+
+  private syncEditorOptionalFields(form: HTMLFormElement): void {
+    const lossesEnabled = formCheckbox(form, 'lossesEnabled').checked;
+    const budgetEnabled = formCheckbox(form, 'budgetEnabled').checked;
+    const maxLosses = formControl(form, 'maxLosses');
+    const budgetLimit = formControl(form, 'budgetLimit');
+    maxLosses.toggleAttribute('disabled', !lossesEnabled);
+    maxLosses.toggleAttribute('required', lossesEnabled);
+    budgetLimit.toggleAttribute('disabled', !budgetEnabled);
+    budgetLimit.toggleAttribute('required', budgetEnabled);
+    this.element('[data-losses-setting]').classList.toggle('is-disabled', !lossesEnabled);
+    this.element('[data-budget-setting]').classList.toggle('is-disabled', !budgetEnabled);
   }
 
   private updateEditorFormOutputs(contract: ContractDefinition): void {
@@ -2242,33 +2449,74 @@ export class AppUI {
   }
 }
 
-function metric(label: string, value: string, className: string, id: string): string {
-  return `<div class="metric metric-${className}" data-metric="${id}"><span>${label}</span><strong>${value}</strong></div>`;
+type ResultMetricKind = 'deliveries' | 'stars' | 'budget' | 'losses';
+
+function resultMetric(
+  label: string,
+  value: string,
+  id: string,
+  kind: ResultMetricKind,
+  hidden = false,
+): string {
+  const graphic =
+    kind === 'deliveries'
+      ? `<img src="${factoryBoxTextureUrl}" alt="" draggable="false" />`
+      : kind === 'stars'
+        ? icon('star')
+        : kind === 'budget'
+          ? '<span aria-hidden="true">$</span>'
+          : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2L12 3Z"/><path d="M12 8v6m0 3v.1"/></svg>';
+  const budgetDetails =
+    kind === 'budget'
+      ? `<div class="result-budget-progress">
+          <span class="result-budget-track" data-result-budget-track role="progressbar" aria-label="Percentual do orçamento utilizado" aria-valuemin="0" aria-valuenow="0" aria-valuemax="100">
+            <span data-result-budget-fill></span>
+          </span>
+          <small data-result-budget-percent>Sem limite</small>
+        </div>`
+      : '';
+  const classes = `result-metric result-metric-${kind}${hidden ? ' is-hidden' : ''}`;
+  return `<div class="${classes}" data-result="${id}">
+    <span class="result-metric-icon" aria-hidden="true">${graphic}</span>
+    <span class="result-metric-label">${label}</span>
+    <strong>${value}</strong>
+    ${budgetDetails}
+  </div>`;
 }
 
-function resultMetric(label: string, value: string, id: string): string {
-  return `<div data-result="${id}"><span>${label}</span><strong>${value}</strong></div>`;
+function formatCurrency(value: number): string {
+  return `$${Math.max(0, Math.round(value)).toLocaleString('en-US')}`;
 }
 
-function formatTime(seconds: number): string {
-  const safe = Math.max(0, Math.floor(seconds));
-  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+function formatBudgetLabel(limit?: number): string {
+  return limit === undefined ? 'Sem limite' : formatCurrency(limit);
 }
 
-function formatScore(score: number): string {
-  return Math.max(0, Math.round(score)).toLocaleString('pt-BR');
+function isContractCompleted(progress: ProgressSave, contract: ContractDefinition): boolean {
+  return progress.completedContracts[contract.id] === contract.revision;
 }
 
-function formatRankingDate(value: string): string {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return 'Data indisponível';
-  return new Intl.DateTimeFormat('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date);
+function machineCost(economy: GameSnapshot['economy'], machine: MachineType): number {
+  if (!economy) return 0;
+  if (machine === 'spring') return economy.machineCosts.spring;
+  if (machine === 'tracked-conveyor' || machine === 'conveyor') {
+    return resolveConveyorSpeedCosts(economy).normal;
+  }
+  return 0;
+}
+
+function toolTooltip(
+  id: string,
+  name: string,
+  description: string,
+  price?: string,
+): string {
+  return `<span class="tool-tooltip" id="${escapeHTML(id)}" role="tooltip">
+    <strong>${escapeHTML(name)}</strong>
+    <span>${escapeHTML(description)}</span>
+    ${price ? `<b>${escapeHTML(price)}</b>` : ''}
+    <em data-tool-status></em>
+  </span>`;
 }
 
 function normalizeAngle(angle: number): number {
@@ -2319,13 +2567,6 @@ function numberFormValue(form: HTMLFormElement, name: string): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function optionalNumberFormValue(form: HTMLFormElement, name: string): number | undefined {
-  const raw = formValue(form, name).trim();
-  if (!raw) return undefined;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : undefined;
-}
-
 function contractStagePreview(contract: ContractDefinition): string {
   const sourceCount = contract.fixedMachines.filter(({ type }) => type === 'source').length;
   const hasSpring = contract.availableMachines.includes('spring');
@@ -2351,22 +2592,20 @@ function machineThumbnail(type: MachineType): string {
         <rect x="21" y="55" width="30" height="11" rx="3" fill="#ff7629" />
       </svg>`;
     case 'conveyor':
-      return `<svg class="machine-thumbnail machine-thumbnail-conveyor" viewBox="0 0 96 24" aria-hidden="true">
-        <rect x="1" y="1" width="94" height="22" fill="#40566b" stroke="#293139" stroke-width="2" />
-        <path d="M17 5l10 7-10 7zM39 5l10 7-10 7zM61 5l10 7-10 7zM83 5l10 7-10 7z" fill="#fff" />
-      </svg>`;
     case 'tracked-conveyor':
       return `<svg class="machine-thumbnail machine-thumbnail-tracked-conveyor" viewBox="0 0 112 36" aria-hidden="true">
+        <rect x="4" y="4" width="104" height="28" rx="14" fill="#202a33" />
         <g fill="#40566b" stroke="#82a5c5" stroke-width="1.5">
           <circle cx="18" cy="18" r="9"/><circle cx="56" cy="18" r="9"/><circle cx="94" cy="18" r="9"/>
         </g>
-        <g stroke="#fff" stroke-width="1.6" stroke-linecap="round" opacity=".8">
-          <path d="M18 11v14M11 18h14M56 11v14M49 18h14M94 11v14M87 18h14" />
-        </g>
-        <g fill="#ff7629"><circle cx="18" cy="18" r="2.4"/><circle cx="56" cy="18" r="2.4"/><circle cx="94" cy="18" r="2.4"/></g>
         <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#293139" stroke-width="9" stroke-linejoin="round" />
         <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#40566b" stroke-width="6.5" stroke-linejoin="round" />
         <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#fff" stroke-width="6.5" stroke-dasharray="8 7" stroke-linejoin="round" />
+        <g fill="#fff">
+          <path d="M14.5 12.5 22 18l-7.5 5.5z"/>
+          <path d="M52.5 12.5 60 18l-7.5 5.5z"/>
+          <path d="M90.5 12.5 98 18l-7.5 5.5z"/>
+        </g>
       </svg>`;
     case 'receiver':
       return `<svg class="machine-thumbnail machine-thumbnail-receiver" viewBox="0 0 72 72" aria-hidden="true">
@@ -2379,7 +2618,7 @@ function machineThumbnail(type: MachineType): string {
     case 'spring':
       return `<svg class="machine-thumbnail machine-thumbnail-spring" viewBox="0 0 48 24" aria-hidden="true">
         <rect x="1" y="2" width="46" height="7" fill="#b47a48" />
-        <path d="M8 17l5-8 5 8 5-8 5 8 5-8 7 8" fill="none" stroke="#43a96b" stroke-width="4" stroke-linejoin="round" />
+        <path d="M8 17l5-8 5 8 5-8 5 8 5-8 7 8" fill="none" stroke="#25c442" stroke-width="4" stroke-linejoin="round" />
         <rect x="1" y="16" width="46" height="7" fill="#b47a48" />
       </svg>`;
   }
@@ -2389,13 +2628,20 @@ function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
     source: '<path d="M4 5h16v14H4z"/><path d="M8 9h8M12 2v7m-3-3 3 3 3-3"/>',
     conveyor:
-      '<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="7" cy="12" r="1.5"/><circle cx="17" cy="12" r="1.5"/><path d="m10 9 3 3-3 3"/>',
+      '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
     'tracked-conveyor':
-      '<rect x="2" y="6" width="20" height="12" rx="6"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/>',
+      '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
     receiver: '<path d="M4 5h16v14H4z"/><path d="M8 15h8M12 2v8m-3-3 3 3 3-3"/>',
     spring: '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/>',
     play: '<path d="m8 5 11 7-11 7z"/>',
+    pause: '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor" stroke="none"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
+    check: '<path d="m5 12 4.5 4.5L19 7"/>',
+    warning: '<path d="M12 3 22 20H2L12 3Z"/><path d="M12 8v6m0 3v.1"/>',
+    home: '<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/>',
+    map: '<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15m6-12v15"/>',
+    replay: '<path d="M4.8 8A8 8 0 1 1 4 14"/><path d="M4 4v5h5"/>',
+    'arrow-right': '<path d="M4 12h16m-6-6 6 6-6 6"/>',
     reset: '<path d="M4.8 8A8 8 0 1 1 4 14"/><path d="M4 4v5h5"/>',
     undo: '<path d="m9 7-5 5 5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/>',
     redo: '<path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/>',
@@ -2416,8 +2662,6 @@ function icon(name: IconName): string {
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',
-    ranking:
-      '<path d="M8 21V10h8v11M5 21h14M9 4h6l-1 4h-4z"/><path d="M8 5H5a3 3 0 0 0 3 4m8-4h3a3 3 0 0 1-3 4"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4M4 20h16"/>',
     settings:
       '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L14.3 3h-4.6l-.4 3a8 8 0 0 0-1.7 1L5 6 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.6-1a8 8 0 0 0 1.7 1l.4 3h4.6l.4-3a8 8 0 0 0 1.7-1l2.6 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/>',
