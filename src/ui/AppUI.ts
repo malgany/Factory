@@ -1,6 +1,7 @@
 import { appEvents } from '../core/events';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import factoryCampaignEnvironmentUrl from '../assets/factory-campaign-environment.webp?url';
+import { DEFAULT_MACHINE_COSTS } from '../domain/catalog';
 import { resolveConveyorSpeedCosts } from '../domain/economy';
 import type {
   ContractDefinition,
@@ -66,6 +67,7 @@ type IconName =
   | 'mouse'
   | 'keyboard'
   | 'grid'
+  | 'hitbox'
   | 'clear'
   | 'lock'
   | 'star'
@@ -86,6 +88,7 @@ const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
   'tracked-conveyor': { name: 'Esteira física', hint: 'Move por corrente e atrito' },
   receiver: { name: 'Entrada', hint: 'Recebe caixas' },
   spring: { name: 'Trampolim', hint: 'Projeta caixas' },
+  'turbo-spring': { name: 'Trampolim turbo', hint: 'Projeta caixas com força dupla' },
 };
 
 const SIMULATION_SPEEDS = [0.1, 0.2, 0.5, 1, 2, 3, 5] as const;
@@ -151,6 +154,7 @@ export class AppUI {
   private editorIsNew = false;
   private editorDirty = false;
   private editorPreviewActive = false;
+  private editorHitboxesVisible = false;
   private catalogSaving = false;
   private catalogSavingContext?: CatalogSavingContext;
   private resultContractId?: ContractId;
@@ -166,6 +170,7 @@ export class AppUI {
   private dragUiRestoreTimer?: number;
   private menuDemo?: MenuDemoController;
   private menuTransitionCleanup?: () => void;
+  private optionsOpenedFromPause = false;
 
   constructor(options: AppUIOptions) {
     this.root = options.root;
@@ -208,6 +213,7 @@ export class AppUI {
     this.editorIsNew = options.isNew ?? false;
     this.editorDirty = options.dirty ?? false;
     this.editorPreviewActive = false;
+    this.editorHitboxesVisible = false;
     this.hideMenu();
     this.root.classList.add('is-admin-editor');
     this.root.classList.remove('is-admin-preview');
@@ -220,6 +226,8 @@ export class AppUI {
     this.editorIsNew = false;
     this.editorDirty = false;
     this.editorPreviewActive = false;
+    this.editorHitboxesVisible = false;
+    appEvents.emit('ui:editor-hitboxes', { enabled: false });
     this.root.classList.remove('is-admin-editor', 'is-admin-preview');
     this.element('#editor-config-panel').classList.add('is-hidden');
     this.element('#editor-confirm-modal').classList.add('is-hidden');
@@ -484,10 +492,10 @@ export class AppUI {
             </div>
           </header>
 
-          <header id="editor-rail" class="editor-rail glass-panel is-hidden" aria-label="Editor de fase">
+          <header id="editor-rail" class="editor-rail is-hidden" aria-label="Editor de fase">
             <div class="editor-heading">
-              <button class="soft-button" data-action="editor-cancel" type="button">
-                ${icon('close')} <span>Cancelar</span>
+              <button class="icon-button editor-back-button" data-action="editor-cancel" type="button" aria-label="Voltar para a seleção de fases" title="Voltar para a seleção de fases">
+                ${icon('back')}
               </button>
               <span class="admin-badge">ADMIN LOCAL</span>
               <div class="editor-title-block">
@@ -496,6 +504,9 @@ export class AppUI {
               </div>
             </div>
             <div class="editor-actions">
+              <button class="soft-button" data-action="editor-hitboxes" type="button" aria-pressed="false" title="Visualizar colisões e áreas de coleta">
+                ${icon('hitbox')} <span>Hitboxes</span>
+              </button>
               <button class="soft-button" data-action="editor-configure" type="button" aria-expanded="false">
                 ${icon('settings')} <span>Configurações</span>
               </button>
@@ -565,7 +576,7 @@ export class AppUI {
               <fieldset class="field-group">
                 <legend>Objetivo</legend>
                 <label class="field"><span>Meta de entregas *</span><input name="deliveries" type="number" min="1" step="1" inputmode="numeric" required /></label>
-                <label class="check-field"><input name="lossesEnabled" type="checkbox" /><span>Limitar perdas</span></label>
+                <label class="check-field objective-losses-toggle"><input name="lossesEnabled" type="checkbox" /><span>Limitar perdas</span></label>
                 <label class="field field-wide optional-setting-field" data-losses-setting><span>Perdas máximas</span><input name="maxLosses" type="number" min="0" step="1" inputmode="numeric" /></label>
                 <p class="field-note field-wide">Todas as estrelas posicionadas no mapa fazem parte da meta.</p>
               </fieldset>
@@ -577,6 +588,7 @@ export class AppUI {
                 <label class="field"><span>Esteira · velocidade 2 (US$) *</span><input name="conveyorNormalCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <label class="field"><span>Esteira · velocidade 3 (US$) *</span><input name="conveyorFastCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <label class="field"><span>Custo do trampolim (US$) *</span><input name="springCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Custo do trampolim turbo (US$) *</span><input name="turboSpringCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <p class="field-note field-wide">Sem orçamento máximo, o jogador pode gastar sem limite e o medidor fica oculto.</p>
               </fieldset>
               <fieldset class="field-group">
@@ -590,6 +602,7 @@ export class AppUI {
                 <legend>Ferramentas do jogador</legend>
                 <label class="check-field"><input name="availableTrackedConveyor" type="checkbox" /><span>${icon('conveyor')} Esteira física</span></label>
                 <label class="check-field"><input name="availableSpring" type="checkbox" /><span>${icon('spring')} Trampolim</span></label>
+                <label class="check-field"><input name="availableTurboSpring" type="checkbox" /><span>${icon('turbo-spring')} Trampolim turbo</span></label>
               </fieldset>
             </form>
             <div id="editor-feedback" class="editor-feedback is-hidden" role="status" aria-live="polite"></div>
@@ -1082,7 +1095,8 @@ export class AppUI {
         this.setMenuView('options');
         break;
       case 'menu-home':
-        this.setMenuView('home');
+        if (this.optionsOpenedFromPause) this.returnToPauseMenuFromOptions();
+        else this.setMenuView('home');
         break;
       case 'campaign-play':
         this.startSelectedCampaign();
@@ -1102,7 +1116,7 @@ export class AppUI {
         this.closePauseMenu();
         break;
       case 'pause-options':
-        this.leaveSimulationToMenu('options');
+        this.openPauseOptions();
         break;
       case 'pause-campaign':
         this.leaveSimulationToMenu('play');
@@ -1182,9 +1196,16 @@ export class AppUI {
       case 'editor-configure':
         this.toggleEditorConfiguration();
         break;
+      case 'editor-hitboxes':
+        this.toggleEditorHitboxes();
+        break;
       case 'editor-test':
+        if (this.catalogSaving) break;
         if (this.editorContract && this.validateEditorSettings()) {
-          appEvents.emit('ui:editor-test', undefined);
+          this.setEditorMessage({ tone: 'neutral', message: 'Validando e salvando no JSON…' });
+          appEvents.emit('ui:editor-test', {
+            contract: structuredClone(this.editorContract),
+          });
         }
         break;
       case 'editor-return':
@@ -1253,6 +1274,40 @@ export class AppUI {
   private closePauseMenu(): void {
     this.element('#pause-modal').classList.add('is-hidden');
     if (this.snapshot?.status === 'paused') appEvents.emit('ui:run', undefined);
+  }
+
+  private openPauseOptions(): void {
+    if (this.optionsOpenedFromPause) return;
+    this.persistProgress();
+    if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+    this.element('#pause-modal').classList.add('is-hidden');
+    const menu = this.element('#menu-screen');
+    const previousView = (menu.dataset.menuView as MenuView | undefined) ?? 'home';
+
+    this.cancelMenuTransition();
+    this.menuDemo?.setActive(false);
+    this.optionsOpenedFromPause = true;
+    menu.classList.add('is-pause-options-direct');
+    menu.classList.remove('is-hidden');
+    menu.removeAttribute('inert');
+    menu.dataset.menuView = 'options';
+    delete menu.dataset.menuTransitioning;
+    this.root.classList.add('is-menu-open');
+    this.setOptionsCategory('audio-video');
+    this.updateMenuPanels('options', false);
+    this.updateGameUiAvailability();
+    window.requestAnimationFrame(() => this.focusMenuView('options', previousView));
+  }
+
+  private returnToPauseMenuFromOptions(): void {
+    if (!this.optionsOpenedFromPause) return;
+    const menu = this.element('#menu-screen');
+    this.optionsOpenedFromPause = false;
+    this.hideMenu();
+    menu.dataset.menuView = 'home';
+    this.updateMenuPanels('home', false);
+    this.openPauseMenu();
+    window.requestAnimationFrame(() => menu.classList.remove('is-pause-options-direct'));
   }
 
   private leaveSimulationToMenu(view: MenuView): void {
@@ -1608,7 +1663,7 @@ export class AppUI {
 
     const spent = Math.max(0, economy.spent);
     const hardLimit = economy.hardLimit ?? limit * 2;
-    const overBudget = limit > 0 && spent >= limit;
+    const overBudget = limit > 0 && spent > limit;
     const fillRatio = limit > 0 ? (overBudget ? (spent - limit) / limit : spent / limit) : 0;
     const fill = this.element<HTMLElement>('[data-budget-fill]');
     fill.style.setProperty('--budget-fill', `${Math.min(1, Math.max(0, fillRatio)) * 100}%`);
@@ -1703,6 +1758,12 @@ export class AppUI {
         icon: 'conveyor',
       },
       { type: 'spring', label: 'Trampolim', hint: 'Cenário fixo', icon: 'spring' },
+      {
+        type: 'turbo-spring',
+        label: 'Trampolim turbo',
+        hint: 'Cenário fixo com força dupla',
+        icon: 'turbo-spring',
+      },
       {
         type: 'obstacle',
         label: 'Bloqueador',
@@ -2079,6 +2140,12 @@ export class AppUI {
     const saveButton = this.element<HTMLButtonElement>('[data-action="editor-save"]');
     saveButton.disabled = this.catalogSaving || !this.editorDirty;
     saveButton.querySelector('span')!.textContent = savingEditor ? 'Salvando…' : 'Salvar';
+    const hitboxButton = this.element<HTMLButtonElement>('[data-action="editor-hitboxes"]');
+    hitboxButton.classList.toggle('is-active', this.editorHitboxesVisible);
+    hitboxButton.setAttribute('aria-pressed', String(this.editorHitboxesVisible));
+    hitboxButton.title = this.editorHitboxesVisible
+      ? 'Ocultar colisões e áreas de coleta'
+      : 'Visualizar colisões e áreas de coleta';
 
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     if (!form.contains(document.activeElement)) this.populateEditorForm(contract);
@@ -2098,6 +2165,12 @@ export class AppUI {
     setFormControlValue(form, 'conveyorNormalCost', conveyorCosts.normal);
     setFormControlValue(form, 'conveyorFastCost', conveyorCosts.fast);
     setFormControlValue(form, 'springCost', contract.economy.machineCosts.spring);
+    setFormControlValue(
+      form,
+      'turboSpringCost',
+      contract.economy.machineCosts['turbo-spring'] ??
+        DEFAULT_MACHINE_COSTS['turbo-spring']!,
+    );
     setFormControlValue(form, 'spawnIntervalSeconds', contract.spawnIntervalSeconds);
     this.syncEditorOptionalFields(form);
     this.updateEditorFormOutputs(contract);
@@ -2108,6 +2181,11 @@ export class AppUI {
         contract.availableMachines.includes('conveyor'),
     );
     setFormControlChecked(form, 'availableSpring', contract.availableMachines.includes('spring'));
+    setFormControlChecked(
+      form,
+      'availableTurboSpring',
+      contract.availableMachines.includes('turbo-spring'),
+    );
   }
 
   private handleEditorFormInput(): void {
@@ -2127,6 +2205,9 @@ export class AppUI {
       availableMachines.push('tracked-conveyor');
     }
     if (formCheckbox(form, 'availableSpring').checked) availableMachines.push('spring');
+    if (formCheckbox(form, 'availableTurboSpring').checked) {
+      availableMachines.push('turbo-spring');
+    }
     const world = Math.round(numberFormValue(form, 'world'));
     const stage = Math.round(numberFormValue(form, 'stage'));
     const label = `${stage}-${world}`;
@@ -2147,6 +2228,7 @@ export class AppUI {
         machineCosts: {
           'tracked-conveyor': numberFormValue(form, 'conveyorNormalCost'),
           spring: numberFormValue(form, 'springCost'),
+          'turbo-spring': numberFormValue(form, 'turboSpringCost'),
         },
         conveyorSpeedCosts: {
           slow: numberFormValue(form, 'conveyorSlowCost'),
@@ -2214,6 +2296,12 @@ export class AppUI {
       !Number.isInteger(contract.economy.machineCosts.spring)
     )
       errors.push('O custo do trampolim deve ser um inteiro não negativo.');
+    const turboSpringCost =
+      contract.economy.machineCosts['turbo-spring'] ??
+      DEFAULT_MACHINE_COSTS['turbo-spring']!;
+    if (turboSpringCost < 0 || !Number.isInteger(turboSpringCost)) {
+      errors.push('O custo do trampolim turbo deve ser um inteiro não negativo.');
+    }
     if (contract.spawnIntervalSeconds < 0.8 || contract.spawnIntervalSeconds > 10)
       errors.push('O intervalo de geração deve ficar entre 0,80 e 10 segundos.');
     if (!contract.fixedMachines.some((machine) => machine.type === 'source'))
@@ -2265,6 +2353,13 @@ export class AppUI {
       .querySelectorAll<HTMLButtonElement>('[data-action="editor-configure"]')
       .forEach((button) => button.setAttribute('aria-expanded', String(open)));
     appEvents.emit('ui:editor-configure', { open });
+  }
+
+  private toggleEditorHitboxes(): void {
+    if (!this.editorContract || this.editorPreviewActive || this.catalogSaving) return;
+    this.editorHitboxesVisible = !this.editorHitboxesVisible;
+    this.renderEditorState();
+    appEvents.emit('ui:editor-hitboxes', { enabled: this.editorHitboxesVisible });
   }
 
   private requestEditorCancel(): void {
@@ -2334,7 +2429,7 @@ export class AppUI {
       });
     this.root
       .querySelectorAll<HTMLButtonElement>(
-        '[data-action="editor-cancel"], [data-action="editor-configure"], [data-action="editor-test"]',
+        '[data-action="editor-cancel"], [data-action="editor-configure"], [data-action="editor-hitboxes"], [data-action="editor-test"]',
       )
       .forEach((button) => {
         button.disabled = editorSaving;
@@ -2499,6 +2594,9 @@ function isContractCompleted(progress: ProgressSave, contract: ContractDefinitio
 function machineCost(economy: GameSnapshot['economy'], machine: MachineType): number {
   if (!economy) return 0;
   if (machine === 'spring') return economy.machineCosts.spring;
+  if (machine === 'turbo-spring') {
+    return economy.machineCosts['turbo-spring'] ?? DEFAULT_MACHINE_COSTS['turbo-spring']!;
+  }
   if (machine === 'tracked-conveyor' || machine === 'conveyor') {
     return resolveConveyorSpeedCosts(economy).normal;
   }
@@ -2621,6 +2719,21 @@ function machineThumbnail(type: MachineType): string {
         <path d="M8 17l5-8 5 8 5-8 5 8 5-8 7 8" fill="none" stroke="#25c442" stroke-width="4" stroke-linejoin="round" />
         <rect x="1" y="16" width="46" height="7" fill="#b47a48" />
       </svg>`;
+    case 'turbo-spring':
+      return `<svg class="machine-thumbnail machine-thumbnail-turbo-spring" viewBox="0 0 48 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="turbo-spring-steel" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0" stop-color="#edf2f5" />
+            <stop offset=".35" stop-color="#9ba8b2" />
+            <stop offset=".7" stop-color="#d7dfe4" />
+            <stop offset="1" stop-color="#77858f" />
+          </linearGradient>
+        </defs>
+        <rect x="1" y="2" width="46" height="7" rx="1" fill="url(#turbo-spring-steel)" stroke="#66737c" />
+        <path d="M8 17l5-8 5 8 5-8 5 8 5-8 7 8" fill="none" stroke="#ff2638" stroke-width="4" stroke-linejoin="round" />
+        <rect x="1" y="16" width="46" height="7" rx="1" fill="url(#turbo-spring-steel)" stroke="#66737c" />
+        <path d="M5 4h38M5 18h38" stroke="#fff" stroke-opacity=".65" />
+      </svg>`;
   }
 }
 
@@ -2633,6 +2746,8 @@ function icon(name: IconName): string {
       '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
     receiver: '<path d="M4 5h16v14H4z"/><path d="M8 15h8M12 2v8m-3-3 3 3 3-3"/>',
     spring: '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/>',
+    'turbo-spring':
+      '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/><path d="m17 2-4 6h3l-2 5 6-7h-3l2-4z"/>',
     play: '<path d="m8 5 11 7-11 7z"/>',
     pause: '<path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor" stroke="none"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
@@ -2659,6 +2774,8 @@ function icon(name: IconName): string {
     keyboard:
       '<rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M5 8h1m2 0h1m2 0h1m2 0h1m2 0h2M5 11h1m2 0h1m2 0h1m2 0h1m2 0h2M5 14h3m2 0h8"/>',
     grid: '<rect x="4" y="4" width="16" height="16" rx="1"/><path d="M9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16"/>',
+    hitbox:
+      '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><rect x="7" y="7" width="10" height="10" rx="2"/>',
     clear: '<path d="m4 15 8-8 6 6-8 8H4z"/><path d="m13.5 8.5 2-2 3 3-2 2M4 21h16"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
     star: '<path d="m12 2 3 6 7 .9-5 4.8 1.3 6.8L12 17.3l-6.3 3.2L7 13.7 2 8.9 9 8z"/>',

@@ -60,6 +60,7 @@ interface MenuBoxRuntime {
 interface MenuDemoRenderSize {
   width: number;
   height: number;
+  contentWidth: number;
 }
 
 interface TrackedConveyorPose {
@@ -161,6 +162,7 @@ export class MenuDemoScene extends Phaser.Scene {
   private lastSpawnWallTime = Number.NEGATIVE_INFINITY;
   private springCompression = 0;
   private visibleTop = 0;
+  private visibleRight = STAGE_WIDTH;
   private destroyedBoxes = 0;
   private offscreenDestroyedBoxes = 0;
   private simulationSteps = 0;
@@ -219,17 +221,20 @@ export class MenuDemoScene extends Phaser.Scene {
   }
 
   private configureCamera(): void {
-    const { width, height } = this.renderSize;
-    const zoom = width / STAGE_WIDTH;
+    const { width, height, contentWidth } = this.renderSize;
+    const zoom = contentWidth / STAGE_WIDTH;
+    const visibleWidth = width / zoom;
     const visibleHeight = height / zoom;
     this.visibleTop = STAGE_HEIGHT - visibleHeight;
+    this.visibleRight = visibleWidth;
     this.cameras.main
       .setViewport(0, 0, width, height)
       .setZoom(zoom)
-      .centerOn(STAGE_WIDTH / 2, this.visibleTop + visibleHeight / 2);
+      .centerOn(visibleWidth / 2, this.visibleTop + visibleHeight / 2);
     this.parent.dataset.backingWidth = String(width);
     this.parent.dataset.backingHeight = String(height);
     this.parent.dataset.visibleTop = this.visibleTop.toFixed(2);
+    this.parent.dataset.visibleRight = this.visibleRight.toFixed(2);
   }
 
   private applyActiveState(): void {
@@ -380,7 +385,7 @@ export class MenuDemoScene extends Phaser.Scene {
     const { x, y } = box.body.position;
     let side: 'left' | 'right' | 'top' | 'bottom' | undefined;
     if (x < -OFFSCREEN_CLEANUP_MARGIN) side = 'left';
-    else if (x > STAGE_WIDTH + OFFSCREEN_CLEANUP_MARGIN) side = 'right';
+    else if (x > this.visibleRight + OFFSCREEN_CLEANUP_MARGIN) side = 'right';
     else if (y < this.visibleTop - OFFSCREEN_CLEANUP_MARGIN) side = 'top';
     else if (y > STAGE_HEIGHT + OFFSCREEN_CLEANUP_MARGIN) side = 'bottom';
     if (!side) return;
@@ -511,9 +516,12 @@ export class MenuDemoScene extends Phaser.Scene {
 function getMenuDemoRenderSize(parent: HTMLElement): MenuDemoRenderSize {
   const bounds = parent.getBoundingClientRect();
   const density = Math.min(Math.max(window.devicePixelRatio || 1, 2), 3);
+  const shiftX =
+    Number.parseFloat(getComputedStyle(parent).getPropertyValue('--menu-demo-shift-x')) || 0;
   return {
     width: Math.max(STAGE_WIDTH, Math.round(bounds.width * density)),
     height: Math.max(STAGE_HEIGHT, Math.round(bounds.height * density)),
+    contentWidth: Math.max(STAGE_WIDTH, Math.round((bounds.width - shiftX) * density)),
   };
 }
 

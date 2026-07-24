@@ -31,6 +31,7 @@ export const SPAWN_INTERVAL_STEP_SECONDS = 0.05;
 export const DEFAULT_MACHINE_COSTS: Readonly<ContractMachineCosts> = {
   'tracked-conveyor': 2_500,
   spring: 5_000,
+  'turbo-spring': 7_500,
 };
 
 const MACHINE_TYPES: readonly MachineType[] = [
@@ -39,6 +40,7 @@ const MACHINE_TYPES: readonly MachineType[] = [
   'tracked-conveyor',
   'receiver',
   'spring',
+  'turbo-spring',
 ];
 const CONVEYOR_SPEEDS: readonly ConveyorSpeed[] = ['slow', 'normal', 'fast'];
 const CUSTOM_ID_PREFIX = 'custom-';
@@ -65,6 +67,7 @@ export interface ContractValidationIssue {
   code: ContractValidationCode;
   path: string;
   message: string;
+  relatedPaths?: string[];
 }
 
 export interface ContractValidationResult {
@@ -301,8 +304,13 @@ export function createEmptyContractDraft(
 
 export function validateContractDefinition(contract: ContractDefinition): ContractValidationResult {
   const issues: ContractValidationIssue[] = [];
-  const add = (code: ContractValidationCode, path: string, message: string): void => {
-    issues.push({ code, path, message });
+  const add = (
+    code: ContractValidationCode,
+    path: string,
+    message: string,
+    relatedPaths?: string[],
+  ): void => {
+    issues.push({ code, path, message, ...(relatedPaths ? { relatedPaths } : {}) });
   };
 
   if (!contract.id.trim()) add('required', 'id', 'A fase precisa de um identificador.');
@@ -354,6 +362,13 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     0,
     'economy.machineCosts.spring',
     'O custo do trampolim deve ser um inteiro não negativo.',
+    add,
+  );
+  validateInteger(
+    contract.economy.machineCosts['turbo-spring'] ?? DEFAULT_MACHINE_COSTS['turbo-spring']!,
+    0,
+    'economy.machineCosts.turbo-spring',
+    'O custo do trampolim turbo deve ser um inteiro não negativo.',
     add,
   );
   if (contract.economy.conveyorSpeedCosts) {
@@ -415,8 +430,8 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     if (!machine.fixed) {
       add('invalid-machine', `${path}.fixed`, 'Objetos do cenário precisam ser fixos.');
     }
-    if (!isQuarterGrid(machine.gridX) || !isQuarterGrid(machine.gridY)) {
-      add('invalid-machine', path, 'Objetos do cenário devem respeitar os quartos da grade.');
+    if (!Number.isFinite(machine.gridX) || !Number.isFinite(machine.gridY)) {
+      add('invalid-machine', path, 'Objetos do cenário precisam ter uma posição válida.');
     }
     if (!polygonWithinBoard(machinePolygon(machine))) {
       add('out-of-bounds', path, 'Há um objeto fora do tabuleiro.');
@@ -430,15 +445,15 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     }
     entityIds.add(obstacle.id);
     if (
-      !isQuarterGrid(obstacle.gridX) ||
-      !isQuarterGrid(obstacle.gridY) ||
+      !Number.isFinite(obstacle.gridX) ||
+      !Number.isFinite(obstacle.gridY) ||
       !Number.isInteger(obstacle.columns) ||
       !Number.isInteger(obstacle.rows) ||
       obstacle.columns < 1 ||
       obstacle.rows < 1 ||
       (obstacle.angle !== undefined && !Number.isFinite(obstacle.angle))
     ) {
-      add('invalid-obstacle', path, 'Bloqueadores devem respeitar a grade e medir pelo menos 1×1.');
+      add('invalid-obstacle', path, 'Bloqueadores precisam medir pelo menos 1×1.');
     }
     if (!obstacleWithinBoard(obstacle)) {
       add('out-of-bounds', path, 'Há um bloqueador fora do tabuleiro.');
@@ -453,10 +468,10 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
     entityIds.add(collectible.id);
     if (
       collectible.type !== 'star' ||
-      !isQuarterGrid(collectible.gridX) ||
-      !isQuarterGrid(collectible.gridY)
+      !Number.isFinite(collectible.gridX) ||
+      !Number.isFinite(collectible.gridY)
     ) {
-      add('invalid-collectible', path, 'Estrelas devem respeitar os quartos da grade.');
+      add('invalid-collectible', path, 'Estrelas precisam ter uma posição válida.');
     }
     const starRadiusInCells = COLLECTIBLE_STAR_RADIUS / CELL_SIZE;
     if (!pointWithinBoard(collectible.gridX + 0.5, collectible.gridY + 0.5, starRadiusInCells)) {
@@ -483,6 +498,7 @@ export function validateContractDefinition(contract: ContractDefinition): Contra
           'overlap',
           rightShape.path,
           `Há objetos sobrepostos (${leftShape.path} e ${rightShape.path}).`,
+          [leftShape.path, rightShape.path],
         );
       }
     }
@@ -551,6 +567,11 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
     machineCosts: {
       'tracked-conveyor': roundForCatalog(normalized.economy.machineCosts['tracked-conveyor'], 4),
       spring: roundForCatalog(normalized.economy.machineCosts.spring, 4),
+      'turbo-spring': roundForCatalog(
+        normalized.economy.machineCosts['turbo-spring'] ??
+          DEFAULT_MACHINE_COSTS['turbo-spring']!,
+        4,
+      ),
     },
     ...(normalized.economy.conveyorSpeedCosts
       ? {
@@ -662,6 +683,7 @@ function readContractDefinition(
       !isOptionalNumber(economy.budgetLimit) ||
       typeof economy.machineCosts['tracked-conveyor'] !== 'number' ||
       typeof economy.machineCosts.spring !== 'number' ||
+      !isOptionalNumber(economy.machineCosts['turbo-spring']) ||
       (economy.conveyorSpeedCosts !== undefined &&
         (!isRecord(economy.conveyorSpeedCosts) ||
           typeof economy.conveyorSpeedCosts.slow !== 'number' ||
@@ -682,6 +704,9 @@ function readContractDefinition(
       : undefined;
   const legacyUnitCost = value.availableMachines.reduce((highestCost, type) => {
     if (type === 'spring') return Math.max(highestCost, DEFAULT_MACHINE_COSTS.spring);
+    if (type === 'turbo-spring') {
+      return Math.max(highestCost, DEFAULT_MACHINE_COSTS['turbo-spring']!);
+    }
     if (type === 'tracked-conveyor' || type === 'conveyor') {
       return Math.max(highestCost, DEFAULT_MACHINE_COSTS['tracked-conveyor']);
     }
@@ -699,6 +724,9 @@ function readContractDefinition(
         machineCosts: {
           'tracked-conveyor': machineCosts!['tracked-conveyor'] as number,
           spring: machineCosts!.spring as number,
+          'turbo-spring':
+            (machineCosts!['turbo-spring'] as number | undefined) ??
+            DEFAULT_MACHINE_COSTS['turbo-spring'],
         },
         ...(conveyorSpeedCosts ? { conveyorSpeedCosts } : {}),
       };
@@ -845,10 +873,6 @@ function validateOptionalNonNegativeInteger(
   }
 }
 
-function isQuarterGrid(value: number): boolean {
-  return Number.isFinite(value) && Math.abs(value * 4 - Math.round(value * 4)) < 0.000_001;
-}
-
 function normalizeDegrees(value: number): number {
   return ((Math.round(value) % 360) + 360) % 360;
 }
@@ -860,14 +884,23 @@ interface Point {
 
 const MACHINE_SIZE_IN_CELLS: Record<MachineType, { width: number; height: number }> = {
   source: { width: 68 / 48, height: 68 / 48 },
-  conveyor: { width: 92 / 48, height: 22 / 48 },
-  'tracked-conveyor': { width: 92 / 48, height: 22 / 48 },
+  conveyor: { width: 85 / 48, height: 21 / 48 },
+  'tracked-conveyor': { width: 85 / 48, height: 21 / 48 },
   receiver: { width: 76 / 48, height: 76 / 48 },
   spring: { width: 2, height: 1 },
+  'turbo-spring': { width: 2, height: 1 },
 };
 
 function machinePolygon(machine: MachineState): Point[] {
   const size = MACHINE_SIZE_IN_CELLS[machine.type];
+  if (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') {
+    return capsulePolygon(
+      { x: machine.gridX + 0.5, y: machine.gridY + 0.5 },
+      size.width,
+      size.height,
+      machine.angle,
+    );
+  }
   return rectangleCorners(
     { x: machine.gridX + 0.5, y: machine.gridY + 0.5 },
     size.width,
@@ -902,6 +935,44 @@ function rectangleCorners(center: Point, width: number, height: number, angle: n
     rotate(width / 2, height / 2),
     rotate(-width / 2, height / 2),
   ];
+}
+
+function capsulePolygon(
+  center: Point,
+  width: number,
+  height: number,
+  angle: number,
+  capSegments = 4,
+): Point[] {
+  const radius = Math.min(width, height) / 2;
+  const straightHalfWidth = Math.max(0, width / 2 - radius);
+  const radians = (angle * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const rotate = (x: number, y: number): Point => ({
+    x: center.x + x * cosine - y * sine,
+    y: center.y + x * sine + y * cosine,
+  });
+  const points: Point[] = [];
+  for (let index = 0; index <= capSegments; index += 1) {
+    const capAngle = -Math.PI / 2 + (Math.PI * index) / capSegments;
+    points.push(
+      rotate(
+        straightHalfWidth + Math.cos(capAngle) * radius,
+        Math.sin(capAngle) * radius,
+      ),
+    );
+  }
+  for (let index = 0; index <= capSegments; index += 1) {
+    const capAngle = Math.PI / 2 + (Math.PI * index) / capSegments;
+    points.push(
+      rotate(
+        -straightHalfWidth + Math.cos(capAngle) * radius,
+        Math.sin(capAngle) * radius,
+      ),
+    );
+  }
+  return points;
 }
 
 function polygonWithinBoard(polygon: readonly Point[]): boolean {

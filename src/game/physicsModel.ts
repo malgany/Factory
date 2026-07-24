@@ -2,6 +2,8 @@ import type { ConveyorSpeed } from '../domain/types';
 import { degreesToRadians, worldToLocal, type Point } from './geometry';
 
 export const FIXED_PHYSICS_STEP_SECONDS = 1 / 60;
+export const SPRING_LAUNCH_SPEED = 11.5;
+export const TURBO_SPRING_LAUNCH_SPEED = SPRING_LAUNCH_SPEED * 2;
 const CONVEYOR_SPEED_FACTORS: Record<ConveyorSpeed, number> = {
   slow: 0.1,
   normal: 1,
@@ -52,7 +54,7 @@ export function conveyorVelocity(
 export function springVelocity(
   velocity: Point,
   angle: number,
-  speed = 11.5,
+  speed = SPRING_LAUNCH_SPEED,
   normalDirection: 1 | -1 = 1,
 ): Point {
   const radians = degreesToRadians(angle);

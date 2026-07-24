@@ -7,8 +7,10 @@ import {
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
+  SPRING_LAUNCH_SPEED,
   springVelocity,
   stepGravity,
+  TURBO_SPRING_LAUNCH_SPEED,
 } from './physicsModel';
 
 describe('modelo físico determinístico', () => {
@@ -55,6 +57,14 @@ describe('modelo físico determinístico', () => {
 
     expect(slowImpact.y).toBe(-11.5);
     expect(fastImpact.y).toBe(-11.5);
+  });
+
+  it('faz o trampolim turbo lançar com exatamente o dobro da força', () => {
+    const normal = springVelocity({ x: 0, y: 1 }, 0, SPRING_LAUNCH_SPEED);
+    const turbo = springVelocity({ x: 0, y: 1 }, 0, TURBO_SPRING_LAUNCH_SPEED);
+
+    expect(TURBO_SPRING_LAUNCH_SPEED).toBe(SPRING_LAUNCH_SPEED * 2);
+    expect(turbo.y).toBe(normal.y * 2);
   });
 
   it('aplica o mesmo impulso para fora nas duas faces', () => {

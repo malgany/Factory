@@ -7,6 +7,14 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
   await page.locator('#admin-toggle').click();
   await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('#editor-rail')).toHaveCSS(
+    'background-color',
+    'rgba(0, 0, 0, 0)',
+  );
+  await expect(page.locator('#editor-rail')).toHaveCSS('box-shadow', 'none');
+  const editorBack = page.locator('[data-action="editor-cancel"]');
+  await expect(editorBack).toHaveAttribute('aria-label', 'Voltar para a seleção de fases');
+  await expect(editorBack).not.toContainText('Cancelar');
 
   const before = await page.evaluate(() => ({
     machines: window.__FACTORY_DEBUG__!.getMachines().length,
@@ -667,4 +675,183 @@ test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e cont
       spring: { gridX: 11, gridY: 10, angle: 90 },
       centerStar: { gridX: 10, gridY: 11 },
     });
+});
+
+test('prévia do admin mantém o orçamento exato preenchido em verde', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+
+  const placement = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+
+    debug.startEditor({
+      id: 'budget-preview-test',
+      order: 3,
+      title: 'Budget preview test',
+      subtitle: 'Draft',
+      description: 'Checks the budget meter at the exact limit.',
+      grid: { columns: 30, rows: 18 },
+      availableMachines: ['spring'],
+      fixedMachines: [
+        {
+          id: 'source-budget-test',
+          type: 'source',
+          gridX: 2.5,
+          gridY: 2.5,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+        {
+          id: 'receiver-budget-test',
+          type: 'receiver',
+          gridX: 24.5,
+          gridY: 14.5,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+      ],
+      obstacles: [],
+      goal: { deliveries: 1, maxLosses: 1 },
+      economy: {
+        budgetLimit: 5_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
+      spawnIntervalSeconds: 1,
+      initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
+    });
+    debug.beginEditorPreview();
+    return {
+      placed: debug.placeMachine('spring', 12.5, 8.5, 0),
+      spent: debug.getSnapshot().metrics.spent,
+    };
+  });
+
+  expect(placement).toEqual({ placed: true, spent: 5_000 });
+  const meter = page.locator('#budget-meter');
+  await expect(meter).not.toHaveClass(/is-over-budget/);
+  await expect(meter.locator('[data-budget-fill]')).toHaveCSS(
+    'background-color',
+    'rgb(37, 196, 66)',
+  );
+  await expect
+    .poll(() =>
+      meter
+        .locator('[data-budget-fill]')
+        .evaluate((fill) => (fill as HTMLElement).style.getPropertyValue('--budget-fill')),
+    )
+    .toBe('100%');
+});
+
+test('seleção por área inclui paredes e várias estrelas no editor', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+
+  await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    debug.startEditor({
+      id: 'editor-star-group-test',
+      order: 4,
+      title: 'Star group selection test',
+      subtitle: 'Draft',
+      description: 'Checks marquee selection for every editor item.',
+      grid: { columns: 30, rows: 18 },
+      availableMachines: ['tracked-conveyor'],
+      fixedMachines: [],
+      obstacles: [],
+      collectibles: [],
+      goal: { deliveries: 1, maxLosses: 1 },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
+      spawnIntervalSeconds: 1,
+      initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
+    });
+    document.querySelector('#menu-screen')?.classList.add('is-hidden');
+    document.querySelector('#app')?.classList.remove('is-menu-open');
+    document.querySelector<HTMLElement>('#game-ui')?.removeAttribute('inert');
+    document.querySelector<HTMLElement>('#game-container')?.removeAttribute('inert');
+    if (!debug.placeObstacle(8, 6, 2, 2)) throw new Error('Obstacle not placed');
+    if (!debug.placeCollectible(11, 7) || !debug.placeCollectible(13, 9)) {
+      throw new Error('Collectibles not placed');
+    }
+  });
+
+  const canvas = page.locator('#game-container canvas');
+  const bounds = await canvas.boundingBox();
+  const camera = await page.evaluate(() => window.__FACTORY_DEBUG__!.getCamera());
+  if (!bounds) throw new Error('Canvas has no bounds');
+  const pointFor = (gridX: number, gridY: number) => ({
+    x: bounds.x + (bounds.width - 30 * 48 * camera.zoom) / 2 + gridX * 48 * camera.zoom,
+    y: bounds.y + (bounds.height - 18 * 48 * camera.zoom) / 2 + gridY * 48 * camera.zoom,
+  });
+
+  const marqueeStart = pointFor(6, 4);
+  const marqueeEnd = pointFor(15, 11);
+  await page.mouse.move(marqueeStart.x, marqueeStart.y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(marqueeEnd.x, marqueeEnd.y, { steps: 8 });
+  await page.mouse.up({ button: 'right' });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__FACTORY_DEBUG__!.getSnapshot().selection),
+    )
+    .toEqual({
+      machineIds: [],
+      obstacleIds: [expect.any(String)],
+      collectibleIds: [expect.any(String), expect.any(String)],
+      count: 3,
+    });
+
+  const dragStart = pointFor(11.5, 7.5);
+  const dragEnd = pointFor(13.5, 10.5);
+  await page.mouse.move(dragStart.x, dragStart.y);
+  await page.mouse.down();
+  await page.mouse.move(dragEnd.x, dragEnd.y, { steps: 8 });
+  await page.mouse.up();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        obstacle: window.__FACTORY_DEBUG__!.getObstacles()[0],
+        collectibles: window.__FACTORY_DEBUG__!.getCollectibles(),
+      })),
+    )
+    .toMatchObject({
+      obstacle: { gridX: 10, gridY: 9 },
+      collectibles: [
+        { gridX: 13, gridY: 10 },
+        { gridX: 15, gridY: 12 },
+      ],
+    });
+
+  await page.locator('[data-action="copy"]').click();
+  const pasteTarget = pointFor(22, 5);
+  await page.mouse.click(pasteTarget.x, pasteTarget.y);
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        obstacles: window.__FACTORY_DEBUG__!.getObstacles().length,
+        collectibles: window.__FACTORY_DEBUG__!.getCollectibles().length,
+        selection: window.__FACTORY_DEBUG__!.getSnapshot().selection.count,
+      })),
+    )
+    .toEqual({ obstacles: 2, collectibles: 4, selection: 3 });
+
+  await page.locator('[data-action="delete"]').click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        obstacles: window.__FACTORY_DEBUG__!.getObstacles().length,
+        collectibles: window.__FACTORY_DEBUG__!.getCollectibles().length,
+      })),
+    )
+    .toEqual({ obstacles: 1, collectibles: 2 });
 });

@@ -5,7 +5,7 @@
       "id": "assembly-line",
       "world": 1,
       "stage": 1,
-      "revision": 3,
+      "revision": 4,
       "order": 1,
       "title": "1-1",
       "subtitle": "Ligue a primeira linha.",
@@ -48,13 +48,19 @@
       ],
       "goal": {
         "deliveries": 8,
-        "maxLosses": 3
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 10000,
+        "budgetLimit": 8000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 1.25,
@@ -68,7 +74,7 @@
       "id": "quality-curve",
       "world": 1,
       "stage": 2,
-      "revision": 7,
+      "revision": 9,
       "order": 2,
       "title": "2-1",
       "subtitle": "Desenhe uma curva suave.",
@@ -117,27 +123,33 @@
       ],
       "goal": {
         "deliveries": 10,
-        "maxLosses": 3
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 12500,
+        "budgetLimit": 10000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 1.2,
       "initialCamera": {
-        "centerX": 515.1,
-        "centerY": 410.52,
-        "zoom": 1.2712
+        "centerX": 559.8,
+        "centerY": 438.37,
+        "zoom": 1.4333
       }
     },
     {
       "id": "first-jump",
       "world": 1,
       "stage": 3,
-      "revision": 5,
+      "revision": 9,
       "order": 3,
       "title": "3-1",
       "subtitle": "Faça o primeiro salto.",
@@ -147,14 +159,13 @@
         "rows": 18
       },
       "availableMachines": [
-        "tracked-conveyor",
         "spring"
       ],
       "fixedMachines": [
         {
           "id": "first-jump-source",
           "type": "source",
-          "gridX": 3.25,
+          "gridX": 2,
           "gridY": 3.25,
           "angle": 0,
           "reversed": false,
@@ -163,8 +174,8 @@
         {
           "id": "first-jump-receiver",
           "type": "receiver",
-          "gridX": 15.25,
-          "gridY": 13.25,
+          "gridX": 10.25,
+          "gridY": 11.25,
           "angle": 0,
           "reversed": false,
           "fixed": true
@@ -176,14 +187,14 @@
           "gridX": 6,
           "gridY": 9,
           "columns": 2,
-          "rows": 4,
+          "rows": 6,
           "angle": 0
         },
         {
-          "id": "obstacle-1",
-          "gridX": 10.75,
-          "gridY": 6,
-          "columns": 1,
+          "id": "obstacle-2",
+          "gridX": 6,
+          "gridY": 2,
+          "columns": 2,
           "rows": 4,
           "angle": 0
         }
@@ -198,31 +209,37 @@
       ],
       "goal": {
         "deliveries": 10,
-        "maxLosses": 3
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 20000,
+        "budgetLimit": 5000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 1.15,
       "initialCamera": {
-        "centerX": 468,
-        "centerY": 420,
+        "centerX": 338.37,
+        "centerY": 396.85,
         "zoom": 1.08
       }
     },
     {
-      "id": "over-or-around",
+      "id": "custom-eda80377-9d7c-42b4-b24d-7ef50cef0b31",
       "world": 1,
       "stage": 4,
-      "revision": 5,
+      "revision": 3,
       "order": 4,
       "title": "4-1",
-      "subtitle": "Passe por cima ou dê a volta.",
-      "description": "Cruze a parede alta escolhendo entre um salto econômico e um desvio seguro.",
+      "subtitle": "Crie um novo desafio.",
+      "description": "Monte o cenário e configure as ferramentas disponíveis.",
       "grid": {
         "columns": 30,
         "rows": 18
@@ -233,19 +250,19 @@
       ],
       "fixedMachines": [
         {
-          "id": "over-or-around-source",
+          "id": "machine-1",
           "type": "source",
-          "gridX": 3.25,
-          "gridY": 10.25,
+          "gridX": 14.5,
+          "gridY": 5.25,
           "angle": 0,
           "reversed": false,
           "fixed": true
         },
         {
-          "id": "over-or-around-receiver",
+          "id": "machine-2",
           "type": "receiver",
-          "gridX": 20.25,
-          "gridY": 12.25,
+          "gridX": 14.5,
+          "gridY": 15.25,
           "angle": 0,
           "reversed": false,
           "fixed": true
@@ -253,45 +270,73 @@
       ],
       "obstacles": [
         {
-          "id": "over-or-around-wall",
-          "gridX": 10,
-          "gridY": 7,
-          "columns": 3,
-          "rows": 5,
+          "id": "obstacle-1",
+          "gridX": 11,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 8,
           "angle": 0
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 18,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 8,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-4",
+          "columns": 8,
+          "rows": 1,
+          "angle": 0,
+          "gridX": 11,
+          "gridY": 13
         }
       ],
       "collectibles": [
         {
-          "id": "over-or-around-star",
+          "id": "star-1",
           "type": "star",
-          "gridX": 18,
-          "gridY": 13.5
+          "gridX": 12.5,
+          "gridY": 5.5
+        },
+        {
+          "id": "star-2",
+          "type": "star",
+          "gridX": 16.5,
+          "gridY": 5.5
         }
       ],
       "goal": {
-        "deliveries": 12,
-        "maxLosses": 3
+        "deliveries": 5,
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 25000,
+        "budgetLimit": 20000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
-      "spawnIntervalSeconds": 1.1,
+      "spawnIntervalSeconds": 1.25,
       "initialCamera": {
-        "centerX": 565.52,
-        "centerY": 451.24,
-        "zoom": 1.05
+        "centerX": 769.71,
+        "centerY": 497.97,
+        "zoom": 1.2712
       }
     },
     {
       "id": "calibrated-jump",
       "world": 1,
       "stage": 5,
-      "revision": 7,
+      "revision": 9,
       "order": 5,
       "title": "5-1",
       "subtitle": "Acerte a janela.",
@@ -317,8 +362,8 @@
         {
           "id": "calibrated-jump-receiver",
           "type": "receiver",
-          "gridX": 17.25,
-          "gridY": 13.25,
+          "gridX": 17,
+          "gridY": 13.75,
           "angle": 0,
           "reversed": false,
           "fixed": true
@@ -340,6 +385,22 @@
           "columns": 3,
           "rows": 3,
           "angle": 45
+        },
+        {
+          "id": "obstacle-1",
+          "gridX": 9.75,
+          "gridY": 10.5,
+          "columns": 10,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-2",
+          "gridX": 7,
+          "gridY": 13.25,
+          "columns": 1,
+          "rows": 7,
+          "angle": 0
         }
       ],
       "collectibles": [
@@ -361,24 +422,30 @@
         "maxLosses": 2
       },
       "economy": {
-        "budgetLimit": 20000,
+        "budgetLimit": 18000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 1.05,
       "initialCamera": {
-        "centerX": 534,
-        "centerY": 402,
-        "zoom": 1
+        "centerX": 587.05,
+        "centerY": 425.1,
+        "zoom": 1.1275
       }
     },
     {
       "id": "star-route",
       "world": 1,
       "stage": 6,
-      "revision": 5,
+      "revision": 6,
       "order": 6,
       "title": "6-1",
       "subtitle": "Complete a rota das estrelas.",
@@ -409,9 +476,108 @@
           "angle": 0,
           "reversed": false,
           "fixed": true
+        },
+        {
+          "id": "machine-2",
+          "type": "tracked-conveyor",
+          "gridX": 18.5,
+          "gridY": 7.25,
+          "angle": 0,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
         }
       ],
-      "obstacles": [],
+      "obstacles": [
+        {
+          "id": "obstacle-1",
+          "gridX": 14.25,
+          "gridY": 10.25,
+          "columns": 1,
+          "rows": 1,
+          "angle": 335
+        },
+        {
+          "id": "obstacle-2",
+          "gridX": 12,
+          "gridY": 8,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 10,
+          "gridY": 13,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-4",
+          "gridX": 8,
+          "gridY": 8,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-5",
+          "gridX": 9.25,
+          "gridY": 10.25,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-6",
+          "gridX": 20,
+          "gridY": 12,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-7",
+          "gridX": 15,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-8",
+          "gridX": 18,
+          "gridY": 8,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-9",
+          "gridX": 5,
+          "gridY": 13,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-10",
+          "gridX": 3,
+          "gridY": 7,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-11",
+          "gridX": 6,
+          "gridY": 7,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        }
+      ],
       "collectibles": [
         {
           "id": "star-route-star-a",
@@ -434,51 +600,49 @@
       ],
       "goal": {
         "deliveries": 14,
-        "maxLosses": 3
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 25000,
+        "budgetLimit": 12500,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 1,
       "initialCamera": {
-        "centerX": 631.3,
+        "centerX": 630.51,
         "centerY": 392.96,
         "zoom": 1.2712
       }
     },
     {
-      "id": "meeting-lines",
+      "id": "over-or-around",
       "world": 1,
       "stage": 7,
-      "revision": 2,
+      "revision": 15,
       "order": 7,
       "title": "7-1",
-      "subtitle": "Una os dois fluxos.",
-      "description": "Faça duas saídas compartilharem uma linha sem criar colisões ou congestionamento.",
+      "subtitle": "Passe por cima ou dê a volta.",
+      "description": "Cruze a parede alta escolhendo entre um salto econômico e um desvio seguro.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
       "availableMachines": [
         "tracked-conveyor",
-        "spring"
+        "spring",
+        "turbo-spring"
       ],
       "fixedMachines": [
         {
-          "id": "meeting-lines-source-a",
-          "type": "source",
-          "gridX": 3.25,
-          "gridY": 3.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        },
-        {
-          "id": "meeting-lines-source-b",
+          "id": "over-or-around-source",
           "type": "source",
           "gridX": 3.25,
           "gridY": 10.25,
@@ -487,53 +651,99 @@
           "fixed": true
         },
         {
-          "id": "meeting-lines-receiver",
+          "id": "over-or-around-receiver",
           "type": "receiver",
-          "gridX": 19.25,
-          "gridY": 13.25,
+          "gridX": 19,
+          "gridY": 10.5,
           "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-1",
+          "type": "spring",
+          "gridX": 2.75,
+          "gridY": 15.25,
+          "angle": 75,
           "reversed": false,
           "fixed": true
         }
       ],
-      "obstacles": [],
-      "collectibles": [
+      "obstacles": [
         {
-          "id": "meeting-lines-star-a",
-          "type": "star",
-          "gridX": 5.5,
-          "gridY": 7.5
+          "id": "over-or-around-wall",
+          "gridX": 3.5,
+          "gridY": 0.5,
+          "columns": 9,
+          "rows": 11,
+          "angle": 325
         },
         {
-          "id": "meeting-lines-star-b",
+          "id": "obstacle-2",
+          "columns": 17,
+          "rows": 11,
+          "angle": 0,
+          "gridX": 3,
+          "gridY": 17.5
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 9.75,
+          "gridY": 11.25,
+          "columns": 7,
+          "rows": 2,
+          "angle": 325
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "over-or-around-star",
           "type": "star",
-          "gridX": 12,
-          "gridY": 12.5
+          "gridX": 14.25,
+          "gridY": 8.5
+        },
+        {
+          "id": "star-1",
+          "type": "star",
+          "gridX": 17.25,
+          "gridY": 13.5
+        },
+        {
+          "id": "star-2",
+          "type": "star",
+          "gridX": 10.5,
+          "gridY": 15.5
         }
       ],
       "goal": {
-        "deliveries": 16,
-        "maxLosses": 3
+        "deliveries": 12,
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 30000,
+        "budgetLimit": 25000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
-      "spawnIntervalSeconds": 1,
+      "spawnIntervalSeconds": 1.1,
       "initialCamera": {
-        "centerX": 528,
-        "centerY": 432,
-        "zoom": 1
+        "centerX": 579.27,
+        "centerY": 620.93,
+        "zoom": 1.0976
       }
     },
     {
       "id": "production-rhythm",
       "world": 1,
       "stage": 8,
-      "revision": 6,
+      "revision": 11,
       "order": 8,
       "title": "8-1",
       "subtitle": "Acelere a produção.",
@@ -550,8 +760,8 @@
         {
           "id": "production-rhythm-source-a",
           "type": "source",
-          "gridX": 3.5,
-          "gridY": 6.5,
+          "gridX": 18.25,
+          "gridY": 6,
           "angle": 0,
           "reversed": false,
           "fixed": true
@@ -559,8 +769,8 @@
         {
           "id": "production-rhythm-source-b",
           "type": "source",
-          "gridX": 5.5,
-          "gridY": 10.25,
+          "gridX": 5.75,
+          "gridY": 5.75,
           "angle": 0,
           "reversed": false,
           "fixed": true
@@ -568,9 +778,36 @@
         {
           "id": "production-rhythm-receiver",
           "type": "receiver",
-          "gridX": 20.25,
-          "gridY": 13.25,
+          "gridX": 12,
+          "gridY": 6.25,
           "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-3",
+          "type": "turbo-spring",
+          "gridX": 19.5,
+          "gridY": 1.5,
+          "angle": 90,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-6",
+          "type": "spring",
+          "gridX": 18.75,
+          "gridY": 14.25,
+          "angle": 65,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-7",
+          "type": "turbo-spring",
+          "gridX": 23,
+          "gridY": 15,
+          "angle": 350,
           "reversed": false,
           "fixed": true
         }
@@ -578,17 +815,65 @@
       "obstacles": [
         {
           "id": "obstacle-2",
-          "gridX": 10,
+          "gridX": 3,
+          "gridY": 3,
+          "columns": 19,
+          "rows": 2,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 20,
+          "gridY": 5,
+          "columns": 2,
+          "rows": 8,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-4",
+          "columns": 2,
+          "rows": 5,
+          "angle": 0,
+          "gridX": 3,
+          "gridY": 8
+        },
+        {
+          "id": "obstacle-5",
+          "gridX": 16.25,
+          "gridY": 6.75,
+          "columns": 1,
+          "rows": 9,
+          "angle": 340
+        },
+        {
+          "id": "obstacle-6",
+          "gridX": 16.75,
+          "gridY": 6.25,
+          "columns": 1,
+          "rows": 5,
+          "angle": 340
+        },
+        {
+          "id": "obstacle-7",
+          "gridX": 11,
           "gridY": 10,
           "columns": 1,
           "rows": 1,
           "angle": 0
         },
         {
-          "id": "obstacle-3",
-          "gridX": 9,
-          "gridY": 7,
-          "columns": 2,
+          "id": "obstacle-8",
+          "gridX": 12,
+          "gridY": 15,
+          "columns": 1,
+          "rows": 1,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-9",
+          "gridX": 5.5,
+          "gridY": 10,
+          "columns": 4,
           "rows": 1,
           "angle": 0
         }
@@ -603,8 +888,8 @@
         {
           "id": "star-1",
           "type": "star",
-          "gridX": 16,
-          "gridY": 13
+          "gridX": 15.75,
+          "gridY": 13.25
         }
       ],
       "goal": {
@@ -614,21 +899,22 @@
         "budgetLimit": 35000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
         }
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 594,
-        "centerY": 498,
-        "zoom": 1.3
+        "centerX": 678.23,
+        "centerY": 436.73,
+        "zoom": 1.1275
       }
     },
     {
       "id": "industrial-corridors",
       "world": 1,
       "stage": 9,
-      "revision": 2,
+      "revision": 36,
       "order": 9,
       "title": "9-1",
       "subtitle": "Atravesse os corredores.",
@@ -638,93 +924,179 @@
         "rows": 18
       },
       "availableMachines": [
-        "tracked-conveyor",
-        "spring"
+        "turbo-spring"
       ],
       "fixedMachines": [
         {
-          "id": "industrial-corridors-source-a",
+          "id": "machine-3",
           "type": "source",
-          "gridX": 3.25,
-          "gridY": 3.25,
-          "angle": 0,
+          "gridX": 12,
+          "gridY": 15.25,
+          "angle": 180,
           "reversed": false,
           "fixed": true
         },
         {
-          "id": "industrial-corridors-source-b",
-          "type": "source",
-          "gridX": 3.25,
-          "gridY": 11.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        },
-        {
-          "id": "industrial-corridors-receiver",
+          "id": "machine-19",
           "type": "receiver",
-          "gridX": 22.25,
-          "gridY": 14.25,
+          "gridX": 10.25,
+          "gridY": 7.5,
           "angle": 0,
           "reversed": false,
           "fixed": true
-        }
-      ],
-      "obstacles": [
-        {
-          "id": "industrial-corridors-block-a",
-          "gridX": 9,
-          "gridY": 5,
-          "columns": 3,
-          "rows": 4,
-          "angle": 0
         },
         {
-          "id": "industrial-corridors-block-b",
-          "gridX": 16,
-          "gridY": 10,
-          "columns": 4,
-          "rows": 3,
-          "angle": 0
-        }
-      ],
-      "collectibles": [
-        {
-          "id": "industrial-corridors-star-a",
-          "type": "star",
-          "gridX": 7,
-          "gridY": 7
+          "id": "machine-20",
+          "type": "tracked-conveyor",
+          "angle": 90,
+          "reversed": false,
+          "fixed": true,
+          "gridX": 12.5,
+          "gridY": 13.5,
+          "conveyorSpeed": "normal"
         },
         {
-          "id": "industrial-corridors-star-b",
-          "type": "star",
-          "gridX": 18.25,
-          "gridY": 13.5
+          "id": "machine-21",
+          "type": "tracked-conveyor",
+          "gridX": 11.5,
+          "gridY": 13.5,
+          "angle": 90,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-22",
+          "type": "tracked-conveyor",
+          "angle": 90,
+          "reversed": false,
+          "fixed": true,
+          "gridX": 12.5,
+          "gridY": 11.5,
+          "conveyorSpeed": "normal"
+        },
+        {
+          "id": "machine-23",
+          "type": "tracked-conveyor",
+          "gridX": 11.5,
+          "gridY": 11.5,
+          "angle": 90,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-24",
+          "type": "tracked-conveyor",
+          "angle": 90,
+          "reversed": false,
+          "fixed": true,
+          "gridX": 12.5,
+          "gridY": 9.5,
+          "conveyorSpeed": "normal"
+        },
+        {
+          "id": "machine-25",
+          "type": "tracked-conveyor",
+          "gridX": 11.5,
+          "gridY": 9.5,
+          "angle": 90,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-26",
+          "type": "tracked-conveyor",
+          "angle": 90,
+          "reversed": false,
+          "fixed": true,
+          "gridX": 12.521,
+          "gridY": 7.708,
+          "conveyorSpeed": "normal"
+        },
+        {
+          "id": "machine-27",
+          "type": "tracked-conveyor",
+          "gridX": 11.521,
+          "gridY": 7.719,
+          "angle": 90,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-28",
+          "type": "tracked-conveyor",
+          "gridX": 13.604,
+          "gridY": 6.656,
+          "angle": 0,
+          "reversed": false,
+          "conveyorSpeed": "slow",
+          "fixed": true
+        },
+        {
+          "id": "machine-29",
+          "type": "tracked-conveyor",
+          "gridX": 15.406,
+          "gridY": 6.677,
+          "angle": 0,
+          "reversed": false,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-31",
+          "type": "tracked-conveyor",
+          "gridX": 13.573,
+          "gridY": 5.604,
+          "angle": 0,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
+        },
+        {
+          "id": "machine-32",
+          "type": "tracked-conveyor",
+          "gridX": 12.01,
+          "gridY": 6.094,
+          "angle": 312,
+          "reversed": true,
+          "conveyorSpeed": "normal",
+          "fixed": true
         }
       ],
+      "obstacles": [],
+      "collectibles": [],
       "goal": {
-        "deliveries": 20,
-        "maxLosses": 2
+        "deliveries": 10,
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 40000,
+        "budgetLimit": 7500,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
-      "spawnIntervalSeconds": 0.85,
+      "spawnIntervalSeconds": 1.5,
       "initialCamera": {
-        "centerX": 576,
-        "centerY": 444,
-        "zoom": 1
+        "centerX": 581.68,
+        "centerY": 532.96,
+        "zoom": 1.2376
       }
     },
     {
       "id": "final-inspection",
       "world": 1,
       "stage": 10,
-      "revision": 2,
+      "revision": 10,
       "order": 10,
       "title": "10-1",
       "subtitle": "Passe pela inspeção final.",
@@ -735,7 +1107,8 @@
       },
       "availableMachines": [
         "tracked-conveyor",
-        "spring"
+        "spring",
+        "turbo-spring"
       ],
       "fixedMachines": [
         {
@@ -759,9 +1132,9 @@
         {
           "id": "final-inspection-receiver",
           "type": "receiver",
-          "gridX": 24.25,
-          "gridY": 14.25,
-          "angle": 0,
+          "gridX": 13.5,
+          "gridY": 5.5,
+          "angle": 270,
           "reversed": false,
           "fixed": true
         }
@@ -770,17 +1143,33 @@
         {
           "id": "final-inspection-block-a",
           "gridX": 10,
-          "gridY": 5,
+          "gridY": 3,
           "columns": 3,
           "rows": 4,
           "angle": 0
         },
         {
           "id": "final-inspection-block-b",
-          "gridX": 17,
-          "gridY": 10,
-          "columns": 4,
+          "gridX": 10,
+          "gridY": 7,
+          "columns": 6,
           "rows": 3,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-1",
+          "gridX": 13,
+          "gridY": 3,
+          "columns": 3,
+          "rows": 2,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-2",
+          "gridX": 15,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 1,
           "angle": 0
         }
       ],
@@ -805,23 +1194,29 @@
         }
       ],
       "goal": {
-        "deliveries": 25,
-        "maxLosses": 1
+        "deliveries": 99,
+        "maxLosses": 0
       },
       "economy": {
-        "budgetLimit": 45000,
+        "budgetLimit": 35000,
         "machineCosts": {
           "tracked-conveyor": 2500,
-          "spring": 5000
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 672,
-        "centerY": 444,
-        "zoom": 1
+        "centerX": 635.86,
+        "centerY": 392.63,
+        "zoom": 1.2713
       }
     }
   ],
-  "updatedAt": "2026-07-23T16:16:21.662Z"
+  "updatedAt": "2026-07-24T05:59:44.923Z"
 }

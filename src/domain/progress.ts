@@ -222,7 +222,9 @@ function isMachineState(value: unknown): value is MachineState {
   if (!isRecord(value)) return false;
   return (
     typeof value.id === 'string' &&
-    ['source', 'conveyor', 'tracked-conveyor', 'receiver', 'spring'].includes(String(value.type)) &&
+    ['source', 'conveyor', 'tracked-conveyor', 'receiver', 'spring', 'turbo-spring'].includes(
+      String(value.type),
+    ) &&
     Number.isFinite(value.gridX) &&
     Number.isFinite(value.gridY) &&
     Number.isFinite(value.angle) &&

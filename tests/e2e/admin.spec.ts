@@ -8,7 +8,8 @@ type AdminMachineType =
   | 'conveyor'
   | 'tracked-conveyor'
   | 'receiver'
-  | 'spring';
+  | 'spring'
+  | 'turbo-spring';
 
 interface AdminCamera {
   centerX: number;
@@ -68,6 +69,7 @@ interface AdminContract {
     machineCosts: {
       'tracked-conveyor': number;
       spring: number;
+      'turbo-spring'?: number;
     };
     conveyorSpeedCosts?: {
       slow: number;
@@ -89,6 +91,14 @@ type AdminWindow = Window & {
   __FACTORY_DEBUG__?: {
     getSnapshot(): { mode: string; contractId?: string };
     getEditorDraft(): AdminContract;
+    startEditor(contract: AdminContract): void;
+    getInvalidEntityFlash(): {
+      machineIds: string[];
+      obstacleIds: string[];
+      collectibleIds: string[];
+      remainingMs: number;
+    };
+    getEditorHitboxesVisible(): boolean;
     getMachines(): AdminMachine[];
     getObstacles(): AdminObstacle[];
     getCamera(): AdminCameraSnapshot;
@@ -430,6 +440,10 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await page.locator('#editor-contract-form input[name="conveyorNormalCost"]').fill('3000');
   await page.locator('#editor-contract-form input[name="conveyorFastCost"]').fill('3600');
   await page.locator('#editor-contract-form input[name="springCost"]').fill('6000');
+  await expect(page.locator('#editor-contract-form input[name="turboSpringCost"]')).toHaveValue(
+    '7500',
+  );
+  await page.locator('#editor-contract-form input[name="availableTurboSpring"]').check();
   await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
   await expect.poll(() => harness.posts().length).toBe(1);
@@ -439,12 +453,14 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
     revision: 2,
     order: 1,
     title: '1-1',
+    availableMachines: expect.arrayContaining(['turbo-spring']),
     goal: { deliveries: 11 },
     economy: {
       budgetLimit: 30_000,
       machineCosts: {
         'tracked-conveyor': 3_000,
         spring: 6_000,
+        'turbo-spring': 7_500,
       },
       conveyorSpeedCosts: {
         slow: 2_200,
@@ -482,27 +498,23 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await expect(page.locator('input[name="conveyorNormalCost"]')).toHaveValue('2500');
   await expect(page.locator('input[name="conveyorFastCost"]')).toHaveValue('3000');
 
-  const progressBeforePreview = await page.evaluate(
-    (key) => localStorage.getItem(key),
-    PROGRESS_KEY,
-  );
+  const completionsBeforePreview = (await getProgress(page)).completedContracts;
   await page.locator('[data-action="editor-test"]').click();
   await expect(page.locator('#editor-preview-bar')).not.toHaveClass(/is-hidden/);
+  await expect.poll(() => harness.current().contracts.length).toBe(3);
   await page.evaluate(() => {
     const debug = (window as AdminWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Admin debug API unavailable');
     debug.completeContract();
   });
   await expect(page.locator('#result-modal')).toHaveClass(/is-hidden/);
-  expect(await page.evaluate((key) => localStorage.getItem(key), PROGRESS_KEY)).toBe(
-    progressBeforePreview,
-  );
+  const progressAfterPreview = await getProgress(page);
+  expect(progressAfterPreview.completedContracts).toEqual(completionsBeforePreview);
+  expect(progressAfterPreview.unlockedContracts).toContain(draftId);
   await page.locator('[data-action="editor-return"]').click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
 
-  await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
-  await expect.poll(() => harness.current().contracts.length).toBe(3);
   expect(harness.current().contracts.find(({ id }) => id === draftId)).toMatchObject({
     world: 1,
     stage: 3,
@@ -701,7 +713,7 @@ test('descarta pan e zoom feitos na prévia ao voltar ao editor', async ({ page 
     camera: authoringCamera,
     draftCamera: authoringCamera,
   });
-  expect(harness.posts()).toHaveLength(0);
+  expect(harness.posts()).toHaveLength(1);
 });
 
 test('bloqueia autoria e saída do editor enquanto o POST está pendente', async ({ page }) => {
@@ -749,6 +761,137 @@ test('bloqueia autoria e saída do editor enquanto o POST está pendente', async
     order: 2,
     title: '2-1',
   });
+});
+
+test('só abre a prévia depois que o teste salva a fase', async ({ page }) => {
+  const contract = makeContract('test-waits-for-save-stage', 1);
+  const harness = await installCatalogHarness(page, makeCatalog(contract));
+  await openApp(page);
+  await enableAdmin(page);
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
+
+  const release = harness.holdNextPostUntilRelease();
+  await page.locator('[data-action="editor-test"]').click();
+  await expect.poll(() => harness.posts().length).toBe(1);
+  await expect(page.locator('#editor-preview-bar')).toHaveClass(/is-hidden/);
+  await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-action="editor-test"]')).toBeDisabled();
+
+  release();
+  await expect(page.locator('#editor-preview-bar')).not.toHaveClass(/is-hidden/);
+  expect(harness.current().contracts[0]?.revision).toBe(2);
+});
+
+test('não abre a prévia quando o salvamento do teste falha', async ({ page }) => {
+  const contract = makeContract('test-save-failure-stage', 1);
+  const harness = await installCatalogHarness(page, makeCatalog(contract));
+  await openApp(page);
+  await enableAdmin(page);
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
+
+  const releaseFailure = harness.failNextPostAfterRelease(
+    'Falha simulada ao validar a fase para teste.',
+  );
+  await page.locator('[data-action="editor-test"]').click();
+  await expect.poll(() => harness.posts().length).toBe(1);
+  releaseFailure();
+
+  await expect(page.locator('#editor-feedback')).toContainText(
+    'Falha simulada ao validar a fase para teste.',
+  );
+  await expect(page.locator('#editor-preview-bar')).toHaveClass(/is-hidden/);
+  await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-action="editor-test"]')).toBeEnabled();
+  expect(harness.current().contracts[0]?.revision).toBe(1);
+});
+
+test('pisca em vermelho todos os objetos inválidos a cada tentativa de salvar', async ({
+  page,
+}) => {
+  const contract = makeContract('invalid-object-flash', 1);
+  const harness = await installCatalogHarness(page, makeCatalog(contract));
+  await openApp(page);
+  await enableAdmin(page);
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
+
+  const invalidMachineId = await page.evaluate(() => {
+    const debug = (window as AdminWindow).__FACTORY_DEBUG__!;
+    const draft = debug.getEditorDraft();
+    const invalidMachine = draft.fixedMachines[0]!;
+    const overlappingMachine = draft.fixedMachines[1]!;
+    invalidMachine.gridX = overlappingMachine.gridX;
+    invalidMachine.gridY = overlappingMachine.gridY;
+    debug.startEditor(draft);
+    return invalidMachine.id;
+  });
+  await page.locator('[data-action="editor-configure"]').first().click();
+  await page.locator('#editor-contract-form input[name="deliveries"]').fill('9');
+  await page.locator('[data-action="editor-save"]').click();
+
+  await expect(page.locator('#editor-feedback')).toContainText(
+    'Há objetos sobrepostos',
+  );
+  const firstFlash = await page.evaluate(
+    () => (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash(),
+  );
+  expect(firstFlash.machineIds).toContain(invalidMachineId);
+  expect(firstFlash.remainingMs).toBeGreaterThan(1_500);
+  expect(harness.posts()).toHaveLength(0);
+
+  await page.waitForTimeout(500);
+  const beforeRetry = await page.evaluate(
+    () => (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash().remainingMs,
+  );
+  await page.locator('[data-action="editor-test"]').click();
+  const afterRetry = await page.evaluate(
+    () => (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash().remainingMs,
+  );
+  expect(afterRetry).toBeGreaterThan(beforeRetry);
+  expect(afterRetry).toBeGreaterThan(1_500);
+  await expect(page.locator('#editor-preview-bar')).toHaveClass(/is-hidden/);
+  expect(harness.posts()).toHaveLength(0);
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () => (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash().remainingMs,
+        ),
+      { timeout: 3_000 },
+    )
+    .toBe(0);
+});
+
+test('liga e desliga a visualização de hitboxes somente no editor', async ({ page }) => {
+  const contract = makeContract('hitbox-toggle-stage', 1);
+  await installCatalogHarness(page, makeCatalog(contract));
+  await openApp(page);
+  await enableAdmin(page);
+  await page.getByRole('button', { name: 'Editar fase 1-1' }).click();
+
+  const toggle = page.getByRole('button', { name: 'Hitboxes' });
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(toggle).toHaveClass(/is-active/);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible(),
+      ),
+    )
+    .toBe(true);
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible(),
+      ),
+    )
+    .toBe(false);
 });
 
 test('mantém o rascunho sujo e mostra o erro quando o POST falha', async ({ page }) => {

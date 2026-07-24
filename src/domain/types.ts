@@ -8,7 +8,13 @@ export const PLAY_AREA_MAX_COLUMN = GRID_COLUMNS * (PLAY_AREA_MARGIN_STAGES + 1)
 export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
 export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
-export type MachineType = 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring';
+export type MachineType =
+  | 'source'
+  | 'conveyor'
+  | 'tracked-conveyor'
+  | 'receiver'
+  | 'spring'
+  | 'turbo-spring';
 export type ConveyorSpeed = 'slow' | 'normal' | 'fast';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
@@ -60,6 +66,7 @@ export interface ContractGoal {
 export interface ContractMachineCosts {
   'tracked-conveyor': number;
   spring: number;
+  'turbo-spring'?: number;
 }
 
 export type ConveyorSpeedCosts = Record<ConveyorSpeed, number>;
@@ -166,6 +173,7 @@ export interface GameSnapshot {
   selection: {
     machineIds: string[];
     obstacleIds: string[];
+    collectibleIds: string[];
     count: number;
   };
   availableMachines: MachineType[];

@@ -16,6 +16,7 @@ export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   'tracked-conveyor': { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
   receiver: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
   spring: { width: CELL_SIZE, height: CELL_SIZE / 2 },
+  'turbo-spring': { width: CELL_SIZE, height: CELL_SIZE / 2 },
 };
 
 /**
@@ -29,6 +30,16 @@ export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> 
   'tracked-conveyor': { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
   receiver: MACHINE_DIMENSIONS.receiver,
   spring: MACHINE_DIMENSIONS.spring,
+  'turbo-spring': MACHINE_DIMENSIONS['turbo-spring'],
+};
+
+/**
+ * Placement follows the track's visible capsule instead of the larger rectangular
+ * module footprint. This lets angled conveyor tips meet without an invisible gap.
+ */
+export const CONVEYOR_PLACEMENT_DIMENSIONS: MachineDimensions = {
+  width: 85,
+  height: 21,
 };
 
 export function gridToWorld(point: GridPoint): Point {
@@ -90,7 +101,50 @@ export function rectangleCorners(center: Point, width: number, height: number, a
   ];
 }
 
+export function capsulePolygon(
+  center: Point,
+  width: number,
+  height: number,
+  angle = 0,
+  capSegments = 4,
+): Point[] {
+  const radius = Math.min(width, height) / 2;
+  const straightHalfWidth = Math.max(0, width / 2 - radius);
+  const points: Point[] = [];
+  for (let index = 0; index <= capSegments; index += 1) {
+    const radians = -Math.PI / 2 + (Math.PI * index) / capSegments;
+    points.push(
+      localToWorld(
+        center,
+        angle,
+        straightHalfWidth + Math.cos(radians) * radius,
+        Math.sin(radians) * radius,
+      ),
+    );
+  }
+  for (let index = 0; index <= capSegments; index += 1) {
+    const radians = Math.PI / 2 + (Math.PI * index) / capSegments;
+    points.push(
+      localToWorld(
+        center,
+        angle,
+        -straightHalfWidth + Math.cos(radians) * radius,
+        Math.sin(radians) * radius,
+      ),
+    );
+  }
+  return points;
+}
+
 export function machinePolygon(machine: MachineState): Point[] {
+  if (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') {
+    return capsulePolygon(
+      machineCenter(machine),
+      CONVEYOR_PLACEMENT_DIMENSIONS.width,
+      CONVEYOR_PLACEMENT_DIMENSIONS.height,
+      machine.angle,
+    );
+  }
   const dimensions = MACHINE_DIMENSIONS[machine.type];
   return rectangleCorners(
     machineCenter(machine),

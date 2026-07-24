@@ -34,13 +34,16 @@ export interface AppEvents {
   'ui:start-editor': { contract: ContractDefinition; isNew?: boolean };
   'ui:editor-tool': { type: MachineType | 'obstacle' | 'star' };
   'ui:editor-update-settings': { contract: ContractDefinition };
-  'ui:editor-test': undefined;
+  'ui:editor-test': { contract: ContractDefinition };
+  'ui:editor-begin-preview': undefined;
   'ui:editor-return': undefined;
   'ui:editor-save': { contract: ContractDefinition };
+  'ui:editor-highlight-invalid': { paths: string[] };
   'ui:editor-persistence': { saving: boolean };
   'ui:editor-mark-saved': { contract: ContractDefinition };
   'ui:editor-cancel': undefined;
   'ui:editor-configure': { open: boolean };
+  'ui:editor-hitboxes': { enabled: boolean };
   'ui:admin-mode': { enabled: boolean };
   'ui:admin-create-contract': undefined;
   'ui:admin-edit-contract': { contractId: ContractId };

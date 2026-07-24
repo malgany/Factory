@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { CELL_SIZE } from '../domain/types';
-import { MACHINE_DIMENSIONS, MACHINE_PHYSICS_DIMENSIONS } from './geometry';
+import {
+  CONVEYOR_PLACEMENT_DIMENSIONS,
+  MACHINE_DIMENSIONS,
+  MACHINE_PHYSICS_DIMENSIONS,
+  machinePolygon,
+  polygonsOverlap,
+} from './geometry';
 
 describe('geometria das máquinas', () => {
   it('mantém entrada e saída no mesmo módulo de um e meio quadrados', () => {
@@ -41,5 +47,30 @@ describe('geometria das máquinas', () => {
       MACHINE_PHYSICS_DIMENSIONS.conveyor,
     );
     expect(MACHINE_PHYSICS_DIMENSIONS.spring).toEqual(MACHINE_DIMENSIONS.spring);
+  });
+
+  it('usa o contorno arredondado visível para aproximar pontas de esteiras inclinadas', () => {
+    expect(CONVEYOR_PLACEMENT_DIMENSIONS).toEqual({ width: 85, height: 21 });
+    const left = machinePolygon({
+      id: 'left',
+      type: 'tracked-conveyor',
+      gridX: 0,
+      gridY: 0,
+      angle: 0,
+      reversed: false,
+      fixed: false,
+    });
+    const angled = machinePolygon({
+      id: 'angled',
+      type: 'tracked-conveyor',
+      gridX: 82 / CELL_SIZE,
+      gridY: -10 / CELL_SIZE,
+      angle: -20,
+      reversed: false,
+      fixed: false,
+    });
+
+    expect(left).toHaveLength(10);
+    expect(polygonsOverlap(left, angled)).toBe(false);
   });
 });

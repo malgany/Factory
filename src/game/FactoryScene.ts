@@ -53,7 +53,9 @@ import {
   conveyorVelocity,
   FIXED_PHYSICS_STEP_SECONDS,
   pointInsideOrientedSensor,
+  SPRING_LAUNCH_SPEED,
   springVelocity,
+  TURBO_SPRING_LAUNCH_SPEED,
 } from './physicsModel';
 
 const STAGE_WIDTH = GRID_COLUMNS * CELL_SIZE;
@@ -77,7 +79,6 @@ const BOX_TEXTURE_SCALE_Y = 1.18;
 const STAR_PICKUP_RADIUS = 30;
 const STAR_RENDER_RADIUS = COLLECTIBLE_STAR_RADIUS;
 const CONVEYOR_SPEED = 4.2;
-const SPRING_SPEED = 11.5;
 const TRACKED_CONVEYOR_WHEEL_RADIUS = 6.5;
 const TRACKED_CONVEYOR_TRACK_RADIUS = 8.5;
 const TRACKED_CONVEYOR_LINK_WIDTH = 7.5;
@@ -89,6 +90,8 @@ const TRACKED_CONVEYOR_ARC_LENGTH = Math.PI * TRACKED_CONVEYOR_TRACK_RADIUS;
 const TRACKED_CONVEYOR_TRACK_LENGTH =
   TRACKED_CONVEYOR_STRAIGHT_LENGTH * 2 + TRACKED_CONVEYOR_ARC_LENGTH * 2;
 const FIXED_PHYSICS_STEP_MS = FIXED_PHYSICS_STEP_SECONDS * 1000;
+const INVALID_ENTITY_FLASH_DURATION_MS = 2_000;
+const INVALID_ENTITY_FLASH_INTERVAL_MS = 180;
 
 const COLORS = {
   board: 0x3475b8,
@@ -103,12 +106,24 @@ const COLORS = {
   receiverBorder: 0x258bc4,
   receiverBezel: 0xe4e7e9,
   conveyor: 0x40566b,
+  fixedPanel: 0x3f4b55,
+  fixedConveyor: 0x596d7e,
+  fixedHighlight: 0xd8dde1,
+  fixedOutline: 0x4d5963,
+  fixedSpring: 0x4ca865,
+  fixedWood: 0x9d7d61,
   springGreen: 0x25c442,
   wood: 0xb47a48,
+  turboSpringRed: 0xff2638,
+  turboSteel: 0xaeb9c1,
+  turboSteelLight: 0xe7edf1,
+  fixedTurboSpring: 0xc75a62,
+  fixedTurboSteel: 0x929da5,
   orange: 0xff7629,
   white: 0xffffff,
   green: 0x35a26b,
   red: 0xd95050,
+  hitbox: 0xff3158,
   obstacle: 0xb9c0c2,
   star: 0xffc247,
   starLight: 0xfff2a6,
@@ -181,6 +196,7 @@ interface DragState {
   beforeDocument?: EditorDocument;
   previewObstacle?: ObstacleDefinition;
   previewObstacles?: ObstacleDefinition[];
+  previewCollectibles?: CollectibleDefinition[];
   obstacleResizeHandle?: ObstacleResizeHandle;
   obstacleResizeAnchor?: Point;
   collectibleId?: string;
@@ -204,6 +220,7 @@ type CollectibleClipboard = Pick<CollectibleDefinition, 'type'>;
 interface GroupClipboard {
   machines: MachineState[];
   obstacles: ObstacleDefinition[];
+  collectibles: CollectibleDefinition[];
   origin: Point;
 }
 
@@ -238,6 +255,14 @@ interface EditorAuthoringState {
   document: EditorDocument;
 }
 
+interface InvalidEntityFlash {
+  machineIds: Set<string>;
+  obstacleIds: Set<string>;
+  collectibleIds: Set<string>;
+  startedAt: number;
+  endsAt: number;
+}
+
 export interface FactoryDebugApi {
   getSnapshot(): GameSnapshot;
   getSimulationSeconds(): number;
@@ -257,6 +282,13 @@ export interface FactoryDebugApi {
   startMode(mode: GameMode, contractId?: ContractId): void;
   startEditor(contract: ContractDefinition): void;
   getEditorDraft(): ContractDefinition;
+  getInvalidEntityFlash(): {
+    machineIds: string[];
+    obstacleIds: string[];
+    collectibleIds: string[];
+    remainingMs: number;
+  };
+  getEditorHitboxesVisible(): boolean;
   selectEditorTool(type: EditorTool): void;
   selectTool(type: MachineType): void;
   placeMachine(type: MachineType, gridX: number, gridY: number, angle?: number): boolean;
@@ -322,6 +354,20 @@ function activeMachineType(type: MachineType): MachineType {
 
 function isConveyorType(type: MachineType): boolean {
   return type === 'conveyor' || type === 'tracked-conveyor';
+}
+
+function isSpringType(type: MachineType): boolean {
+  return type === 'spring' || type === 'turbo-spring';
+}
+
+function entityIndexFromValidationPath(
+  path: string,
+  collection: 'fixedMachines' | 'obstacles' | 'collectibles',
+): number | undefined {
+  const match = new RegExp(`^${collection}\\.(\\d+)(?:\\.|$)`).exec(path);
+  if (!match?.[1]) return undefined;
+  const index = Number(match[1]);
+  return Number.isInteger(index) ? index : undefined;
 }
 
 function conveyorSpeed(machine: Pick<MachineState, 'type' | 'conveyorSpeed'>): ConveyorSpeed {
@@ -593,12 +639,13 @@ export class FactoryScene extends Phaser.Scene {
   private selectedEditorTool?: EditorTool;
   private readonly selectedMachineIds = new Set<string>();
   private readonly selectedObstacleIds = new Set<string>();
-  private selectedCollectibleId?: string;
+  private readonly selectedCollectibleIds = new Set<string>();
   private ghostMachine?: MachineState;
   private ghostObstacle?: ObstacleDefinition;
   private ghostCollectible?: CollectibleDefinition;
   private ghostGroupMachines: MachineState[] = [];
   private ghostGroupObstacles: ObstacleDefinition[] = [];
+  private ghostGroupCollectibles: CollectibleDefinition[] = [];
   private groupGhostAnchor?: Point;
   private machineClipboard?: MachineClipboard;
   private obstacleClipboard?: ObstacleClipboard;
@@ -612,6 +659,8 @@ export class FactoryScene extends Phaser.Scene {
   private editorBaseline = '';
   private editorAuthoringState?: EditorAuthoringState;
   private editorPersistenceLocked = false;
+  private editorHitboxesVisible = false;
+  private invalidEntityFlash?: InvalidEntityFlash;
   private obstacleSequence = 0;
   private collectibleSequence = 0;
   private muted = false;
@@ -653,6 +702,15 @@ export class FactoryScene extends Phaser.Scene {
       this.selectedObstacleIds.add(id);
       this.selectedCollectibleId = undefined;
     }
+  }
+
+  private get selectedCollectibleId(): string | undefined {
+    return this.selectedCollectibleIds.values().next().value;
+  }
+
+  private set selectedCollectibleId(id: string | undefined) {
+    this.selectedCollectibleIds.clear();
+    if (id) this.selectedCollectibleIds.add(id);
   }
 
   constructor() {
@@ -783,6 +841,8 @@ export class FactoryScene extends Phaser.Scene {
   /** Opens a contract as an editable, fixed scenario. No campaign result is emitted in this mode. */
   public startEditor(contract: ContractDefinition, isNew = false): void {
     const draft = cloneContract(contract);
+    this.invalidEntityFlash = undefined;
+    this.editorHitboxesVisible = false;
     this.mode = 'editor';
     this.editorActive = true;
     this.editorPreview = false;
@@ -790,7 +850,13 @@ export class FactoryScene extends Phaser.Scene {
     this.editorContract = draft;
     this.editorPersistenceLocked = false;
     this.contract = draft;
-    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring'];
+    this.availableMachines = [
+      'source',
+      'receiver',
+      'tracked-conveyor',
+      'spring',
+      'turbo-spring',
+    ];
     this.obstacles = this.normalizeObstacles(draft.obstacles);
     this.collectibles = this.normalizeCollectibles(draft.collectibles ?? []);
     this.machines = this.normalizeMachineIds(
@@ -900,7 +966,13 @@ export class FactoryScene extends Phaser.Scene {
     this.mode = 'editor';
     this.editorContract = cloneContract(state.contract);
     this.contract = this.editorContract;
-    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring'];
+    this.availableMachines = [
+      'source',
+      'receiver',
+      'tracked-conveyor',
+      'spring',
+      'turbo-spring',
+    ];
     this.applyEditorDocument(state.document, false);
     this.clearClipboard();
     this.selectedTool = undefined;
@@ -926,6 +998,8 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   public cancelEditor(): void {
+    this.invalidEntityFlash = undefined;
+    this.editorHitboxesVisible = false;
     if (!this.editorActive || this.editorPersistenceLocked) return;
     this.mode = 'campaign';
     this.editorActive = false;
@@ -971,6 +1045,42 @@ export class FactoryScene extends Phaser.Scene {
       obstacles: cloneObstacles(this.obstacles),
       collectibles: cloneCollectibles(this.collectibles),
     };
+  }
+
+  public flashInvalidEditorEntities(paths: readonly string[]): void {
+    if (!this.isAuthoring()) return;
+    const machineIds = new Set<string>();
+    const obstacleIds = new Set<string>();
+    const collectibleIds = new Set<string>();
+    for (const path of paths) {
+      const machineIndex = entityIndexFromValidationPath(path, 'fixedMachines');
+      const obstacleIndex = entityIndexFromValidationPath(path, 'obstacles');
+      const collectibleIndex = entityIndexFromValidationPath(path, 'collectibles');
+      const machine = machineIndex === undefined ? undefined : this.machines[machineIndex];
+      const obstacle = obstacleIndex === undefined ? undefined : this.obstacles[obstacleIndex];
+      const collectible =
+        collectibleIndex === undefined ? undefined : this.collectibles[collectibleIndex];
+      if (machine) machineIds.add(machine.id);
+      if (obstacle) obstacleIds.add(obstacle.id);
+      if (collectible) collectibleIds.add(collectible.id);
+    }
+    if (machineIds.size + obstacleIds.size + collectibleIds.size === 0) return;
+    const startedAt = performance.now();
+    this.invalidEntityFlash = {
+      machineIds,
+      obstacleIds,
+      collectibleIds,
+      startedAt,
+      endsAt: startedAt + INVALID_ENTITY_FLASH_DURATION_MS,
+    };
+    this.lastIdleRenderSignature = '';
+    this.renderWorld();
+  }
+
+  public setEditorHitboxesVisible(enabled: boolean): void {
+    this.editorHitboxesVisible = enabled && this.isAuthoring();
+    this.lastIdleRenderSignature = '';
+    this.renderWorld();
   }
 
   public selectTool(type: MachineType): void {
@@ -1144,7 +1254,11 @@ export class FactoryScene extends Phaser.Scene {
   public copySelected(): boolean {
     if (!this.canBuild()) return false;
     if (this.selectionCount() > 1) {
-      this.beginGroupPaste(this.getSelectedMachines(), this.getSelectedObstacles());
+      this.beginGroupPaste(
+        this.getSelectedMachines(),
+        this.getSelectedObstacles(),
+        this.getSelectedCollectibles(),
+      );
       return true;
     }
     const machine = this.getSelectedMachine();
@@ -1214,15 +1328,27 @@ export class FactoryScene extends Phaser.Scene {
       this.canEditMachine(machine),
     );
     const selectedObstacles = this.isAuthoring() ? this.getSelectedObstacles() : [];
-    if (selectedMachines.length + selectedObstacles.length < 2) return false;
+    const selectedCollectibles = this.isAuthoring() ? this.getSelectedCollectibles() : [];
+    if (
+      selectedMachines.length + selectedObstacles.length + selectedCollectibles.length <
+      2
+    ) {
+      return false;
+    }
     const machineIds = new Set(selectedMachines.map((machine) => machine.id));
     const obstacleIds = new Set(selectedObstacles.map((obstacle) => obstacle.id));
+    const collectibleIds = new Set(
+      selectedCollectibles.map((collectible) => collectible.id),
+    );
 
     if (this.isAuthoring()) {
       const before = this.captureEditorDocument();
       const after = cloneEditorDocument(before);
       after.machines = after.machines.filter((machine) => !machineIds.has(machine.id));
       after.obstacles = after.obstacles.filter((obstacle) => !obstacleIds.has(obstacle.id));
+      after.collectibles = after.collectibles.filter(
+        (collectible) => !collectibleIds.has(collectible.id),
+      );
       this.executeEditorSnapshotCommand('Remover seleção', before, after);
     } else {
       const before = cloneMachines(this.machines);
@@ -1242,15 +1368,27 @@ export class FactoryScene extends Phaser.Scene {
       this.canEditMachine(machine),
     );
     const selectedObstacles = this.isAuthoring() ? this.getSelectedObstacles() : [];
-    if (selectedMachines.length + selectedObstacles.length < 2) return false;
+    const selectedCollectibles = this.isAuthoring() ? this.getSelectedCollectibles() : [];
+    if (
+      selectedMachines.length + selectedObstacles.length + selectedCollectibles.length <
+      2
+    ) {
+      return false;
+    }
     const machineIds = new Set(selectedMachines.map((machine) => machine.id));
     const obstacleIds = new Set(selectedObstacles.map((obstacle) => obstacle.id));
+    const collectibleIds = new Set(
+      selectedCollectibles.map((collectible) => collectible.id),
+    );
 
     if (this.isAuthoring()) {
       const before = this.captureEditorDocument();
       const after = cloneEditorDocument(before);
       after.machines = after.machines.filter((machine) => !machineIds.has(machine.id));
       after.obstacles = after.obstacles.filter((obstacle) => !obstacleIds.has(obstacle.id));
+      after.collectibles = after.collectibles.filter(
+        (collectible) => !collectibleIds.has(collectible.id),
+      );
       this.executeEditorSnapshotCommand('Recortar seleção', before, after);
     } else {
       const before = cloneMachines(this.machines);
@@ -1258,7 +1396,7 @@ export class FactoryScene extends Phaser.Scene {
       this.executeSnapshotCommand('Recortar seleção', before, after);
     }
 
-    this.beginGroupPaste(selectedMachines, selectedObstacles);
+    this.beginGroupPaste(selectedMachines, selectedObstacles, selectedCollectibles);
     this.audio('place');
     this.emitEditorChanged();
     return true;
@@ -1277,6 +1415,7 @@ export class FactoryScene extends Phaser.Scene {
     this.groupClipboard = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
+    this.ghostGroupCollectibles = [];
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -1306,6 +1445,7 @@ export class FactoryScene extends Phaser.Scene {
     this.groupClipboard = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
+    this.ghostGroupCollectibles = [];
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -1328,6 +1468,7 @@ export class FactoryScene extends Phaser.Scene {
     this.groupClipboard = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
+    this.ghostGroupCollectibles = [];
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.selectedMachineId = undefined;
@@ -1348,11 +1489,13 @@ export class FactoryScene extends Phaser.Scene {
   private beginGroupPaste(
     machines: readonly MachineState[],
     obstacles: readonly ObstacleDefinition[],
+    collectibles: readonly CollectibleDefinition[],
   ): void {
-    if (machines.length + obstacles.length === 0) return;
+    if (machines.length + obstacles.length + collectibles.length === 0) return;
     const points = [
       ...machines.flatMap((machine) => machinePolygon(machine)),
       ...obstacles.flatMap((obstacle) => this.obstaclePolygon(obstacle)),
+      ...collectibles.map((collectible) => this.collectibleCenter(collectible)),
     ];
     const minX = Math.min(...points.map((point) => point.x));
     const maxX = Math.max(...points.map((point) => point.x));
@@ -1366,6 +1509,7 @@ export class FactoryScene extends Phaser.Scene {
     this.groupClipboard = {
       machines: cloneMachines(machines),
       obstacles: cloneObstacles(obstacles),
+      collectibles: cloneCollectibles(collectibles),
       origin,
     };
     this.selectedTool = undefined;
@@ -1399,9 +1543,19 @@ export class FactoryScene extends Phaser.Scene {
       gridX: obstacle.gridX + deltaX,
       gridY: obstacle.gridY + deltaY,
     }));
+    this.ghostGroupCollectibles = clipboard.collectibles.map((collectible, index) => ({
+      ...collectible,
+      id: `ghost-group-collectible-${index}`,
+      gridX: collectible.gridX + deltaX,
+      gridY: collectible.gridY + deltaY,
+    }));
     this.ghostValid =
       this.canAffordMachines(this.ghostGroupMachines) &&
-      this.isGroupPlacementValid(this.ghostGroupMachines, this.ghostGroupObstacles);
+      this.isGroupPlacementValid(
+        this.ghostGroupMachines,
+        this.ghostGroupObstacles,
+        this.ghostGroupCollectibles,
+      );
   }
 
   private placeGroupFromClipboardAt(world: Point): boolean {
@@ -1426,15 +1580,20 @@ export class FactoryScene extends Phaser.Scene {
       ...obstacle,
       id: this.createObstacleId(),
     }));
+    const collectibles = this.ghostGroupCollectibles.map((collectible) => ({
+      ...collectible,
+      id: this.createCollectibleId(),
+    }));
 
     if (this.isAuthoring()) {
       const before = this.captureEditorDocument();
       const after = cloneEditorDocument(before);
       after.machines.push(...machines);
       after.obstacles.push(...obstacles);
+      after.collectibles.push(...collectibles);
       this.executeEditorSnapshotCommand('Colar seleção', before, after);
     } else {
-      if (obstacles.length > 0) return false;
+      if (obstacles.length > 0 || collectibles.length > 0) return false;
       const before = cloneMachines(this.machines);
       this.executeSnapshotCommand('Colar seleção', before, [...before, ...machines]);
     }
@@ -1443,6 +1602,7 @@ export class FactoryScene extends Phaser.Scene {
     this.clearSelection();
     for (const machine of machines) this.selectedMachineIds.add(machine.id);
     for (const obstacle of obstacles) this.selectedObstacleIds.add(obstacle.id);
+    for (const collectible of collectibles) this.selectedCollectibleIds.add(collectible.id);
     this.audio('place');
     this.emitSnapshot();
     this.emitEditorChanged();
@@ -1465,7 +1625,8 @@ export class FactoryScene extends Phaser.Scene {
   private beginGroupMove(world: Point): boolean {
     const machines = this.getSelectedMachines();
     const obstacles = this.getSelectedObstacles();
-    if (machines.length + obstacles.length < 2) return false;
+    const collectibles = this.getSelectedCollectibles();
+    if (machines.length + obstacles.length + collectibles.length < 2) return false;
     this.setDragState({
       kind: 'group-move',
       ...(this.isAuthoring()
@@ -1473,6 +1634,7 @@ export class FactoryScene extends Phaser.Scene {
         : { before: cloneMachines(this.machines) }),
       previewMachines: cloneMachines(machines),
       previewObstacles: cloneObstacles(obstacles),
+      previewCollectibles: cloneCollectibles(collectibles),
       startWorld: { ...world },
       currentWorld: { ...world },
       valid: true,
@@ -1489,6 +1651,9 @@ export class FactoryScene extends Phaser.Scene {
     );
     const sourceObstacles = (drag.beforeDocument?.obstacles ?? []).filter((obstacle) =>
       this.selectedObstacleIds.has(obstacle.id),
+    );
+    const sourceCollectibles = (drag.beforeDocument?.collectibles ?? []).filter((collectible) =>
+      this.selectedCollectibleIds.has(collectible.id),
     );
     const rawDeltaX = (world.x - drag.startWorld.x) / CELL_SIZE;
     const rawDeltaY = (world.y - drag.startWorld.y) / CELL_SIZE;
@@ -1507,9 +1672,15 @@ export class FactoryScene extends Phaser.Scene {
       gridX: obstacle.gridX + deltaX,
       gridY: obstacle.gridY + deltaY,
     }));
+    drag.previewCollectibles = sourceCollectibles.map((collectible) => ({
+      ...collectible,
+      gridX: collectible.gridX + deltaX,
+      gridY: collectible.gridY + deltaY,
+    }));
     drag.valid = this.isGroupPlacementValid(
       drag.previewMachines,
       drag.previewObstacles,
+      drag.previewCollectibles,
       this.selectedMachineIds,
       this.selectedObstacleIds,
     );
@@ -1518,6 +1689,7 @@ export class FactoryScene extends Phaser.Scene {
   private commitGroupMove(drag: DragState): void {
     const previewMachines = drag.previewMachines ?? [];
     const previewObstacles = drag.previewObstacles ?? [];
+    const previewCollectibles = drag.previewCollectibles ?? [];
     if (!drag.valid) {
       this.toast('Solte o grupo em uma área livre.', 'danger');
       this.audio('error');
@@ -1526,6 +1698,9 @@ export class FactoryScene extends Phaser.Scene {
 
     const machineById = new Map(previewMachines.map((machine) => [machine.id, machine]));
     const obstacleById = new Map(previewObstacles.map((obstacle) => [obstacle.id, obstacle]));
+    const collectibleById = new Map(
+      previewCollectibles.map((collectible) => [collectible.id, collectible]),
+    );
     if (this.isAuthoring()) {
       const before = drag.beforeDocument;
       if (!before) return;
@@ -1537,6 +1712,12 @@ export class FactoryScene extends Phaser.Scene {
         previewObstacles.some((obstacle) => {
           const original = before.obstacles.find((candidate) => candidate.id === obstacle.id);
           return !original || !this.sameObstacleState(original, obstacle);
+        }) ||
+        previewCollectibles.some((collectible) => {
+          const original = before.collectibles.find(
+            (candidate) => candidate.id === collectible.id,
+          );
+          return !original || !this.sameCollectibleState(original, collectible);
         });
       if (!changed) return;
       const after = cloneEditorDocument(before);
@@ -1545,6 +1726,9 @@ export class FactoryScene extends Phaser.Scene {
       }));
       after.obstacles = after.obstacles.map((obstacle) => ({
         ...(obstacleById.get(obstacle.id) ?? obstacle),
+      }));
+      after.collectibles = after.collectibles.map((collectible) => ({
+        ...(collectibleById.get(collectible.id) ?? collectible),
       }));
       this.executeEditorSnapshotCommand('Mover seleção', before, after);
     } else {
@@ -1848,6 +2032,7 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostCollectible = undefined;
     this.ghostGroupMachines = [];
     this.ghostGroupObstacles = [];
+    this.ghostGroupCollectibles = [];
     this.groupGhostAnchor = undefined;
   }
 
@@ -1997,6 +2182,7 @@ export class FactoryScene extends Phaser.Scene {
       selection: {
         machineIds: selectedMachines.map((machine) => machine.id),
         obstacleIds: selectedObstacles.map((obstacle) => obstacle.id),
+        collectibleIds: this.getSelectedCollectibles().map((collectible) => collectible.id),
         count: this.selectionCount(),
       },
       availableMachines: [...this.availableMachines],
@@ -2018,8 +2204,14 @@ export class FactoryScene extends Phaser.Scene {
       appEvents.on('ui:editor-update-settings', ({ contract }) =>
         this.updateEditorSettings(contract),
       ),
-      appEvents.on('ui:editor-test', () => this.beginEditorPreview()),
+      appEvents.on('ui:editor-begin-preview', () => this.beginEditorPreview()),
       appEvents.on('ui:editor-return', () => this.returnToEditor()),
+      appEvents.on('ui:editor-highlight-invalid', ({ paths }) =>
+        this.flashInvalidEditorEntities(paths),
+      ),
+      appEvents.on('ui:editor-hitboxes', ({ enabled }) =>
+        this.setEditorHitboxesVisible(enabled),
+      ),
       appEvents.on('ui:editor-persistence', ({ saving }) =>
         this.setEditorPersistenceLocked(saving),
       ),
@@ -2050,9 +2242,7 @@ export class FactoryScene extends Phaser.Scene {
         this.emitSnapshot();
       }),
       appEvents.on('ui:replay', () => this.resetRun()),
-      appEvents.on('ui:menu', () => {
-        if (this.status === 'running') this.pauseSimulation();
-      }),
+      appEvents.on('ui:menu', () => this.leaveToMenu()),
       appEvents.on('debug:set-machines', (machines) => this.replaceMachines(machines)),
     );
   }
@@ -2327,9 +2517,18 @@ export class FactoryScene extends Phaser.Scene {
           .reverse()
           .find((obstacle) => this.pointInsideObstacle(world, obstacle))
       : undefined;
+    const selectedCollectibleHit = this.isAuthoring()
+      ? [...this.getSelectedCollectibles()]
+          .reverse()
+          .find(
+            (collectible) =>
+              distance(world, this.collectibleCenter(collectible)) <=
+              (STAR_RENDER_RADIUS + 8) / fromCameraZoom(this.cameras.main.zoom),
+          )
+      : undefined;
     if (
       this.selectionCount() > 1 &&
-      (selectedHit || selectedObstacleHit) &&
+      (selectedHit || selectedObstacleHit || selectedCollectibleHit) &&
       this.beginGroupMove(world)
     ) {
       return;
@@ -2685,6 +2884,7 @@ export class FactoryScene extends Phaser.Scene {
       else {
         this.ghostGroupMachines = [];
         this.ghostGroupObstacles = [];
+        this.ghostGroupCollectibles = [];
         this.groupGhostAnchor = undefined;
       }
       this.ghostMachine = undefined;
@@ -3070,7 +3270,7 @@ export class FactoryScene extends Phaser.Scene {
       if (this.simulationTimeMs < box.springReadyAt) continue;
       for (const spring of this.springMachines) {
         const center = machineCenter(spring);
-        const dimensions = MACHINE_DIMENSIONS.spring;
+        const dimensions = MACHINE_DIMENSIONS[spring.type];
         const localBox = worldToLocal(center, spring.angle, box.body.position);
         const face = localBox.y <= 0 ? 'top' : 'bottom';
         if (!boxTouchesOrientedSurface(
@@ -3100,7 +3300,14 @@ export class FactoryScene extends Phaser.Scene {
         if (approachSpeed > 1.5) continue;
         this.matter.body.setVelocity(
           box.body,
-          springVelocity(incomingVelocity, spring.angle, SPRING_SPEED, normalDirection),
+          springVelocity(
+            incomingVelocity,
+            spring.angle,
+            spring.type === 'turbo-spring'
+              ? TURBO_SPRING_LAUNCH_SPEED
+              : SPRING_LAUNCH_SPEED,
+            normalDirection,
+          ),
         );
         box.springReadyAt = this.simulationTimeMs + 360;
         this.springCompression.set(spring.id, normalDirection);
@@ -3270,11 +3477,23 @@ export class FactoryScene extends Phaser.Scene {
       this.ghostCollectible ||
       this.ghostGroupMachines.length > 0 ||
       this.ghostGroupObstacles.length > 0 ||
+      this.ghostGroupCollectibles.length > 0 ||
       this.springCompression.size > 0 ||
       this.receiverPulse.size > 0 ||
       this.collectibleDisappear.size > 0 ||
-      this.particles.length > 0
+      this.particles.length > 0 ||
+      Boolean(
+        this.invalidEntityFlash &&
+          performance.now() < this.invalidEntityFlash.endsAt,
+      )
     );
+  }
+
+  private visibleInvalidEntityFlash(now = performance.now()): InvalidEntityFlash | undefined {
+    const flash = this.invalidEntityFlash;
+    if (!flash || now >= flash.endsAt) return undefined;
+    const interval = Math.floor((now - flash.startedAt) / INVALID_ENTITY_FLASH_INTERVAL_MS);
+    return interval % 2 === 0 ? flash : undefined;
   }
 
   private idleWorldRenderSignature(): string {
@@ -3305,20 +3524,25 @@ export class FactoryScene extends Phaser.Scene {
       boxes,
       [...this.selectedMachineIds].join(','),
       [...this.selectedObstacleIds].join(','),
-      this.selectedCollectibleId ?? '',
+      [...this.selectedCollectibleIds].join(','),
     ].join('|');
   }
 
   private renderWorld(): void {
     const graphics = this.worldGraphics;
     graphics.clear();
+    const invalidFlash = this.visibleInvalidEntityFlash();
     const groupDrag = this.drag?.kind === 'group-move' ? this.drag : undefined;
     const groupMachineIds = new Set(groupDrag?.previewMachines?.map((machine) => machine.id) ?? []);
     const groupObstacleIds = new Set(
       groupDrag?.previewObstacles?.map((obstacle) => obstacle.id) ?? [],
     );
+    const groupCollectibleIds = new Set(
+      groupDrag?.previewCollectibles?.map((collectible) => collectible.id) ?? [],
+    );
     const drawCollectibles = (): void => {
       for (const collectible of this.collectibles) {
+        if (groupCollectibleIds.has(collectible.id)) continue;
         const disappearing = this.collectibleDisappear.get(collectible.id);
         if (this.collectedCollectibleIds.has(collectible.id) && disappearing === undefined) {
           continue;
@@ -3329,7 +3553,13 @@ export class FactoryScene extends Phaser.Scene {
             : undefined;
         if (!preview) {
           const progress = disappearing === undefined ? 0 : 1 - disappearing / 0.28;
-          this.drawCollectible(graphics, collectible, 1 - progress, 1 - progress * 0.75);
+          this.drawCollectible(
+            graphics,
+            collectible,
+            1 - progress,
+            1 - progress * 0.75,
+            !invalidFlash?.collectibleIds.has(collectible.id),
+          );
         }
       }
       if (this.drag?.previewCollectible) {
@@ -3340,13 +3570,23 @@ export class FactoryScene extends Phaser.Scene {
           this.drag.valid === false ? 0.45 : 1,
         );
       }
+      for (const collectible of groupDrag?.previewCollectibles ?? []) {
+        this.drawCollectible(
+          graphics,
+          collectible,
+          1,
+          groupDrag?.valid === false ? 0.45 : 1,
+        );
+      }
     };
 
     if (!this.isAuthoring()) drawCollectibles();
     for (const obstacle of this.obstacles) {
       if (groupObstacleIds.has(obstacle.id)) continue;
       const preview = this.drag?.obstacleId === obstacle.id ? this.drag.previewObstacle : undefined;
-      if (!preview) this.drawObstacle(graphics, obstacle);
+      if (!preview) {
+        this.drawObstacle(graphics, obstacle, 1, !invalidFlash?.obstacleIds.has(obstacle.id));
+      }
     }
     for (const obstacle of groupDrag?.previewObstacles ?? []) {
       this.drawObstacle(graphics, obstacle, 1, groupDrag?.valid !== false);
@@ -3358,7 +3598,9 @@ export class FactoryScene extends Phaser.Scene {
         graphics,
         preview ?? machine,
         1,
-        preview ? this.drag?.valid !== false : true,
+        preview
+          ? this.drag?.valid !== false
+          : !invalidFlash?.machineIds.has(machine.id),
       );
     }
     for (const machine of groupDrag?.previewMachines ?? []) {
@@ -3387,14 +3629,17 @@ export class FactoryScene extends Phaser.Scene {
     for (const ghost of this.ghostGroupObstacles) {
       this.drawObstacle(overlay, ghost, 0.42, this.ghostValid);
     }
+    for (const ghost of this.ghostGroupCollectibles) {
+      this.drawCollectible(overlay, ghost, 0.82, this.ghostValid ? 0.72 : 0.4);
+    }
     if (this.drag?.previewObstacle) {
       this.drawObstacle(overlay, this.drag.previewObstacle, 0.72, this.drag.valid !== false);
     }
     const selectedMachines = this.getSelectedMachines();
     const selectedObstacles = this.getSelectedObstacles();
-    const selectedCollectible = this.getSelectedCollectible();
+    const selectedCollectibles = this.getSelectedCollectibles();
     const selectionCount =
-      selectedMachines.length + selectedObstacles.length + (selectedCollectible ? 1 : 0);
+      selectedMachines.length + selectedObstacles.length + selectedCollectibles.length;
     if (groupDrag) {
       for (const preview of groupDrag.previewMachines ?? []) {
         this.drawSelection(overlay, preview, groupDrag.valid !== false, false);
@@ -3422,11 +3667,69 @@ export class FactoryScene extends Phaser.Scene {
         this.drawObstacleSelection(overlay, selectedObstacle, true, selectionCount === 1);
       }
     }
-    if (selectedCollectible && !this.drag?.previewCollectible) {
-      this.drawCollectibleSelection(overlay, selectedCollectible);
+    if (groupDrag) {
+      for (const preview of groupDrag.previewCollectibles ?? []) {
+        this.drawCollectibleSelection(overlay, preview);
+      }
+    } else if (!this.drag?.previewCollectible) {
+      for (const selectedCollectible of selectedCollectibles) {
+        this.drawCollectibleSelection(overlay, selectedCollectible);
+      }
+    }
+    if (this.editorHitboxesVisible && this.isAuthoring()) {
+      this.drawEditorHitboxes(overlay);
     }
     if (this.drag?.kind === 'marquee' && this.drag.startWorld && this.drag.currentWorld) {
       this.drawMarquee(overlay, this.drag.startWorld, this.drag.currentWorld);
+    }
+  }
+
+  private drawEditorHitboxes(graphics: Phaser.GameObjects.Graphics): void {
+    const zoom = fromCameraZoom(this.cameras.main.zoom);
+    const groupMachinePreviews = new Map(
+      (this.drag?.previewMachines ?? []).map((machine) => [machine.id, machine]),
+    );
+    const groupObstaclePreviews = new Map(
+      (this.drag?.previewObstacles ?? []).map((obstacle) => [obstacle.id, obstacle]),
+    );
+    const groupCollectiblePreviews = new Map(
+      (this.drag?.previewCollectibles ?? []).map((collectible) => [collectible.id, collectible]),
+    );
+    const machinePolygons = this.machines.map((machine) =>
+      machinePolygon(
+        groupMachinePreviews.get(machine.id) ??
+          (this.drag?.machineId === machine.id ? this.drag.preview : undefined) ??
+          machine,
+      ),
+    );
+    const obstaclePolygons = this.obstacles.map((obstacle) =>
+      this.obstaclePolygon(
+        groupObstaclePreviews.get(obstacle.id) ??
+          (this.drag?.obstacleId === obstacle.id ? this.drag.previewObstacle : undefined) ??
+          obstacle,
+      ),
+    );
+
+    graphics.fillStyle(COLORS.hitbox, 0.055);
+    for (const polygon of [...machinePolygons, ...obstaclePolygons]) {
+      drawPolygon(graphics, polygon);
+    }
+    graphics.lineStyle(2 / zoom, COLORS.hitbox, 0.98);
+    for (const polygon of [...machinePolygons, ...obstaclePolygons]) {
+      linePolygon(graphics, polygon);
+    }
+    for (const collectible of this.collectibles) {
+      const visible =
+        groupCollectiblePreviews.get(collectible.id) ??
+        (this.drag?.collectibleId === collectible.id
+          ? this.drag.previewCollectible
+          : undefined) ??
+        collectible;
+      const center = this.collectibleCenter(visible);
+      graphics.fillStyle(COLORS.hitbox, 0.055);
+      graphics.fillCircle(center.x, center.y, STAR_PICKUP_RADIUS);
+      graphics.lineStyle(2 / zoom, COLORS.hitbox, 0.98);
+      graphics.strokeCircle(center.x, center.y, STAR_PICKUP_RADIUS);
     }
   }
 
@@ -3471,6 +3774,7 @@ export class FactoryScene extends Phaser.Scene {
     collectible: CollectibleDefinition,
     scale = 1,
     alpha = 1,
+    valid = true,
   ): void {
     const center = this.collectibleCenter(collectible);
     // The visual clock only advances while the simulation is running. This keeps
@@ -3491,14 +3795,18 @@ export class FactoryScene extends Phaser.Scene {
       });
     }
 
-    graphics.fillStyle(COLORS.starDark, alpha);
+    graphics.fillStyle(valid ? COLORS.starDark : COLORS.red, alpha);
     drawPolygon(
       graphics,
       points.map((point) => ({ x: point.x + Math.max(1.5, radius * 0.1), y: point.y + 2 })),
     );
-    graphics.fillStyle(COLORS.star, alpha);
+    graphics.fillStyle(valid ? COLORS.star : COLORS.red, alpha);
     drawPolygon(graphics, points);
-    graphics.lineStyle(Math.max(1, radius * 0.08), COLORS.starLight, alpha * 0.82);
+    graphics.lineStyle(
+      Math.max(1, radius * 0.08),
+      valid ? COLORS.starLight : COLORS.white,
+      alpha * 0.82,
+    );
     linePolygon(graphics, points);
 
     const highlightX = center.x + Math.sign(facing || 1) * radius * widthScale * 0.22;
@@ -3562,19 +3870,39 @@ export class FactoryScene extends Phaser.Scene {
   ): void {
     const color = valid ? COLORS.blue : COLORS.red;
     const center = machineCenter(machine);
+    const fixedScenarioMachine =
+      machine.fixed &&
+      !machine.id.startsWith('ghost') &&
+      (isConveyorType(machine.type) || isSpringType(machine.type));
+    const machineAlpha = fixedScenarioMachine ? alpha * 0.9 : alpha;
     switch (machine.type) {
       case 'source':
         this.drawSource(graphics, machine, center, alpha, valid);
         break;
       case 'conveyor':
       case 'tracked-conveyor':
-        this.drawTrackedConveyor(graphics, machine, center, alpha, valid);
+        this.drawTrackedConveyor(
+          graphics,
+          machine,
+          center,
+          machineAlpha,
+          valid,
+          fixedScenarioMachine,
+        );
         break;
       case 'receiver':
         this.drawReceiver(graphics, machine, center, alpha, valid);
         break;
       case 'spring':
-        this.drawSpring(graphics, machine, center, alpha, color);
+      case 'turbo-spring':
+        this.drawSpring(
+          graphics,
+          machine,
+          center,
+          machineAlpha,
+          color,
+          fixedScenarioMachine,
+        );
         break;
     }
   }
@@ -3828,6 +4156,7 @@ export class FactoryScene extends Phaser.Scene {
     center: Point,
     alpha: number,
     valid: boolean,
+    muted = false,
   ): void {
     const dimensions = MACHINE_DIMENSIONS['tracked-conveyor'];
     const runtime = this.trackedConveyors.get(machine.id);
@@ -3858,7 +4187,11 @@ export class FactoryScene extends Phaser.Scene {
       TRACKED_CONVEYOR_STRAIGHT_LENGTH +
       TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
       TRACKED_CONVEYOR_LINK_HEIGHT;
-    graphics.fillStyle(valid ? COLORS.machinePanel : COLORS.graphite, alpha);
+    const panelColor = muted ? COLORS.fixedPanel : COLORS.machinePanel;
+    const conveyorColor = muted ? COLORS.fixedConveyor : COLORS.conveyor;
+    const highlightColor = muted ? COLORS.fixedHighlight : COLORS.white;
+    const outlineColor = muted ? COLORS.fixedOutline : COLORS.graphite;
+    graphics.fillStyle(valid ? panelColor : COLORS.graphite, alpha);
     drawPolygon(
       graphics,
       roundedRectanglePoints(
@@ -3873,9 +4206,13 @@ export class FactoryScene extends Phaser.Scene {
 
     for (let index = 0; index < wheelCenters.length; index += 1) {
       const wheelCenter = wheelCenters[index]!;
-      graphics.fillStyle(valid ? COLORS.conveyor : COLORS.red, alpha);
+      graphics.fillStyle(valid ? conveyorColor : COLORS.red, alpha);
       graphics.fillCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
-      graphics.lineStyle(1.5, valid ? COLORS.blueLight : COLORS.graphite, alpha * 0.95);
+      graphics.lineStyle(
+        1.5,
+        valid ? (muted ? COLORS.fixedHighlight : COLORS.blueLight) : COLORS.graphite,
+        alpha * 0.95,
+      );
       graphics.strokeCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
     }
 
@@ -3897,11 +4234,11 @@ export class FactoryScene extends Phaser.Scene {
       },
     );
     if (valid) {
-      graphics.fillStyle(COLORS.white, alpha);
+      graphics.fillStyle(highlightColor, alpha);
       drawPolygons(graphics, links, 0);
-      graphics.fillStyle(COLORS.conveyor, alpha);
+      graphics.fillStyle(conveyorColor, alpha);
       drawPolygons(graphics, links, 1);
-      graphics.lineStyle(0.9, COLORS.graphite, alpha * 0.86);
+      graphics.lineStyle(0.9, outlineColor, alpha * 0.86);
       linePolygon(
         graphics,
         roundedRectanglePoints(
@@ -3919,7 +4256,7 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     const direction = machine.reversed ? -1 : 1;
-    graphics.fillStyle(valid ? COLORS.white : COLORS.graphite, alpha * 0.96);
+    graphics.fillStyle(valid ? highlightColor : COLORS.graphite, alpha * 0.96);
     for (const wheelCenter of wheelCenters) {
       const tip = localToWorld(wheelCenter, machine.angle, 4 * direction, 0);
       const upper = localToWorld(wheelCenter, machine.angle, -2.5 * direction, -3.4);
@@ -3934,11 +4271,31 @@ export class FactoryScene extends Phaser.Scene {
     center: Point,
     alpha: number,
     color: number,
+    muted = false,
   ): void {
     const compression = this.springCompression.get(machine.id) ?? 0;
-    const dimensions = MACHINE_DIMENSIONS.spring;
-    const baseColor = color === COLORS.red ? COLORS.red : COLORS.wood;
-    const springColor = color === COLORS.red ? COLORS.red : COLORS.springGreen;
+    const dimensions = MACHINE_DIMENSIONS[machine.type];
+    const turbo = machine.type === 'turbo-spring';
+    const baseColor =
+      color === COLORS.red
+        ? COLORS.red
+        : turbo
+          ? muted
+            ? COLORS.fixedTurboSteel
+            : COLORS.turboSteel
+          : muted
+            ? COLORS.fixedWood
+            : COLORS.wood;
+    const springColor =
+      color === COLORS.red
+        ? COLORS.red
+        : turbo
+          ? muted
+            ? COLORS.fixedTurboSpring
+            : COLORS.turboSpringRed
+          : muted
+            ? COLORS.fixedSpring
+            : COLORS.springGreen;
     const plateHeight = 8;
     const topCompression = Math.max(0, compression) * 7;
     const bottomCompression = Math.max(0, -compression) * 7;
@@ -3956,6 +4313,17 @@ export class FactoryScene extends Phaser.Scene {
         machine.angle,
       ),
     );
+    if (turbo && color !== COLORS.red) {
+      graphics.lineStyle(1.5, COLORS.turboSteelLight, alpha * (muted ? 0.55 : 0.9));
+      linePolygon(
+        graphics,
+        [
+          localToWorld(center, machine.angle, -dimensions.width / 2 + 5, baseY - 1.5),
+          localToWorld(center, machine.angle, dimensions.width / 2 - 5, baseY - 1.5),
+        ],
+        false,
+      );
+    }
     graphics.lineStyle(4, springColor, alpha);
     const zigzag: Point[] = [];
     for (let index = 0; index <= 6; index += 1) {
@@ -3979,6 +4347,17 @@ export class FactoryScene extends Phaser.Scene {
         machine.angle,
       ),
     );
+    if (turbo && color !== COLORS.red) {
+      graphics.lineStyle(1.5, COLORS.turboSteelLight, alpha * (muted ? 0.55 : 0.9));
+      linePolygon(
+        graphics,
+        [
+          localToWorld(center, machine.angle, -dimensions.width / 2 + 5, topY - 1.5),
+          localToWorld(center, machine.angle, dimensions.width / 2 - 5, topY - 1.5),
+        ],
+        false,
+      );
+    }
   }
 
   private drawBox(box: BoxRuntime): void {
@@ -4224,7 +4603,7 @@ export class FactoryScene extends Phaser.Scene {
     this.obstacleBodies.length = 0;
     this.sourceMachines = this.machines.filter((machine) => machine.type === 'source');
     this.conveyorMachines = this.machines.filter((machine) => machine.type === 'conveyor');
-    this.springMachines = this.machines.filter((machine) => machine.type === 'spring');
+    this.springMachines = this.machines.filter((machine) => isSpringType(machine.type));
     this.receiverMachines = this.machines.filter((machine) => machine.type === 'receiver');
 
     // Build mode uses geometric hit tests, so Matter bodies can be created lazily when the
@@ -4266,8 +4645,8 @@ export class FactoryScene extends Phaser.Scene {
           isSensor: machine.type === 'receiver' || machine.type === 'source',
           label: `machine:${machine.id}`,
           friction: machine.type === 'conveyor' ? 0.05 : 0.5,
-          restitution: machine.type === 'spring' ? 0.05 : 0,
-          chamfer: { radius: machine.type === 'conveyor' || machine.type === 'spring' ? 3 : 5 },
+          restitution: isSpringType(machine.type) ? 0.05 : 0,
+          chamfer: { radius: machine.type === 'conveyor' || isSpringType(machine.type) ? 3 : 5 },
         },
       );
       this.matter.body.setAngle(body, degreesToRadians(machine.angle));
@@ -4345,6 +4724,7 @@ export class FactoryScene extends Phaser.Scene {
   private isGroupPlacementValid(
     machines: readonly MachineState[],
     obstacles: readonly ObstacleDefinition[],
+    collectibles: readonly CollectibleDefinition[] = [],
     ignoredMachineIds: ReadonlySet<string> = new Set(),
     ignoredObstacleIds: ReadonlySet<string> = new Set(),
   ): boolean {
@@ -4368,6 +4748,9 @@ export class FactoryScene extends Phaser.Scene {
         return false;
       }
       stagedObstacles.push({ ...obstacle });
+    }
+    for (const collectible of collectibles) {
+      if (!this.isCollectiblePlacementValid(collectible)) return false;
     }
     return true;
   }
@@ -4557,6 +4940,12 @@ export class FactoryScene extends Phaser.Scene {
     );
   }
 
+  private getSelectedCollectibles(): CollectibleDefinition[] {
+    return this.collectibles.filter((collectible) =>
+      this.selectedCollectibleIds.has(collectible.id),
+    );
+  }
+
   private getSelectedMachines(): MachineState[] {
     return this.machines.filter((machine) => this.selectedMachineIds.has(machine.id));
   }
@@ -4569,14 +4958,14 @@ export class FactoryScene extends Phaser.Scene {
     return (
       this.getSelectedMachines().length +
       this.getSelectedObstacles().length +
-      (this.getSelectedCollectible() ? 1 : 0)
+      this.getSelectedCollectibles().length
     );
   }
 
   private clearSelection(): void {
     this.selectedMachineIds.clear();
     this.selectedObstacleIds.clear();
-    this.selectedCollectibleId = undefined;
+    this.selectedCollectibleIds.clear();
   }
 
   private selectItemsInsideMarquee(start: Point, end: Point): void {
@@ -4601,6 +4990,11 @@ export class FactoryScene extends Phaser.Scene {
           y: (obstacle.gridY + obstacle.rows / 2) * CELL_SIZE,
         };
         if (contains(center)) this.selectedObstacleIds.add(obstacle.id);
+      }
+      for (const collectible of this.collectibles) {
+        if (contains(this.collectibleCenter(collectible))) {
+          this.selectedCollectibleIds.add(collectible.id);
+        }
       }
     }
   }
@@ -4764,6 +5158,7 @@ export class FactoryScene extends Phaser.Scene {
       machine.type === 'conveyor' ||
       machine.type === 'tracked-conveyor' ||
       machine.type === 'spring' ||
+      machine.type === 'turbo-spring' ||
       (this.isAuthoring() && (machine.type === 'source' || machine.type === 'receiver'))
     );
   }
@@ -4787,6 +5182,7 @@ export class FactoryScene extends Phaser.Scene {
       this.ghostCollectible = undefined;
       this.ghostGroupMachines = [];
       this.ghostGroupObstacles = [];
+      this.ghostGroupCollectibles = [];
       this.groupGhostAnchor = undefined;
     }
     this.emitSnapshot();
@@ -4817,6 +5213,8 @@ export class FactoryScene extends Phaser.Scene {
         ? resolveConveyorSpeedCosts(this.contract.economy)[conveyorSpeed(machine)]
         : type === 'spring'
           ? this.contract.economy.machineCosts.spring
+          : type === 'turbo-spring'
+            ? (this.contract.economy.machineCosts['turbo-spring'] ?? 7_500)
           : 0;
     return Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0;
   }
@@ -5134,6 +5532,27 @@ export class FactoryScene extends Phaser.Scene {
     this.emitSnapshot();
   }
 
+  private leaveToMenu(): void {
+    this.setDragState(undefined);
+    this.editorActive = false;
+    this.editorPreview = false;
+    this.editorContract = undefined;
+    this.editorAuthoringState = undefined;
+    this.editorBaseline = '';
+    this.editorPersistenceLocked = false;
+    this.clearClipboard();
+    this.clearSelection();
+    this.selectedTool = undefined;
+    this.selectedEditorTool = undefined;
+    this.ghostMachine = undefined;
+    this.ghostObstacle = undefined;
+    this.ghostCollectible = undefined;
+    this.particles.length = 0;
+    this.springCompression.clear();
+    this.receiverPulse.clear();
+    this.initializeIdleState();
+  }
+
   private fitCamera(): void {
     const camera = this.cameras.main;
     const fit =
@@ -5192,6 +5611,17 @@ export class FactoryScene extends Phaser.Scene {
       startMode: (mode, contractId) => this.startMode(mode, contractId),
       startEditor: (contract) => this.startEditor(contract),
       getEditorDraft: () => this.getEditorDraft(),
+      getInvalidEntityFlash: () => ({
+        machineIds: [...(this.invalidEntityFlash?.machineIds ?? [])],
+        obstacleIds: [...(this.invalidEntityFlash?.obstacleIds ?? [])],
+        collectibleIds: [...(this.invalidEntityFlash?.collectibleIds ?? [])],
+        remainingMs: Math.max(
+          0,
+          (this.invalidEntityFlash?.endsAt ?? 0) - performance.now(),
+        ),
+      }),
+      getEditorHitboxesVisible: () =>
+        this.editorHitboxesVisible && this.isAuthoring(),
       selectEditorTool: (type) => this.selectEditorTool(type),
       selectTool: (type) => this.selectTool(type),
       placeMachine: (type, gridX, gridY, angle) => this.placeMachineAt(type, gridX, gridY, angle),

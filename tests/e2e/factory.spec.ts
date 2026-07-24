@@ -4,7 +4,13 @@ const STORAGE_KEY = 'factory-flow.progress.v1';
 
 interface MachineDebugState {
   id: string;
-  type: 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring';
+  type:
+    | 'source'
+    | 'conveyor'
+    | 'tracked-conveyor'
+    | 'receiver'
+    | 'spring'
+    | 'turbo-spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -30,6 +36,7 @@ interface FactoryDebugState {
     machineCosts: {
       'tracked-conveyor': number;
       spring: number;
+      'turbo-spring'?: number;
     };
   };
   selection: { machineIds: string[]; obstacleIds: string[]; count: number };
@@ -165,6 +172,9 @@ test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
   await expect(
     page.locator('[data-tool="spring"] .machine-thumbnail-spring path'),
   ).toHaveAttribute('stroke', '#25c442');
+  await expect(
+    page.locator('[data-tool="turbo-spring"] .machine-thumbnail-turbo-spring path').first(),
+  ).toHaveAttribute('stroke', '#ff2638');
   await page.locator('[data-tool="spring"]').click();
   const bounds = await page.locator('#game-container canvas').boundingBox();
   if (!bounds) throw new Error('Canvas has no bounding box');
@@ -177,6 +187,37 @@ test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
 
   const spring = await placeAtCanvasCenter(page, 'spring');
   expect(spring.type).toBe('spring');
+
+  const turboSpring = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('turbo-spring', 16, 6)) {
+      throw new Error('Could not place turbo spring');
+    }
+    return debug.getMachines().find(({ type }) => type === 'turbo-spring');
+  });
+  expect(turboSpring?.type).toBe('turbo-spring');
+});
+
+test('permite aproximar as pontas arredondadas de esteiras inclinadas', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const placement = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    return {
+      first: debug.placeMachine('tracked-conveyor', 8, 8, 0),
+      angled: debug.placeMachine(
+        'tracked-conveyor',
+        8 + 82 / 48,
+        8 - 10 / 48,
+        -20,
+      ),
+    };
+  });
+
+  expect(placement).toEqual({ first: true, angled: true });
+  expect((await debugState(page)).machines).toHaveLength(2);
 });
 
 test('inverte uma única esteira e oculta a ação para outros itens e grupos', async ({
@@ -876,6 +917,13 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
     return canvas.width / bounds.width;
   });
   expect(renderDensity).toBeGreaterThanOrEqual(1.9);
+  const viewport = page.viewportSize();
+  const demoBounds = await demo.boundingBox();
+  expect(demoBounds?.y).toBeCloseTo(0, 1);
+  expect((demoBounds?.x ?? 0) + (demoBounds?.width ?? 0)).toBeCloseTo(
+    viewport?.width ?? 0,
+    1,
+  );
 
   await expect
     .poll(async () => Number((await demo.getAttribute('data-simulation-steps')) ?? 0))
@@ -886,10 +934,12 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
   await expect
     .poll(async () => Number((await demo.getAttribute('data-offscreen-destroyed-boxes')) ?? 0), {
       timeout: 30_000,
-    })
+  })
     .toBeGreaterThan(0);
   await expect(demo).toHaveAttribute('data-last-offscreen-side', 'right');
-  expect(Number((await demo.getAttribute('data-last-offscreen-x')) ?? 0)).toBeGreaterThan(312);
+  const cleanupX = Number((await demo.getAttribute('data-last-offscreen-x')) ?? 0);
+  const visibleRight = Number((await demo.getAttribute('data-visible-right')) ?? 0);
+  expect(cleanupX).toBeGreaterThan(visibleRight + 56);
   expect(Number((await demo.getAttribute('data-active-boxes')) ?? 0)).toBeLessThanOrEqual(1);
 
   const pausedForOptions = await page.evaluate(() => {
@@ -943,7 +993,7 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
   await openApp(page);
   await startSandbox(page);
 
-  await expect(page.locator('[data-tool]')).toHaveCount(4);
+  await expect(page.locator('[data-tool]')).toHaveCount(5);
   await expect(page.locator('[data-tool]').first().locator('.tool-glyph')).toHaveCSS(
     'background-color',
     'rgba(0, 0, 0, 0)',
@@ -1694,26 +1744,111 @@ test('menu de pausa oferece som, opções e salvamento automático ao sair', asy
   await actions.nth(1).click();
   await expect(pause).toBeHidden();
   await waitForMenuView(page, 'options');
+  await expect(page.locator('#menu-screen')).toHaveClass(/is-pause-options-direct/);
+  await expect(page.locator('#menu-screen')).not.toHaveAttribute(
+    'data-menu-transitioning',
+    'true',
+  );
+  await expect.poll(async () => (await debugState(page)).status).toBe('paused');
   await expect
     .poll(() => page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY))
     .not.toBeNull();
+
+  await page.locator('[data-menu-panel="options"] [data-action="menu-home"]').click();
+  await expect(page.locator('#menu-screen')).toHaveClass(/is-hidden/);
+  await expect(pause).toBeVisible();
+  await expect(page.locator('#menu-screen')).not.toHaveClass(/is-pause-options-direct/);
+  await expect.poll(async () => (await debugState(page)).status).toBe('paused');
 });
 
-test('menu de pausa navega diretamente para campanha e menu principal', async ({ page }) => {
+test('menu de pausa encerra a sessão antes de navegar para campanha ou menu principal', async ({
+  page,
+}) => {
   await openApp(page);
   await openPlayMenu(page);
   await page.locator('#contract-list .contract-card').first().click();
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.run();
+    debug.advance(0.5);
+  });
+  await expect.poll(async () => (await debugState(page)).status).toBe('running');
 
   await page.locator('[data-action="pause-menu"]').click();
   await page.locator('#pause-modal [data-action="pause-campaign"]').click();
   await waitForMenuView(page, 'play');
   await expect(page.locator('[data-menu-panel="play"]')).toHaveAttribute('aria-hidden', 'false');
+  await expect
+    .poll(async () => {
+      const state = await debugState(page);
+      return {
+        mode: state.mode,
+        status: state.status,
+        machines: state.machines.length,
+        spent: state.metrics.spent,
+        simulationSeconds: await page.evaluate(
+          () => (window as DebugWindow).__FACTORY_DEBUG__!.getSimulationSeconds(),
+        ),
+      };
+    })
+    .toEqual({
+      mode: 'sandbox',
+      status: 'build',
+      machines: 0,
+      spent: 0,
+      simulationSeconds: 0,
+    });
 
   await page.locator('#contract-list .contract-card').first().click();
+  const freshCampaign = await debugState(page);
+  expect(freshCampaign).toMatchObject({
+    mode: 'campaign',
+    status: 'build',
+    metrics: { delivered: 0, collectedStars: 0, spent: 0 },
+  });
+  expect(freshCampaign.machines.length).toBeGreaterThan(0);
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.run();
+    debug.advance(0.5);
+  });
   await page.locator('[data-action="pause-menu"]').click();
   await page.locator('#pause-modal [data-action="pause-home"]').click();
   await waitForMenuView(page, 'home');
   await expect(page.locator('[data-action="menu-play"]')).toBeFocused();
+  await expect
+    .poll(async () => {
+      const state = await debugState(page);
+      return {
+        mode: state.mode,
+        status: state.status,
+        machines: state.machines.length,
+        boxes: await page.evaluate(
+          () => (window as DebugWindow).__FACTORY_DEBUG__!.getBoxes().length,
+        ),
+      };
+    })
+    .toEqual({ mode: 'sandbox', status: 'build', machines: 0, boxes: 0 });
+
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+  await expect
+    .poll(async () => {
+      const state = await debugState(page);
+      return {
+        mode: state.mode,
+        status: state.status,
+        delivered: state.metrics.delivered,
+        boxes: await page.evaluate(
+          () => (window as DebugWindow).__FACTORY_DEBUG__!.getBoxes().length,
+        ),
+      };
+    })
+    .toEqual({ mode: 'campaign', status: 'build', delivered: 0, boxes: 0 });
 });
 
 test('exibe o orçamento e só conclui a meta dentro do limite nominal', async ({ page }) => {

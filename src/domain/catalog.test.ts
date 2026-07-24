@@ -142,7 +142,7 @@ describe('catálogo JSON de contratos', () => {
         order: 2,
         title: '2-1',
         economy: {
-          budgetLimit: 15_000,
+          budgetLimit: 10_000,
           machineCosts: {
             'tracked-conveyor': 2_500,
             spring: 5_000,
@@ -263,7 +263,8 @@ describe('catálogo JSON de contratos', () => {
       id: 'overlapping-receiver',
       type: 'receiver',
     };
-    const codes = validateContractDefinition(invalid).issues.map(({ code }) => code);
+    const issues = validateContractDefinition(invalid).issues;
+    const codes = issues.map(({ code }) => code);
     expect(codes).toEqual(
       expect.arrayContaining([
         'invalid-id',
@@ -273,6 +274,30 @@ describe('catálogo JSON de contratos', () => {
         'overlap',
       ]),
     );
+    expect(issues.find(({ code }) => code === 'overlap')?.relatedPaths).toEqual([
+      'fixedMachines.0',
+      'fixedMachines.1',
+    ]);
+  });
+
+  it('aceita posicionamento livre quando as hitboxes são válidas', () => {
+    const contract = structuredClone(CONTRACTS[0]!);
+    contract.fixedMachines[0]!.gridX += 0.137;
+    contract.fixedMachines[0]!.gridY += 0.083;
+    contract.collectibles = [
+      { id: 'free-star', type: 'star', gridX: 10.123, gridY: 8.456 },
+    ];
+
+    expect(validateContractDefinition(contract)).toEqual({ valid: true, issues: [] });
+    const saved = saveContractToCatalog(seededCatalog(), contract);
+    expect(saved.contracts[0]?.fixedMachines[0]).toMatchObject({
+      gridX: 4.637,
+      gridY: 3.833,
+    });
+    expect(saved.contracts[0]?.collectibles[0]).toMatchObject({
+      gridX: 10.123,
+      gridY: 8.456,
+    });
   });
 
   it('valida estrelas nos limites sem tratá-las como colisão', () => {

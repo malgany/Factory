@@ -103,6 +103,9 @@ const eventUnsubscribers = [
   appEvents.on('ui:editor-save', ({ contract }) => {
     void saveEditorContract(contract);
   }),
+  appEvents.on('ui:editor-test', ({ contract }) => {
+    void saveEditorContract(contract, true);
+  }),
   appEvents.on('ui:admin-delete-contract', ({ contractId }) => {
     const title = findContract(contractId)?.title ?? 'Fase';
     try {
@@ -124,13 +127,23 @@ function openEditor(contract: ContractDefinition, isNew: boolean): void {
   appEvents.emit('ui:start-editor', { contract: draft, isNew });
 }
 
-async function saveEditorContract(contract: ContractDefinition): Promise<void> {
+async function saveEditorContract(
+  contract: ContractDefinition,
+  beginPreviewAfterSave = false,
+): Promise<void> {
   const validation = validateContractDefinition(contract);
   if (!validation.valid) {
     ui.setEditorMessage({
       tone: 'danger',
       message: 'A fase ainda não pode ser salva.',
       errors: validation.issues.map((issue) => issue.message),
+    });
+    appEvents.emit('ui:editor-highlight-invalid', {
+      paths: [
+        ...new Set(
+          validation.issues.flatMap((issue) => issue.relatedPaths ?? [issue.path]),
+        ),
+      ],
     });
     return;
   }
@@ -178,6 +191,9 @@ async function saveEditorContract(contract: ContractDefinition): Promise<void> {
       tone: 'danger',
       message: `A fase foi salva, mas o progresso não pôde ser atualizado. ${progressSaved.error}`,
     });
+  }
+  if (beginPreviewAfterSave) {
+    appEvents.emit('ui:editor-begin-preview', undefined);
   }
 }
 
