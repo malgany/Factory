@@ -9,12 +9,7 @@ export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
 export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
 export type MachineType =
-  | 'source'
-  | 'conveyor'
-  | 'tracked-conveyor'
-  | 'receiver'
-  | 'spring'
-  | 'turbo-spring';
+  'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
 export type ConveyorSpeed = 'slow' | 'normal' | 'fast';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
@@ -117,8 +112,14 @@ export interface SandboxSave {
   updatedAt: string;
 }
 
+export interface CampaignLayoutSave {
+  revision: number;
+  machines: MachineState[];
+  updatedAt: string;
+}
+
 export interface ProgressSave {
-  version: 4;
+  version: 5;
   unlockedContracts: ContractId[];
   completedContracts: Partial<Record<ContractId, number>>;
   settings: {
@@ -126,6 +127,7 @@ export interface ProgressSave {
     volume: number;
   };
   sandbox: SandboxSave;
+  campaignLayouts: Partial<Record<ContractId, CampaignLayoutSave>>;
 }
 
 export interface ContractCatalogFile {

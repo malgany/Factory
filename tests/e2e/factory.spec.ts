@@ -4,13 +4,7 @@ const STORAGE_KEY = 'factory-flow.progress.v1';
 
 interface MachineDebugState {
   id: string;
-  type:
-    | 'source'
-    | 'conveyor'
-    | 'tracked-conveyor'
-    | 'receiver'
-    | 'spring'
-    | 'turbo-spring';
+  type: 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -143,10 +137,7 @@ async function placeAtCanvasCenter(
   const canvas = page.locator('#game-container canvas');
   const bounds = await canvas.boundingBox();
   if (!toolBounds || !bounds) throw new Error('Tool or canvas has no bounding box');
-  await page.mouse.move(
-    toolBounds.x + toolBounds.width / 2,
-    toolBounds.y + toolBounds.height / 2,
-  );
+  await page.mouse.move(toolBounds.x + toolBounds.width / 2, toolBounds.y + toolBounds.height / 2);
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width * 0.55, bounds.y + bounds.height * 0.42, {
     steps: 12,
@@ -169,9 +160,10 @@ test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
   await startSandbox(page);
 
   const before = await debugState(page);
-  await expect(
-    page.locator('[data-tool="spring"] .machine-thumbnail-spring path'),
-  ).toHaveAttribute('stroke', '#25c442');
+  await expect(page.locator('[data-tool="spring"] .machine-thumbnail-spring path')).toHaveAttribute(
+    'stroke',
+    '#25c442',
+  );
   await expect(
     page.locator('[data-tool="turbo-spring"] .machine-thumbnail-turbo-spring path').first(),
   ).toHaveAttribute('stroke', '#ff2638');
@@ -180,9 +172,9 @@ test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
   if (!bounds) throw new Error('Canvas has no bounding box');
   await page.mouse.click(bounds.x + bounds.width * 0.48, bounds.y + bounds.height * 0.4);
 
-  await expect.poll(async () => (await debugState(page)).machines.length).toBe(
-    before.machines.length,
-  );
+  await expect
+    .poll(async () => (await debugState(page)).machines.length)
+    .toBe(before.machines.length);
   await expect(page.locator('[data-tool="spring"]')).not.toHaveClass(/is-active/);
 
   const spring = await placeAtCanvasCenter(page, 'spring');
@@ -207,12 +199,7 @@ test('permite aproximar as pontas arredondadas de esteiras inclinadas', async ({
     if (!debug) throw new Error('Factory debug API is unavailable');
     return {
       first: debug.placeMachine('tracked-conveyor', 8, 8, 0),
-      angled: debug.placeMachine(
-        'tracked-conveyor',
-        8 + 82 / 48,
-        8 - 10 / 48,
-        -20,
-      ),
+      angled: debug.placeMachine('tracked-conveyor', 8 + 82 / 48, 8 - 10 / 48, -20),
     };
   });
 
@@ -220,9 +207,7 @@ test('permite aproximar as pontas arredondadas de esteiras inclinadas', async ({
   expect((await debugState(page)).machines).toHaveLength(2);
 });
 
-test('inverte uma única esteira e oculta a ação para outros itens e grupos', async ({
-  page,
-}) => {
+test('inverte uma única esteira e oculta a ação para outros itens e grupos', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
@@ -314,9 +299,7 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
   await expect(reverse).toHaveClass(/is-hidden/);
 });
 
-test('novas esteiras herdam a última velocidade somente dentro da fase atual', async ({
-  page,
-}) => {
+test('novas esteiras herdam a última velocidade somente dentro da fase atual', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
@@ -342,9 +325,8 @@ test('novas esteiras herdam a última velocidade somente dentro da fase atual', 
     .poll(async () =>
       page.evaluate(
         () =>
-          (window as DebugWindow).__FACTORY_DEBUG__
-            ?.getMachines()
-            .find(({ gridX }) => gridX === 10)?.conveyorSpeed,
+          (window as DebugWindow).__FACTORY_DEBUG__?.getMachines().find(({ gridX }) => gridX === 10)
+            ?.conveyorSpeed,
       ),
     )
     .toBe('fast');
@@ -360,9 +342,8 @@ test('novas esteiras herdam a última velocidade somente dentro da fase atual', 
     .poll(async () =>
       page.evaluate(
         () =>
-          (window as DebugWindow).__FACTORY_DEBUG__
-            ?.getMachines()
-            .find(({ gridX }) => gridX === 14)?.conveyorSpeed,
+          (window as DebugWindow).__FACTORY_DEBUG__?.getMachines().find(({ gridX }) => gridX === 14)
+            ?.conveyorSpeed,
       ),
     )
     .toBe('slow');
@@ -920,10 +901,7 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
   const viewport = page.viewportSize();
   const demoBounds = await demo.boundingBox();
   expect(demoBounds?.y).toBeCloseTo(0, 1);
-  expect((demoBounds?.x ?? 0) + (demoBounds?.width ?? 0)).toBeCloseTo(
-    viewport?.width ?? 0,
-    1,
-  );
+  expect((demoBounds?.x ?? 0) + (demoBounds?.width ?? 0)).toBeCloseTo(viewport?.width ?? 0, 1);
 
   await expect
     .poll(async () => Number((await demo.getAttribute('data-simulation-steps')) ?? 0))
@@ -934,7 +912,7 @@ test('demonstração do menu usa física lenta e descarta caixas fora da tela', 
   await expect
     .poll(async () => Number((await demo.getAttribute('data-offscreen-destroyed-boxes')) ?? 0), {
       timeout: 30_000,
-  })
+    })
     .toBeGreaterThan(0);
   await expect(demo).toHaveAttribute('data-last-offscreen-side', 'right');
   const cleanupX = Number((await demo.getAttribute('data-last-offscreen-x')) ?? 0);
@@ -1745,10 +1723,7 @@ test('menu de pausa oferece som, opções e salvamento automático ao sair', asy
   await expect(pause).toBeHidden();
   await waitForMenuView(page, 'options');
   await expect(page.locator('#menu-screen')).toHaveClass(/is-pause-options-direct/);
-  await expect(page.locator('#menu-screen')).not.toHaveAttribute(
-    'data-menu-transitioning',
-    'true',
-  );
+  await expect(page.locator('#menu-screen')).not.toHaveAttribute('data-menu-transitioning', 'true');
   await expect.poll(async () => (await debugState(page)).status).toBe('paused');
   await expect
     .poll(() => page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY))
@@ -1788,8 +1763,8 @@ test('menu de pausa encerra a sessão antes de navegar para campanha ou menu pri
         status: state.status,
         machines: state.machines.length,
         spent: state.metrics.spent,
-        simulationSeconds: await page.evaluate(
-          () => (window as DebugWindow).__FACTORY_DEBUG__!.getSimulationSeconds(),
+        simulationSeconds: await page.evaluate(() =>
+          (window as DebugWindow).__FACTORY_DEBUG__!.getSimulationSeconds(),
         ),
       };
     })
@@ -1869,7 +1844,7 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   );
   await expect(page.locator('[data-metric="time"], [data-result="time"]')).toHaveCount(0);
 
-  const lastMachineId = await page.evaluate(() => {
+  await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Factory debug API is unavailable');
     const positions = [
@@ -1877,12 +1852,33 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
       [21, 4],
       [24, 4],
       [27, 4],
-      [18, 8],
     ] as const;
     for (const [gridX, gridY] of positions) {
       if (!debug.placeMachine('tracked-conveyor', gridX, gridY)) {
         throw new Error(`Could not place conveyor at ${gridX}, ${gridY}`);
       }
+    }
+  });
+
+  await expect(meter.locator('[data-budget-spent]')).toHaveText('$10,000');
+  await expect(meter).not.toHaveClass(/is-over-budget/);
+  await expect(track).toHaveAttribute('aria-valuenow', '10000');
+  await expect
+    .poll(() =>
+      meter
+        .locator('[data-budget-fill]')
+        .evaluate((fill) => (fill as HTMLElement).style.getPropertyValue('--budget-fill')),
+    )
+    .toBe('100%');
+  await expect(meter.locator('[data-budget-fill]')).toHaveCSS(
+    'background-color',
+    'rgb(37, 196, 66)',
+  );
+
+  const lastMachineId = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || !debug.placeMachine('tracked-conveyor', 18, 8)) {
+      throw new Error('Could not place the over-budget conveyor');
     }
     const placed = debug.getMachines().filter(({ fixed }) => !fixed);
     return placed.at(-1)?.id;
@@ -1937,14 +1933,9 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   await expect(page.locator('[data-result="collected-stars"] strong')).toHaveText('1 / 1');
   await expect(page.locator('[data-result="budget"] strong')).toHaveText('$10,000 / $10,000');
   await expect(page.locator('[data-result-budget-percent]')).toHaveText('100%');
-  await expect(page.locator('[data-result-budget-track]')).toHaveAttribute(
-    'aria-valuenow',
-    '100',
-  );
+  await expect(page.locator('[data-result-budget-track]')).toHaveAttribute('aria-valuenow', '100');
   const resultMetricStyles = await page.evaluate(() => {
-    const coin = document.querySelector<HTMLElement>(
-      '.result-metric-budget .result-metric-icon',
-    )!;
+    const coin = document.querySelector<HTMLElement>('.result-metric-budget .result-metric-icon')!;
     const budgetFill = document.querySelector<HTMLElement>('[data-result-budget-fill]')!;
     const value = document.querySelector<HTMLElement>('[data-result="delivered"] strong')!;
     return {
@@ -1964,9 +1955,9 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   await expect(page.locator('#result-summary')).toContainText('dentro do orçamento');
   const resultLayout = await page.evaluate(() => {
     const card = document.querySelector<HTMLElement>('.result-card')!;
-    const metricTops = [...document.querySelectorAll<HTMLElement>('.result-metric:not(.is-hidden)')].map(
-      (metric) => metric.getBoundingClientRect().top,
-    );
+    const metricTops = [
+      ...document.querySelectorAll<HTMLElement>('.result-metric:not(.is-hidden)'),
+    ].map((metric) => metric.getBoundingClientRect().top);
     const actionTops = [...document.querySelectorAll<HTMLElement>('.result-actions button')].map(
       (action) => action.getBoundingClientRect().top,
     );
@@ -2154,9 +2145,7 @@ test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ pa
   await expect.poll(async () => (await debugState(page)).selectedMachine).toBeUndefined();
   await expect
     .poll(async () =>
-      page.evaluate(
-        () => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0,
-      ),
+      page.evaluate(() => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0),
     )
     .toBeGreaterThan(0);
 });
@@ -2279,7 +2268,7 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
     unlockedContracts: string[];
     completedContracts: Record<string, number>;
   };
-  expect(storedProgress.version).toBe(4);
+  expect(storedProgress.version).toBe(5);
   expect(storedProgress.unlockedContracts).toHaveLength(4);
   expect(storedProgress.unlockedContracts).toEqual(
     expect.arrayContaining(['assembly-line', 'quality-curve', 'first-jump']),

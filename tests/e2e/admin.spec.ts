@@ -4,12 +4,7 @@ const PROGRESS_KEY = 'factory-flow.progress.v1';
 const LEGACY_CATALOG_KEY = 'factory-flow.contracts.v1';
 
 type AdminMachineType =
-  | 'source'
-  | 'conveyor'
-  | 'tracked-conveyor'
-  | 'receiver'
-  | 'spring'
-  | 'turbo-spring';
+  'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
 
 interface AdminCamera {
   centerX: number;
@@ -425,9 +420,7 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await expect(page.locator('[data-metric="stars"]')).toHaveCount(0);
   await expect
     .poll(() =>
-      page.evaluate(
-        () => (window as AdminWindow).__FACTORY_DEBUG__?.getCollectibles().length ?? 0,
-      ),
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getCollectibles().length ?? 0),
     )
     .toBe(1);
   await page.locator('[data-action="editor-configure"]').first().click();
@@ -576,7 +569,7 @@ test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ 
   });
 
   const progress = await getProgress(page);
-  expect(progress.version).toBe(4);
+  expect(progress.version).toBe(5);
   expect(progress.unlockedContracts).toEqual([recreatedId]);
   expect(progress.completedContracts).toEqual({});
   await page.locator('[data-action="editor-cancel"]').click();
@@ -828,11 +821,9 @@ test('pisca em vermelho todos os objetos inválidos a cada tentativa de salvar',
   await page.locator('#editor-contract-form input[name="deliveries"]').fill('9');
   await page.locator('[data-action="editor-save"]').click();
 
-  await expect(page.locator('#editor-feedback')).toContainText(
-    'Há objetos sobrepostos',
-  );
-  const firstFlash = await page.evaluate(
-    () => (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash(),
+  await expect(page.locator('#editor-feedback')).toContainText('Há objetos sobrepostos');
+  const firstFlash = await page.evaluate(() =>
+    (window as AdminWindow).__FACTORY_DEBUG__!.getInvalidEntityFlash(),
   );
   expect(firstFlash.machineIds).toContain(invalidMachineId);
   expect(firstFlash.remainingMs).toBeGreaterThan(1_500);
@@ -877,9 +868,7 @@ test('liga e desliga a visualização de hitboxes somente no editor', async ({ p
   await expect(toggle).toHaveClass(/is-active/);
   await expect
     .poll(() =>
-      page.evaluate(
-        () => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible(),
-      ),
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible()),
     )
     .toBe(true);
 
@@ -887,9 +876,7 @@ test('liga e desliga a visualização de hitboxes somente no editor', async ({ p
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
   await expect
     .poll(() =>
-      page.evaluate(
-        () => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible(),
-      ),
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__!.getEditorHitboxesVisible()),
     )
     .toBe(false);
 });

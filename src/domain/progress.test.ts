@@ -10,6 +10,7 @@ import {
   reconcileProgress,
   removeContractProgress,
   serializeProgress,
+  updateCampaignLayout,
   updateSandbox,
 } from './progress';
 import type { ContractDefinition, MachineState } from './types';
@@ -17,7 +18,7 @@ import type { ContractDefinition, MachineState } from './types';
 describe('persistência de progresso', () => {
   it('começa na versão 4 somente com a fase 1-1 disponível', () => {
     const progress = createDefaultProgress();
-    expect(progress.version).toBe(4);
+    expect(progress.version).toBe(5);
     expect(progress.unlockedContracts).toEqual(['assembly-line']);
     expect(progress.completedContracts).toEqual({});
     expect(progress.sandbox.machines).toEqual([]);
@@ -49,7 +50,7 @@ describe('persistência de progresso', () => {
       },
     });
 
-    expect(migrated.version).toBe(4);
+    expect(migrated.version).toBe(5);
     expect(migrated.unlockedContracts).toEqual(['assembly-line']);
     expect(migrated.completedContracts).toEqual({});
     expect(migrated.settings).toEqual({ muted: true, volume: 1 });
@@ -197,5 +198,34 @@ describe('persistência de progresso', () => {
       machines: [machine],
       updatedAt: '2026-07-19T00:00:00.000Z',
     });
+  });
+
+  it('persists the last campaign layout and discards stale revisions', () => {
+    const contract = getContract('assembly-line');
+    const machine: MachineState = {
+      id: 'saved-spring',
+      type: 'spring',
+      gridX: 10,
+      gridY: 7,
+      angle: 25,
+      reversed: false,
+      fixed: false,
+    };
+    const saved = updateCampaignLayout(
+      createDefaultProgress(),
+      contract.id,
+      contract.revision,
+      [machine],
+      '2026-07-24T00:00:00.000Z',
+    );
+
+    expect(parseProgress(serializeProgress(saved)).campaignLayouts[contract.id]).toEqual({
+      revision: contract.revision,
+      machines: [machine],
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    });
+    expect(
+      reconcileProgress(saved, [{ ...contract, revision: contract.revision + 1 }]),
+    ).toMatchObject({ campaignLayouts: {} });
   });
 });

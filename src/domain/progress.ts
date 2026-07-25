@@ -2,13 +2,14 @@ import { CONTRACTS, getNextContractId, orderContracts } from './contracts';
 import type {
   ContractDefinition,
   ContractId,
+  CampaignLayoutSave,
   ConveyorSpeed,
   MachineState,
   ProgressSave,
   SandboxSave,
 } from './types';
 
-export const PROGRESS_VERSION = 4 as const;
+export const PROGRESS_VERSION = 5 as const;
 const CONVEYOR_SPEEDS: readonly ConveyorSpeed[] = ['slow', 'normal', 'fast'];
 
 export function createDefaultProgress(
@@ -27,6 +28,7 @@ export function createDefaultProgress(
       machines: [],
       updatedAt: new Date(0).toISOString(),
     },
+    campaignLayouts: {},
   };
 }
 
@@ -95,6 +97,7 @@ export function reconcileProgress(
     version: PROGRESS_VERSION,
     unlockedContracts: ordered.filter(({ id }) => unlocked.has(id)).map(({ id }) => id),
     completedContracts,
+    campaignLayouts: reconcileCampaignLayouts(progress.campaignLayouts, ordered),
   };
 }
 
@@ -143,6 +146,7 @@ export function removeContractProgress(
 ): ProgressSave {
   const next = clearContractCompletion(progress, contractId);
   next.unlockedContracts = next.unlockedContracts.filter((id) => id !== contractId);
+  delete next.campaignLayouts[contractId];
   return reconcileProgress(next, remainingContracts);
 }
 
@@ -160,21 +164,42 @@ export function updateSandbox(
   };
 }
 
+export function updateCampaignLayout(
+  progress: ProgressSave,
+  contractId: ContractId,
+  contractRevision: number,
+  machines: readonly MachineState[],
+  updatedAt = new Date().toISOString(),
+): ProgressSave {
+  return {
+    ...progress,
+    campaignLayouts: {
+      ...progress.campaignLayouts,
+      [contractId]: {
+        revision: contractRevision,
+        machines: structuredClone([...machines]),
+        updatedAt,
+      },
+    },
+  };
+}
+
 function migrateProgress(
   candidate: Record<string, unknown>,
   contracts: readonly ContractDefinition[],
 ): ProgressSave {
   const defaults = createDefaultProgress(contracts);
   const settings = isRecord(candidate.settings) ? candidate.settings : {};
-  const isCurrentVersion = candidate.version === PROGRESS_VERSION;
+  const preservesCampaignProgress =
+    candidate.version === 4 || candidate.version === PROGRESS_VERSION;
   const progress: ProgressSave = {
     version: PROGRESS_VERSION,
     // Score-era campaign data is intentionally discarded. Stars and budget
     // are now mandatory completion criteria, so prior completions are invalid.
-    unlockedContracts: isCurrentVersion
+    unlockedContracts: preservesCampaignProgress
       ? readUnlocked(candidate.unlockedContracts)
       : defaults.unlockedContracts,
-    completedContracts: isCurrentVersion
+    completedContracts: preservesCampaignProgress
       ? readCompletedContracts(candidate.completedContracts)
       : {},
     settings: {
@@ -182,6 +207,7 @@ function migrateProgress(
       volume: clampNumber(settings.volume, 0, 1, defaults.settings.volume),
     },
     sandbox: readSandbox(candidate.sandbox, defaults.sandbox),
+    campaignLayouts: readCampaignLayouts(candidate.campaignLayouts),
   };
   return reconcileProgress(progress, contracts);
 }
@@ -205,17 +231,57 @@ function readCompletedContracts(value: unknown): ProgressSave['completedContract
 function readSandbox(value: unknown, fallback: SandboxSave): SandboxSave {
   if (!isRecord(value) || !Array.isArray(value.machines)) return fallback;
 
-  const machines = value.machines.filter(isMachineState).map((machine) => ({
+  const machines = readMachines(value.machines);
+  return {
+    machines: structuredClone(machines),
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : fallback.updatedAt,
+  };
+}
+
+function readCampaignLayouts(value: unknown): ProgressSave['campaignLayouts'] {
+  if (!isRecord(value)) return {};
+  const layouts: ProgressSave['campaignLayouts'] = {};
+  for (const [contractId, layout] of Object.entries(value)) {
+    if (!isStableContractId(contractId) || !isRecord(layout) || !Array.isArray(layout.machines)) {
+      continue;
+    }
+    if (!Number.isInteger(layout.revision) || Number(layout.revision) <= 0) continue;
+    layouts[contractId] = {
+      revision: Number(layout.revision),
+      machines: readMachines(layout.machines),
+      updatedAt:
+        typeof layout.updatedAt === 'string' ? layout.updatedAt : new Date(0).toISOString(),
+    } satisfies CampaignLayoutSave;
+  }
+  return layouts;
+}
+
+function readMachines(value: readonly unknown[]): MachineState[] {
+  return value.filter(isMachineState).map((machine) => ({
     ...machine,
     conveyorSpeed:
       machine.type === 'conveyor' || machine.type === 'tracked-conveyor'
         ? normalizeConveyorSpeed(machine.conveyorSpeed)
         : undefined,
   }));
-  return {
-    machines: structuredClone(machines),
-    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : fallback.updatedAt,
-  };
+}
+
+function reconcileCampaignLayouts(
+  layouts: ProgressSave['campaignLayouts'],
+  contracts: readonly ContractDefinition[],
+): ProgressSave['campaignLayouts'] {
+  const reconciled: ProgressSave['campaignLayouts'] = {};
+  for (const contract of contracts) {
+    const layout = layouts[contract.id];
+    if (layout?.revision === contract.revision) {
+      reconciled[contract.id] = {
+        revision: layout.revision,
+        machines: structuredClone(layout.machines),
+        updatedAt: layout.updatedAt,
+      };
+    }
+  }
+  return reconciled;
 }
 
 function isMachineState(value: unknown): value is MachineState {

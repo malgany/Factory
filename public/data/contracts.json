@@ -743,7 +743,7 @@
       "id": "production-rhythm",
       "world": 1,
       "stage": 8,
-      "revision": 11,
+      "revision": 12,
       "order": 8,
       "title": "8-1",
       "subtitle": "Acelere a produção.",
@@ -893,7 +893,8 @@
         }
       ],
       "goal": {
-        "deliveries": 24
+        "deliveries": 24,
+        "maxLosses": 0
       },
       "economy": {
         "budgetLimit": 35000,
@@ -901,6 +902,11 @@
           "tracked-conveyor": 2500,
           "spring": 5000,
           "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
         }
       },
       "spawnIntervalSeconds": 0.8,
@@ -1218,5 +1224,5 @@
       }
     }
   ],
-  "updatedAt": "2026-07-24T05:59:44.923Z"
+  "updatedAt": "2026-07-25T03:37:58.236Z"
 }

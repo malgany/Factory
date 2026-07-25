@@ -22,6 +22,11 @@ export interface AppEvents {
     snapshot: GameSnapshot;
   };
   'game:sandbox-changed': MachineState[];
+  'game:campaign-changed': {
+    contractId: ContractId;
+    contractRevision: number;
+    machines: MachineState[];
+  };
   'game:editor-changed': { contract: ContractDefinition; dirty: boolean };
   'game:editor-preview': { active: boolean };
   'game:audio': { kind: 'spawn' | 'place' | 'bounce' | 'deliver' | 'error' | 'success' };

@@ -1,4 +1,5 @@
 import { appEvents } from '../core/events';
+import { updateCampaignLayout } from '../domain/progress';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import factoryCampaignEnvironmentUrl from '../assets/factory-campaign-environment.webp?url';
 import { DEFAULT_MACHINE_COSTS } from '../domain/catalog';
@@ -1051,6 +1052,10 @@ export class AppUI {
         };
         this.onProgressChange?.(this.progress);
       }),
+      appEvents.on('game:campaign-changed', ({ contractId, contractRevision, machines }) => {
+        this.progress = updateCampaignLayout(this.progress, contractId, contractRevision, machines);
+        this.onProgressChange?.(this.progress);
+      }),
     );
   }
 
@@ -1136,8 +1141,7 @@ export class AppUI {
       case 'run':
         if (this.snapshot?.status === 'running' || this.snapshot?.status === 'paused') {
           appEvents.emit('ui:reset', undefined);
-        }
-        else appEvents.emit('ui:run', undefined);
+        } else appEvents.emit('ui:run', undefined);
         break;
       case 'pause-toggle':
         if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
@@ -1396,6 +1400,7 @@ export class AppUI {
             mode: 'campaign',
             contractId: contract.id,
             contract: structuredClone(contract),
+            machines: structuredClone(this.progress.campaignLayouts[contract.id]?.machines ?? []),
           });
         });
       }
@@ -1521,6 +1526,7 @@ export class AppUI {
       mode: 'campaign',
       contractId: contract.id,
       contract: structuredClone(contract),
+      machines: structuredClone(this.progress.campaignLayouts[contract.id]?.machines ?? []),
     });
   }
 
@@ -1681,10 +1687,7 @@ export class AppUI {
     );
   }
 
-  private renderHotbar(
-    machines: MachineType[],
-    economy: GameSnapshot['economy'],
-  ): void {
+  private renderHotbar(machines: MachineType[], economy: GameSnapshot['economy']): void {
     const hotbar = this.element('#hotbar');
     const wasEditor = hotbar.dataset.mode === 'editor';
     hotbar.dataset.mode = 'player';
@@ -1790,11 +1793,7 @@ export class AppUI {
     }
   }
 
-  private bindPaletteDrag(
-    button: HTMLButtonElement,
-    hotbar: HTMLElement,
-    type: AdminTool,
-  ): void {
+  private bindPaletteDrag(button: HTMLButtonElement, hotbar: HTMLElement, type: AdminTool): void {
     let origin: { x: number; y: number } | undefined;
     let dragging = false;
 
@@ -1821,9 +1820,7 @@ export class AppUI {
       origin = { x: event.clientX, y: event.clientY };
       dragging = false;
       button.setPointerCapture(event.pointerId);
-      hotbar
-        .querySelectorAll('.tool-button')
-        .forEach((node) => node.classList.remove('is-active'));
+      hotbar.querySelectorAll('.tool-button').forEach((node) => node.classList.remove('is-active'));
       button.classList.add('is-active');
     });
     button.addEventListener('pointermove', (event) => {
@@ -1875,9 +1872,9 @@ export class AppUI {
     const multiple = selectionCount > 1;
     const canReverse = Boolean(
       !multiple &&
-        machine &&
-        (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') &&
-        (editing || !machine.fixed),
+      machine &&
+      (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') &&
+      (editing || !machine.fixed),
     );
     reverse.classList.toggle('is-hidden', !canReverse);
     reverse.disabled = !canReverse;
@@ -1925,8 +1922,7 @@ export class AppUI {
     const rotationClearance = 54;
     const width = control.offsetWidth || 176;
     const height = control.offsetHeight || 72;
-    const centeredLeft =
-      (bounds.left + bounds.right) / 2 - containerBounds.left - width / 2;
+    const centeredLeft = (bounds.left + bounds.right) / 2 - containerBounds.left - width / 2;
     const maximumLeft = Math.max(safeEdge, containerBounds.width - width - safeEdge);
     const left = Math.min(Math.max(centeredLeft, safeEdge), maximumLeft);
     const belowTop = bounds.bottom - containerBounds.top + verticalGap;
@@ -1934,11 +1930,8 @@ export class AppUI {
     const selectionDockTop = selectionDockBounds.top - containerBounds.top;
     const bottomLimit = Math.min(containerBounds.height - 104, selectionDockTop - verticalGap);
     const fitsBelow = belowTop + height <= bottomLimit;
-    const aboveTop =
-      bounds.top - containerBounds.top - height - rotationClearance;
-    const top = fitsBelow
-      ? belowTop
-      : Math.max(96, Math.min(aboveTop, bottomLimit - height));
+    const aboveTop = bounds.top - containerBounds.top - height - rotationClearance;
+    const top = fitsBelow ? belowTop : Math.max(96, Math.min(aboveTop, bottomLimit - height));
 
     control.dataset.placement = fitsBelow ? 'bottom' : 'top';
     control.style.left = `${Math.round(left)}px`;
@@ -2013,10 +2006,7 @@ export class AppUI {
     indicator.querySelector('strong')!.textContent = `${normalizeAngle(payload.angle)}°`;
   }
 
-  private renderResult(payload: {
-    contractId: ContractId;
-    snapshot: GameSnapshot;
-  }): void {
+  private renderResult(payload: { contractId: ContractId; snapshot: GameSnapshot }): void {
     const { snapshot } = payload;
     const success = snapshot.status === 'success';
     const contract =
@@ -2168,8 +2158,7 @@ export class AppUI {
     setFormControlValue(
       form,
       'turboSpringCost',
-      contract.economy.machineCosts['turbo-spring'] ??
-        DEFAULT_MACHINE_COSTS['turbo-spring']!,
+      contract.economy.machineCosts['turbo-spring'] ?? DEFAULT_MACHINE_COSTS['turbo-spring']!,
     );
     setFormControlValue(form, 'spawnIntervalSeconds', contract.spawnIntervalSeconds);
     this.syncEditorOptionalFields(form);
@@ -2297,8 +2286,7 @@ export class AppUI {
     )
       errors.push('O custo do trampolim deve ser um inteiro não negativo.');
     const turboSpringCost =
-      contract.economy.machineCosts['turbo-spring'] ??
-      DEFAULT_MACHINE_COSTS['turbo-spring']!;
+      contract.economy.machineCosts['turbo-spring'] ?? DEFAULT_MACHINE_COSTS['turbo-spring']!;
     if (turboSpringCost < 0 || !Number.isInteger(turboSpringCost)) {
       errors.push('O custo do trampolim turbo deve ser um inteiro não negativo.');
     }
@@ -2389,6 +2377,7 @@ export class AppUI {
       mode: 'campaign',
       contractId: next.id,
       contract: structuredClone(next),
+      machines: structuredClone(this.progress.campaignLayouts[next.id]?.machines ?? []),
     });
   }
 
@@ -2603,12 +2592,7 @@ function machineCost(economy: GameSnapshot['economy'], machine: MachineType): nu
   return 0;
 }
 
-function toolTooltip(
-  id: string,
-  name: string,
-  description: string,
-  price?: string,
-): string {
+function toolTooltip(id: string, name: string, description: string, price?: string): string {
   return `<span class="tool-tooltip" id="${escapeHTML(id)}" role="tooltip">
     <strong>${escapeHTML(name)}</strong>
     <span>${escapeHTML(description)}</span>
