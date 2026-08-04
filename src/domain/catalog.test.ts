@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  appendCampaignWorld,
   appendCustomContract,
   createEmptyContractDraft,
   createCustomContractId,
   createDefaultContractCatalog,
+  deleteCampaignWorld,
   deleteContractFromCatalog,
   mergeContractCatalog,
   readContractCatalogFile,
   saveContractToCatalog,
   serializeContractCatalogFile,
+  swapContractSlots,
+  updateCampaignWorld,
   validateContractDefinition,
   type NewContractDefinition,
 } from './catalog';
@@ -26,8 +30,11 @@ import {
 
 function seededCatalog(): ContractCatalogFile {
   return {
-    version: 3,
-    contracts: CONTRACTS.map((contract) => structuredClone(contract)),
+    version: 4,
+    worlds: [{ world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' }],
+    contracts: CONTRACTS.filter(({ world }) => world === 1).map((contract) =>
+      structuredClone(contract),
+    ),
     updatedAt: new Date(0).toISOString(),
   };
 }
@@ -47,8 +54,9 @@ function customDefinition(stage = 5): NewContractDefinition {
 
 describe('catálogo JSON de contratos', () => {
   it('mantém válidas todas as dez fases cadastradas', () => {
-    expect(CONTRACTS).toHaveLength(10);
-    for (const contract of CONTRACTS) {
+    const worldOneContracts = CONTRACTS.filter(({ world }) => world === 1);
+    expect(worldOneContracts).toHaveLength(10);
+    for (const contract of worldOneContracts) {
       expect(validateContractDefinition(contract), contract.id).toEqual({
         valid: true,
         issues: [],
@@ -133,7 +141,10 @@ describe('catálogo JSON de contratos', () => {
 
       const migrated = readContractCatalogFile(legacy);
       expect(migrated.ok).toBe(true);
-      expect(migrated.value.version).toBe(3);
+      expect(migrated.value.version).toBe(4);
+      expect(migrated.value.worlds).toEqual([
+        { world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' },
+      ]);
       expect(migrated.value.contracts[1]).toMatchObject({
         id: 'quality-curve',
         world: 1,
@@ -196,7 +207,7 @@ describe('catálogo JSON de contratos', () => {
     const serialized = serializeContractCatalogFile(source);
     const restored = readContractCatalogFile(serialized);
 
-    expect(serialized).toContain('\n  "version": 3');
+    expect(serialized).toContain('\n  "version": 4');
     expect(serialized.endsWith('\n')).toBe(true);
     expect(restored.ok).toBe(true);
     expect(restored.value.contracts[0]).toMatchObject({ title: '1-1', order: 1 });
@@ -224,6 +235,155 @@ describe('catálogo JSON de contratos', () => {
 
     expect(readContractCatalogFile(catalog).ok).toBe(false);
     expect(() => saveContractToCatalog(seededCatalog(), duplicate)).toThrow(/slot 1-1/i);
+  });
+
+  it('cadastra um mundo vazio com cores próprias antes de criar suas fases', () => {
+    const created = appendCampaignWorld(
+      seededCatalog(),
+      { backgroundColor: '#7A245C', gridColor: '#F4D9E8' },
+      '2026-08-02T13:00:00.000Z',
+    );
+
+    expect(created.world).toEqual({
+      world: 2,
+      backgroundColor: '#7a245c',
+      gridColor: '#f4d9e8',
+    });
+    expect(created.catalog.worlds).toHaveLength(2);
+    expect(created.catalog.contracts.every(({ world }) => world === 1)).toBe(true);
+    expect(createEmptyContractDraft(created.catalog, 2)).toMatchObject({
+      world: 2,
+      stage: 1,
+      order: 11,
+      title: '1-2',
+    });
+
+    const legacyV3 = structuredClone(created.catalog) as unknown as Record<string, unknown>;
+    legacyV3.version = 3;
+    delete legacyV3.worlds;
+    expect(readContractCatalogFile(legacyV3).value.worlds).toEqual([
+      { world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' },
+    ]);
+  });
+
+  it('atualiza as cores de um mundo já cadastrado', () => {
+    const withSecondWorld = appendCampaignWorld(seededCatalog(), {
+      backgroundColor: '#6b2032',
+      gridColor: '#f4d9e8',
+    }).catalog;
+
+    const updated = updateCampaignWorld(
+      withSecondWorld,
+      2,
+      { backgroundColor: '#1A6B82', gridColor: '#E8FAFF' },
+      '2026-08-02T14:00:00.000Z',
+    );
+
+    expect(updated.worlds[1]).toEqual({
+      world: 2,
+      backgroundColor: '#1a6b82',
+      gridColor: '#e8faff',
+    });
+    expect(updated.updatedAt).toBe('2026-08-02T14:00:00.000Z');
+  });
+
+  it('exclui um mundo vazio e renumera os mundos e fases posteriores', () => {
+    const withSecondWorld = appendCampaignWorld(seededCatalog(), {
+      backgroundColor: '#6b2032',
+      gridColor: '#f4d9e8',
+    }).catalog;
+    const withThirdWorld = appendCampaignWorld(withSecondWorld, {
+      backgroundColor: '#1a6b82',
+      gridColor: '#e8faff',
+    }).catalog;
+    const thirdWorldContract = {
+      ...structuredClone(withThirdWorld.contracts[0]!),
+      id: 'custom-third-world',
+      world: 3,
+      stage: 1 as const,
+      revision: 1,
+      order: 21,
+      title: '1-3',
+    };
+    const populated = saveContractToCatalog(withThirdWorld, thirdWorldContract);
+
+    const deleted = deleteCampaignWorld(
+      populated,
+      2,
+      '2026-08-02T15:00:00.000Z',
+    );
+
+    expect(deleted.worlds).toEqual([
+      { world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' },
+      { world: 2, backgroundColor: '#1a6b82', gridColor: '#e8faff' },
+    ]);
+    expect(deleted.contracts.find(({ id }) => id === thirdWorldContract.id)).toMatchObject({
+      world: 2,
+      stage: 1,
+      order: 11,
+      title: '1-2',
+    });
+    expect(deleted.updatedAt).toBe('2026-08-02T15:00:00.000Z');
+  });
+
+  it('só exclui mundos vazios e mantém pelo menos um mundo', () => {
+    expect(() => deleteCampaignWorld(seededCatalog(), 1)).toThrow(/pelo menos um mundo/i);
+
+    const secondWorld = appendCampaignWorld(seededCatalog(), {
+      backgroundColor: '#6b2032',
+      gridColor: '#f4d9e8',
+    }).catalog;
+    const populatedSecondWorld = saveContractToCatalog(secondWorld, {
+      ...structuredClone(secondWorld.contracts[0]!),
+      id: 'custom-populated-world',
+      world: 2,
+      stage: 1,
+      revision: 1,
+      order: 11,
+      title: '1-2',
+    });
+    expect(() => deleteCampaignWorld(populatedSecondWorld, 2)).toThrow(/possui fases/i);
+  });
+
+  it('troca atomicamente as posições de duas fases sem perder seus conteúdos', () => {
+    const initial = seededCatalog();
+    const first = initial.contracts[0]!;
+    const second = initial.contracts[1]!;
+    const editedFirst = {
+      ...structuredClone(first),
+      world: second.world,
+      stage: second.stage,
+      description: 'Conteúdo editado antes da troca',
+    };
+
+    const swapped = swapContractSlots(
+      initial,
+      editedFirst,
+      second.id,
+      '2026-08-02T12:00:00.000Z',
+    );
+    const movedFirst = swapped.contracts.find(({ id }) => id === first.id);
+    const movedSecond = swapped.contracts.find(({ id }) => id === second.id);
+
+    expect(movedFirst).toMatchObject({
+      stage: second.stage,
+      world: second.world,
+      order: second.order,
+      title: second.title,
+      revision: first.revision + 1,
+      description: 'Conteúdo editado antes da troca',
+    });
+    expect(movedSecond).toMatchObject({
+      stage: first.stage,
+      world: first.world,
+      order: first.order,
+      title: first.title,
+      revision: second.revision + 1,
+      description: second.description,
+    });
+    expect(swapped.updatedAt).toBe('2026-08-02T12:00:00.000Z');
+    expect(initial.contracts[0]).toEqual(first);
+    expect(initial.contracts[1]).toEqual(second);
   });
 
   it('não cria uma fase quando os dez slots do mundo já estão ocupados', () => {

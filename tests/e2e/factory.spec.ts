@@ -4,7 +4,15 @@ const STORAGE_KEY = 'factory-flow.progress.v1';
 
 interface MachineDebugState {
   id: string;
-  type: 'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
+  type:
+    | 'source'
+    | 'conveyor'
+    | 'slow-conveyor'
+    | 'tracked-conveyor'
+    | 'fast-conveyor'
+    | 'receiver'
+    | 'spring'
+    | 'turbo-spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -16,6 +24,7 @@ interface MachineDebugState {
 interface FactoryDebugState {
   mode: 'campaign' | 'sandbox';
   status: 'build' | 'running' | 'paused' | 'success' | 'failure';
+  resolutionReason?: 'deliveries' | 'losses' | 'budget';
   gridEnabled: boolean;
   simulationSpeed: number;
   metrics: {
@@ -32,8 +41,11 @@ interface FactoryDebugState {
       spring: number;
       'turbo-spring'?: number;
     };
+    conveyorSpeedCosts?: { slow: number; normal: number; fast: number };
   };
   selection: { machineIds: string[]; obstacleIds: string[]; count: number };
+  selectionClientBounds?: { left: number; top: number; right: number; bottom: number };
+  selectionRotationHandleClient?: { x: number; y: number; radius: number };
   machines: MachineDebugState[];
   selectedMachine?: MachineDebugState;
   camera: {
@@ -158,6 +170,12 @@ async function placeAtCanvasCenter(
 test('ferramentas da hotbar só posicionam por arraste', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
+  await expect(page.locator('[data-tool]')).toHaveCount(7);
+  await expect(page.locator('[data-palette-conveyor-speed-option]')).toHaveCount(0);
+  const slowConveyorTool = page.locator('[data-tool="slow-conveyor"]');
+  await slowConveyorTool.hover();
+  await expect(slowConveyorTool.locator('.tool-tooltip')).toContainText('Esteira lenta');
+  await expect(slowConveyorTool.locator('.tool-tooltip')).toContainText('Sem custo');
 
   const before = await debugState(page);
   await expect(page.locator('[data-tool="spring"] .machine-thumbnail-spring path')).toHaveAttribute(
@@ -224,39 +242,60 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
   });
 
   const reverse = page.locator('[data-action="reverse"]');
-  const conveyorSpeed = page.locator('#conveyor-speed-control');
+  const selectionDock = page.locator('#selection-dock');
+  const expectContextOutsideSelection = async (
+    expectedPlacement?: 'left' | 'right',
+  ): Promise<void> => {
+    if (expectedPlacement) {
+      await expect(selectionDock).toHaveAttribute('data-placement', expectedPlacement);
+    }
+    await page.waitForTimeout(220);
+    const contextBounds = await selectionDock.boundingBox();
+    const state = await debugState(page);
+    const selectedBounds = state.selectionClientBounds;
+    const railBounds = await page.locator('.action-rail').boundingBox();
+    if (!contextBounds || !selectedBounds || !railBounds) {
+      throw new Error('Selection controls have no bounds');
+    }
+    expect(contextBounds.x).toBeGreaterThanOrEqual(16);
+    expect(contextBounds.y).toBeGreaterThanOrEqual(96);
+    expect(contextBounds.x + contextBounds.width).toBeLessThanOrEqual(railBounds.x - 12);
+    expect(
+      !(
+        contextBounds.x + contextBounds.width <= selectedBounds.left ||
+        contextBounds.x >= selectedBounds.right ||
+        contextBounds.y + contextBounds.height <= selectedBounds.top ||
+        contextBounds.y >= selectedBounds.bottom
+      ),
+    ).toBe(false);
+    if (expectedPlacement === 'left') {
+      expect(selectedBounds.left - (contextBounds.x + contextBounds.width)).toBeGreaterThanOrEqual(
+        16,
+      );
+    }
+    if (expectedPlacement === 'right') {
+      expect(contextBounds.x - selectedBounds.right).toBeGreaterThanOrEqual(40);
+    }
+    const rotationHandle = state.selectionRotationHandleClient;
+    if (rotationHandle) {
+      const closestX = Math.max(
+        contextBounds.x,
+        Math.min(rotationHandle.x, contextBounds.x + contextBounds.width),
+      );
+      const closestY = Math.max(
+        contextBounds.y,
+        Math.min(rotationHandle.y, contextBounds.y + contextBounds.height),
+      );
+      expect(Math.hypot(rotationHandle.x - closestX, rotationHandle.y - closestY)).toBeGreaterThanOrEqual(
+        rotationHandle.radius + 7,
+      );
+    }
+  };
   await expect(reverse).not.toHaveClass(/is-hidden/);
-  await expect(conveyorSpeed).toBeVisible();
-  await expect(page.locator('#selection-dock #conveyor-speed-control')).toHaveCount(0);
-  await expect(conveyorSpeed).toHaveAttribute('data-placement', 'bottom');
-  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
-    'aria-checked',
-    'true',
-  );
+  await expect(page.locator('#conveyor-speed-control')).toHaveCount(0);
   await expect(page.locator('[data-action="mirror-horizontal"]')).toHaveCount(0);
   await expect(page.locator('[data-action="mirror-vertical"]')).toHaveCount(0);
-
-  for (const [label, expected] of [
-    ['Velocidade 1', 'slow'],
-    ['Velocidade 2', 'normal'],
-    ['Velocidade 3', 'fast'],
-  ] as const) {
-    const option = page.getByRole('radio', { name: label });
-    await option.click();
-    await expect(option).toHaveAttribute('aria-checked', 'true');
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          (id) =>
-            (window as DebugWindow).__FACTORY_DEBUG__
-              ?.getMachines()
-              .find((candidate) => candidate.id === id)?.conveyorSpeed,
-          conveyorId,
-        ),
-      )
-      .toBe(expected);
-    await expect(reverse).not.toHaveClass(/is-hidden/);
-  }
+  await expectContextOutsideSelection('left');
 
   await reverse.click();
   await expect
@@ -272,22 +311,37 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.rotateSelected(90)) throw new Error('Could not rotate handle to the right');
+  });
+  await expectContextOutsideSelection('left');
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.rotateSelected(270)) throw new Error('Could not rotate handle to the left');
+  });
+  await expectContextOutsideSelection('right');
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug?.placeMachine('tracked-conveyor', 8, 14, 0)) {
       throw new Error('Could not place conveyor above the action dock');
     }
   });
-  await expect(conveyorSpeed).toHaveAttribute('data-placement', 'top');
-  const speedBounds = await conveyorSpeed.boundingBox();
-  const selectionDockBounds = await page.locator('#selection-dock').boundingBox();
-  if (!speedBounds || !selectionDockBounds) throw new Error('Selection controls have no bounds');
-  expect(speedBounds.y + speedBounds.height).toBeLessThanOrEqual(selectionDockBounds.y - 8);
+  await expectContextOutsideSelection();
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug?.placeMachine('spring', 12, 6, 0)) throw new Error('Could not place spring');
   });
   await expect(reverse).toHaveClass(/is-hidden/);
-  await expect(conveyorSpeed).not.toBeVisible();
+  await expectContextOutsideSelection();
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.placeMachine('spring', 1, 10, 0)) {
+      throw new Error('Could not place spring near the left edge');
+    }
+  });
+  await expectContextOutsideSelection('right');
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
@@ -297,72 +351,124 @@ test('inverte uma única esteira e oculta a ação para outros itens e grupos', 
     }
   });
   await expect(reverse).toHaveClass(/is-hidden/);
+  await expectContextOutsideSelection();
 });
 
-test('novas esteiras herdam a última velocidade somente dentro da fase atual', async ({ page }) => {
+test('setas movem seleções e Shift com setas gira conforme a grade', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
-  await page.evaluate(() => {
+  const springId = await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug?.placeMachine('tracked-conveyor', 6, 6, 0)) {
-      throw new Error('Could not place the first conveyor');
+    if (
+      !debug?.placeMachine('spring', 10, 8, 0) ||
+      !debug.placeMachine('tracked-conveyor', 14, 8, 0)
+    ) {
+      throw new Error('Could not place keyboard-control test machines');
     }
+    const spring = debug.getMachines().find(({ type }) => type === 'spring');
+    if (!spring || !debug.selectMachine(spring.id)) {
+      throw new Error('Could not select spring');
+    }
+    return spring.id;
   });
-  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
-    'aria-checked',
-    'true',
+
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Shift+ArrowRight');
+  await expect
+    .poll(async () =>
+      (await debugState(page)).machines.find(({ id }) => id === springId),
+    )
+    .toMatchObject({ gridX: 10.25, gridY: 7.75, angle: 5 });
+
+  await page.keyboard.press('Shift+ArrowLeft');
+  await expect
+    .poll(async () =>
+      (await debugState(page)).machines.find(({ id }) => id === springId)?.angle,
+    )
+    .toBe(0);
+
+  const groupBefore = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug || debug.selectArea(9 * 48, 7 * 48, 16 * 48, 10 * 48) !== 2) {
+      throw new Error('Could not select keyboard-control group');
+    }
+    return debug.getMachines().map(({ id, gridY }) => ({ id, gridY }));
+  });
+  await page.keyboard.press('ArrowDown');
+  await expect
+    .poll(async () =>
+      (await debugState(page)).machines.map(({ id, gridY }) => ({ id, gridY })),
+    )
+    .toEqual(groupBefore.map(({ id, gridY }) => ({ id, gridY: gridY + 0.25 })));
+
+  await page.evaluate((id) => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug?.selectMachine(id)) throw new Error('Could not reselect spring');
+  }, springId);
+  await page.locator('[data-action="toggle-grid"]').click();
+  await expect.poll(async () => (await debugState(page)).gridEnabled).toBe(false);
+
+  const beforePixelNudge = (await debugState(page)).machines.find(({ id }) => id === springId)!;
+  await page.keyboard.press('ArrowLeft');
+  const afterPixelLeft = (await debugState(page)).machines.find(({ id }) => id === springId)!;
+  expect((beforePixelNudge.gridX - afterPixelLeft.gridX) * 48).toBeCloseTo(1, 8);
+  expect(afterPixelLeft.gridY).toBeCloseTo(beforePixelNudge.gridY, 8);
+
+  await page.keyboard.press('ArrowDown');
+  const afterPixelDown = (await debugState(page)).machines.find(({ id }) => id === springId)!;
+  expect((afterPixelDown.gridY - afterPixelLeft.gridY) * 48).toBeCloseTo(1, 8);
+
+  await page.keyboard.press('Shift+ArrowRight');
+  const afterPixelNudge = (await debugState(page)).machines.find(({ id }) => id === springId)!;
+  expect(afterPixelNudge.gridX).toBeCloseTo(afterPixelDown.gridX, 8);
+  expect(afterPixelNudge.gridY).toBeCloseTo(afterPixelDown.gridY, 8);
+  expect(afterPixelNudge.angle).toBe(1);
+
+  await page.keyboard.press('Control+z');
+  await expect
+    .poll(async () =>
+      (await debugState(page)).machines.find(({ id }) => id === springId)?.angle,
+    )
+    .toBe(0);
+});
+
+test('esteiras lenta, normal e rápida são objetos independentes', async ({ page }) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const machines = await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (
+      !debug?.placeMachine('slow-conveyor', 6, 6, 0) ||
+      !debug.placeMachine('tracked-conveyor', 10, 6, 0) ||
+      !debug.placeMachine('fast-conveyor', 14, 6, 0)
+    ) {
+      throw new Error('Could not place all conveyor objects');
+    }
+    return debug.getMachines();
+  });
+  expect(machines).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: 'slow-conveyor', conveyorSpeed: 'slow' }),
+      expect.objectContaining({ type: 'tracked-conveyor', conveyorSpeed: 'normal' }),
+      expect.objectContaining({ type: 'fast-conveyor', conveyorSpeed: 'fast' }),
+    ]),
   );
-
-  await page.getByRole('radio', { name: 'Velocidade 3' }).click();
-  await page.evaluate(() => {
-    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug?.placeMachine('tracked-conveyor', 10, 6, 0)) {
-      throw new Error('Could not place the fast conveyor');
-    }
-  });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          (window as DebugWindow).__FACTORY_DEBUG__?.getMachines().find(({ gridX }) => gridX === 10)
-            ?.conveyorSpeed,
-      ),
-    )
-    .toBe('fast');
-
-  await page.getByRole('radio', { name: 'Velocidade 1' }).click();
-  await page.evaluate(() => {
-    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug?.placeMachine('tracked-conveyor', 14, 6, 0)) {
-      throw new Error('Could not place the slow conveyor');
-    }
-  });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () =>
-          (window as DebugWindow).__FACTORY_DEBUG__?.getMachines().find(({ gridX }) => gridX === 14)
-            ?.conveyorSpeed,
-      ),
-    )
-    .toBe('slow');
-
-  await page.evaluate(() => {
-    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug) throw new Error('Factory debug API is unavailable');
-    debug.startMode('sandbox');
-    if (!debug.placeMachine('tracked-conveyor', 6, 6, 0)) {
-      throw new Error('Could not place the conveyor in the new phase');
-    }
-  });
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () => (window as DebugWindow).__FACTORY_DEBUG__?.getMachines()[0]?.conveyorSpeed,
-      ),
-    )
-    .toBe('normal');
+  await expect(page.locator('[data-tool="slow-conveyor"]')).toBeVisible();
+  await expect(page.locator('[data-tool="tracked-conveyor"]')).toBeVisible();
+  await expect(page.locator('[data-tool="fast-conveyor"]')).toBeVisible();
+  await expect(
+    page.locator('[data-tool="slow-conveyor"] .machine-thumbnail rect').first(),
+  ).toHaveAttribute('fill', '#d9eef9');
+  await expect(
+    page.locator('[data-tool="tracked-conveyor"] .machine-thumbnail rect').first(),
+  ).toHaveAttribute('fill', '#202a33');
+  await expect(
+    page.locator('[data-tool="fast-conveyor"] .machine-thumbnail rect').first(),
+  ).toHaveAttribute('fill', '#6b2032');
+  await expect(page.locator('[role="radiogroup"]')).toHaveCount(0);
 });
 
 test('bloqueia a interface até a cena do Phaser ficar pronta', async ({ page }) => {
@@ -997,8 +1103,9 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
     (bounds.height - 18 * 48 * camera.zoom) / 2 +
     (conveyor.gridY + 0.5) * 48 * camera.zoom;
   const shell = page.locator('.factory-app');
-  const buildDock = page.locator('.build-dock');
   const selectionDock = page.locator('#selection-dock');
+  await expect(page.locator('.build-dock')).toHaveCount(0);
+  await expect(page.locator('.build-palette')).toBeVisible();
   await expect(selectionDock).not.toHaveClass(/is-hidden/);
   const grabX = startX + 30 * camera.zoom;
   const grabY = startY + 6 * camera.zoom;
@@ -1006,7 +1113,7 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
   await page.mouse.down();
   await page.mouse.move(grabX + 24 * camera.zoom, grabY + 12 * camera.zoom, { steps: 8 });
   await expect(shell).toHaveClass(/is-dragging-object/);
-  await expect(buildDock).toHaveCSS('opacity', '0');
+  await expect(page.locator('.build-palette')).toHaveCSS('opacity', '0.35');
   await expect(selectionDock).toHaveCSS('opacity', '0');
   await page.mouse.up();
   await expect(shell).toHaveClass(/is-dragging-object/);
@@ -1024,7 +1131,7 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
     .poll(async () => (await debugState(page)).machines.find(({ id }) => id === conveyor.id)?.angle)
     .toBe(5);
 
-  await page.keyboard.press('r');
+  await page.locator('[data-action="reverse"]').click();
   await expect
     .poll(
       async () => (await debugState(page)).machines.find(({ id }) => id === conveyor.id)?.reversed,
@@ -1044,6 +1151,77 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
       async () => (await debugState(page)).machines.find(({ id }) => id === conveyor.id)?.reversed,
     )
     .toBe(true);
+});
+
+test('finaliza o arraste ao soltar sobre a interface e permite mover novamente', async ({
+  page,
+}) => {
+  await openApp(page);
+  await startSandbox(page);
+
+  const conveyor = await placeAtCanvasCenter(page, 'tracked-conveyor');
+  const canvasBounds = await page.locator('#game-container canvas').boundingBox();
+  const railBounds = await page.locator('.action-rail').boundingBox();
+  if (!canvasBounds || !railBounds) throw new Error('Canvas or side panel has no bounds');
+
+  const pointFor = async (machine: MachineDebugState) => {
+    const camera = (await debugState(page)).camera;
+    return {
+      x:
+        canvasBounds.x +
+        (canvasBounds.width - 30 * 48 * camera.zoom) / 2 +
+        (machine.gridX + 0.5) * 48 * camera.zoom,
+      y:
+        canvasBounds.y +
+        (canvasBounds.height - 18 * 48 * camera.zoom) / 2 +
+        (machine.gridY + 0.5) * 48 * camera.zoom,
+    };
+  };
+
+  const firstStart = await pointFor(conveyor);
+  await page.mouse.move(firstStart.x, firstStart.y);
+  await page.mouse.down();
+  await page.mouse.move(railBounds.x + 12, railBounds.y + railBounds.height * 0.58, {
+    steps: 12,
+  });
+  await page.mouse.up();
+
+  await expect(page.locator('.factory-app')).not.toHaveClass(/is-dragging-object/, {
+    timeout: 1_500,
+  });
+  const movedOnce = (await debugState(page)).machines.find(({ id }) => id === conveyor.id);
+  if (!movedOnce) throw new Error('Dragged conveyor was not found');
+  expect(
+    Math.hypot(movedOnce.gridX - conveyor.gridX, movedOnce.gridY - conveyor.gridY),
+  ).toBeGreaterThan(0.2);
+
+  const secondStart = await pointFor(movedOnce);
+  await page.mouse.move(secondStart.x, secondStart.y);
+  await page.mouse.down();
+  await page.mouse.move(canvasBounds.x - 24, canvasBounds.y - 24, { steps: 6 });
+  await page.mouse.up();
+  await expect(page.locator('.factory-app')).not.toHaveClass(/is-dragging-object/);
+  await expect
+    .poll(async () => {
+      const current = (await debugState(page)).machines.find(({ id }) => id === conveyor.id);
+      return current
+        ? Math.hypot(current.gridX - movedOnce.gridX, current.gridY - movedOnce.gridY)
+        : Number.POSITIVE_INFINITY;
+    })
+    .toBeLessThan(0.001);
+
+  await page.mouse.move(secondStart.x, secondStart.y);
+  await page.mouse.down();
+  await page.mouse.move(secondStart.x - 32, secondStart.y - 18, { steps: 6 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => {
+      const current = (await debugState(page)).machines.find(({ id }) => id === conveyor.id);
+      return current
+        ? Math.hypot(current.gridX - movedOnce.gridX, current.gridY - movedOnce.gridY)
+        : 0;
+    })
+    .toBeGreaterThan(0.2);
 });
 
 test('esteira física transporta caixas com os colisores móveis', async ({ page }) => {
@@ -1211,9 +1389,10 @@ test('copiar e recortar preservam a configuração da máquina selecionada', asy
   const selectionDock = page.locator('#selection-dock');
   await expect(selectionDock).not.toHaveClass(/is-hidden/);
   const selectionBounds = await selectionDock.boundingBox();
-  const buildDockBounds = await page.locator('.build-dock').boundingBox();
-  if (!selectionBounds || !buildDockBounds) throw new Error('Selection docks have no bounds');
-  expect(selectionBounds.y + selectionBounds.height).toBeLessThanOrEqual(buildDockBounds.y - 8);
+  const railBounds = await page.locator('.action-rail').boundingBox();
+  if (!selectionBounds || !railBounds) throw new Error('Selection controls have no bounds');
+  expect(selectionBounds.x + selectionBounds.width).toBeLessThanOrEqual(railBounds.x - 12);
+  await expect(page.locator('.build-dock')).toHaveCount(0);
   await page.locator('[data-action="copy"]').click();
   await expect(selectionDock).toHaveClass(/is-hidden/);
 
@@ -1519,8 +1698,7 @@ test('seleção não abre painel informativo e protege máquinas fixas', async (
 
 test('controle central oferece sete velocidades reais de simulação', async ({ page }) => {
   await openApp(page);
-  await openPlayMenu(page);
-  await page.locator('#contract-list .contract-card').nth(0).click();
+  await startSandbox(page);
 
   const speed = page.locator('[data-speed]');
   await expect(speed).toHaveAttribute('aria-valuetext', '1×');
@@ -1631,18 +1809,23 @@ test('pause preserva a simulação e retoma sem substituir o stop', async ({ pag
   await expect(runControl).toHaveAttribute('aria-label', 'Parar simulação');
   await expect(pauseControl).toBeVisible();
   await expect(pauseControl).toHaveAttribute('aria-label', 'Pausar simulação');
+  await expect(page.locator('.build-palette')).toBeHidden();
 
   await pauseControl.click();
   await expect.poll(async () => (await debugState(page)).status).toBe('paused');
   await expect(runControl).toHaveAttribute('aria-label', 'Parar simulação');
   await expect(pauseControl).toHaveAttribute('aria-label', 'Retomar simulação');
   await expect(pauseControl).toHaveClass(/is-resume/);
+  await expect(page.locator('.build-palette')).toBeHidden();
   await page.mouse.move(0, 0);
-  const resumeColors = await pauseControl.evaluate((button) => {
-    const style = getComputedStyle(button);
-    return { background: style.backgroundColor, foreground: style.color };
-  });
-  expect(resumeColors).toEqual(playColors);
+  await expect
+    .poll(() =>
+      pauseControl.evaluate((button) => {
+        const style = getComputedStyle(button);
+        return { background: style.backgroundColor, foreground: style.color };
+      }),
+    )
+    .toEqual(playColors);
   await pauseControl.hover();
   await expect
     .poll(() => pauseControl.evaluate((button) => getComputedStyle(button).backgroundColor))
@@ -1667,6 +1850,7 @@ test('pause preserva a simulação e retoma sem substituir o stop', async ({ pag
   await expect.poll(async () => (await debugState(page)).status).toBe('build');
   await expect(runControl).toHaveAttribute('aria-label', 'Iniciar simulação');
   await expect(pauseControl).toBeHidden();
+  await expect(page.locator('.build-palette')).toBeVisible();
 });
 
 test('menu de pausa oferece som, opções e salvamento automático ao sair', async ({ page }) => {
@@ -1835,13 +2019,17 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   const track = meter.locator('[data-budget-track]');
   await expect(meter).not.toHaveClass(/is-hidden/);
   await expect(meter.locator('[data-budget-spent]')).toHaveText('$0');
-  await expect(meter.locator('[data-budget-limit]')).toHaveText('$10,000');
+  await expect(meter.locator('[data-budget-limit]')).toHaveText('$8,000');
   await expect(track).toHaveAttribute('aria-valuenow', '0');
-  await expect(track).toHaveAttribute('aria-valuemax', '20000');
+  await expect(track).toHaveAttribute('aria-valuemax', '16000');
   await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
     'aria-label',
     /Custo \$2,500/,
   );
+  const conveyorTool = page.locator('[data-tool="tracked-conveyor"]');
+  await conveyorTool.hover();
+  await expect(conveyorTool.locator('.tool-tooltip')).toContainText('$2,500');
+  await expect(page.locator('[data-palette-conveyor-speed-option]')).toHaveCount(0);
   await expect(page.locator('[data-metric="time"], [data-result="time"]')).toHaveCount(0);
 
   await page.evaluate(() => {
@@ -1851,7 +2039,6 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
       [18, 4],
       [21, 4],
       [24, 4],
-      [27, 4],
     ] as const;
     for (const [gridX, gridY] of positions) {
       if (!debug.placeMachine('tracked-conveyor', gridX, gridY)) {
@@ -1860,16 +2047,16 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
     }
   });
 
-  await expect(meter.locator('[data-budget-spent]')).toHaveText('$10,000');
+  await expect(meter.locator('[data-budget-spent]')).toHaveText('$7,500');
   await expect(meter).not.toHaveClass(/is-over-budget/);
-  await expect(track).toHaveAttribute('aria-valuenow', '10000');
+  await expect(track).toHaveAttribute('aria-valuenow', '7500');
   await expect
     .poll(() =>
       meter
         .locator('[data-budget-fill]')
         .evaluate((fill) => (fill as HTMLElement).style.getPropertyValue('--budget-fill')),
     )
-    .toBe('100%');
+    .toBe('93.75%');
   await expect(meter.locator('[data-budget-fill]')).toHaveCSS(
     'background-color',
     'rgb(37, 196, 66)',
@@ -1885,55 +2072,60 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   });
   expect(lastMachineId).toBeTruthy();
 
-  await expect(meter.locator('[data-budget-spent]')).toHaveText('$12,500');
+  await expect(meter.locator('[data-budget-spent]')).toHaveText('$10,000');
   await expect(meter).toHaveClass(/is-over-budget/);
-  await expect(track).toHaveAttribute('aria-valuenow', '12500');
-  await expect(track).toHaveAttribute('aria-valuetext', '$12,500 gastos de $10,000 de orçamento');
-
-  await page.evaluate((machineId) => {
-    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug || !machineId || !debug.selectMachine(machineId)) {
-      throw new Error('Could not select the conveyor to adjust its cost');
-    }
-  }, lastMachineId);
-  for (const [label, expectedSpent] of [
-    ['Velocidade 1', '$12,000'],
-    ['Velocidade 3', '$13,000'],
-    ['Velocidade 2', '$12,500'],
-  ] as const) {
-    await page.getByRole('radio', { name: label }).click();
-    await expect(meter.locator('[data-budget-spent]')).toHaveText(expectedSpent);
-  }
+  await expect(track).toHaveAttribute('aria-valuenow', '10000');
+  await expect(track).toHaveAttribute('aria-valuetext', '$10,000 gastos de $8,000 de orçamento');
+  const costFeedback = page.locator('.cost-feedback').last();
+  await expect(costFeedback).toHaveText('$2,500');
+  await expect(costFeedback).toHaveCSS('color', 'rgb(49, 183, 99)');
+  await expect(page.locator('#conveyor-speed-control')).toHaveCount(0);
 
   await page.evaluate(() => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug) throw new Error('Factory debug API is unavailable');
     debug.completeContract();
   });
-  await expect.poll(async () => (await debugState(page)).status).toBe('running');
-  await expect(page.locator('#result-modal')).toHaveClass(/is-hidden/);
-  await expect(page.locator('#toast')).toContainText('o orçamento foi ultrapassado');
+  await expect.poll(async () => (await debugState(page)).status).toBe('failure');
+  await expect.poll(async () => (await debugState(page)).resolutionReason).toBe('budget');
+  await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('.result-card')).toHaveClass(/is-failure/);
+  await expect(page.locator('#result-title')).toHaveCSS('color', 'rgb(202, 79, 72)');
+  await expect(page.locator('.build-palette')).toBeHidden();
+  await expect(page.locator('[data-result="delivered"] strong')).toHaveText('8 / 8');
+  await expect(page.locator('[data-result="collected-stars"] strong')).toHaveText('0 / 1');
+  await expect(page.locator('[data-result="lost"] strong')).toHaveText('0');
+  await expect(page.locator('#result-summary')).toContainText('orçamento foi ultrapassado');
+  await expect(page.locator('#toast')).toBeEmpty();
+  await expect(page.locator('[data-result="budget"]')).toHaveClass(/is-failure-cause/);
+  await expect(page.locator('[data-result="lost"]')).not.toHaveClass(/is-failure-cause/);
+  await expect(page.locator('[data-result="budget"]')).toHaveCSS(
+    'animation-name',
+    'result-failure-cause-pulse',
+  );
 
+  await page.locator('[data-action="replay"]').click();
   await page.evaluate((machineId) => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
     if (!debug || !machineId) throw new Error('Factory debug API is unavailable');
-    debug.pause();
     if (!debug.selectMachine(machineId) || !debug.deleteSelected()) {
       throw new Error('Could not refund the last conveyor');
     }
-    debug.advance(1 / 60);
+    debug.completeContract();
   }, lastMachineId);
 
   await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
   await expect(page.locator('.result-card')).toHaveClass(/is-success/);
+  await expect(page.locator('.build-palette')).toBeHidden();
   await expect(page.locator('#result-kicker')).toHaveText('FASE 1-1');
   await expect(page.locator('#result-title')).toHaveText('Contrato concluído');
+  await expect(page.locator('#result-title')).toHaveCSS('color', 'rgb(63, 146, 114)');
   await expect(page.locator('.result-status-badge')).toHaveCount(0);
   await expect(page.locator('[data-result="delivered"] strong')).toHaveText('8 / 8');
-  await expect(page.locator('[data-result="collected-stars"] strong')).toHaveText('1 / 1');
-  await expect(page.locator('[data-result="budget"] strong')).toHaveText('$10,000 / $10,000');
-  await expect(page.locator('[data-result-budget-percent]')).toHaveText('100%');
-  await expect(page.locator('[data-result-budget-track]')).toHaveAttribute('aria-valuenow', '100');
+  await expect(page.locator('[data-result="collected-stars"] strong')).toHaveText('0 / 1');
+  await expect(page.locator('[data-result="budget"] strong')).toHaveText('$7,500 / $8,000');
+  await expect(page.locator('[data-result-budget-percent]')).toHaveText('94%');
+  await expect(page.locator('[data-result-budget-track]')).toHaveAttribute('aria-valuenow', '94');
   const resultMetricStyles = await page.evaluate(() => {
     const coin = document.querySelector<HTMLElement>('.result-metric-budget .result-metric-icon')!;
     const budgetFill = document.querySelector<HTMLElement>('[data-result-budget-fill]')!;
@@ -1973,6 +2165,54 @@ test('exibe o orçamento e só conclui a meta dentro do limite nominal', async (
   expect(resultLayout.actionTops[2]).toBeGreaterThan(resultLayout.actionTops[1]!);
 });
 
+test('destaca perdas e omite a barra quando o limite configurado é zero', async ({ page }) => {
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.advance(30);
+  });
+
+  await expect.poll(async () => (await debugState(page)).resolutionReason).toBe('losses');
+  await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-result="lost"] strong')).toHaveText('1');
+  await expect(page.locator('[data-result="lost"]')).toHaveClass(/is-failure-cause/);
+  await expect(page.locator('[data-result="budget"]')).not.toHaveClass(/is-failure-cause/);
+  await expect(page.locator('[data-result="lost"]')).toHaveCSS(
+    'animation-name',
+    'result-failure-cause-pulse',
+  );
+  await expect(page.locator('#toast')).toBeEmpty();
+});
+
+test('mantém a proporção de perdas quando existe um limite maior que zero', async ({ page }) => {
+  await page.route('**/data/contracts.json', async (route) => {
+    const response = await route.fetch();
+    const catalog = (await response.json()) as {
+      contracts: Array<{ id: string; goal: { maxLosses?: number } }>;
+    };
+    const contract = catalog.contracts.find(({ id }) => id === 'assembly-line');
+    if (!contract) throw new Error('Assembly line contract was not found');
+    contract.goal.maxLosses = 2;
+    await route.fulfill({ response, json: catalog });
+  });
+
+  await openApp(page);
+  await openPlayMenu(page);
+  await page.locator('#contract-list .contract-card').first().click();
+  await page.evaluate(() => {
+    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API is unavailable');
+    debug.completeContract();
+  });
+
+  await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
+  await expect(page.locator('[data-result="lost"] strong')).toHaveText('0 / 2');
+});
+
 test('trava novas máquinas no dobro do orçamento e libera verba ao excluir', async ({ page }) => {
   await openApp(page);
   await openPlayMenu(page);
@@ -1988,8 +2228,6 @@ test('trava novas máquinas no dobro do orçamento e libera verba ao excluir', a
       [27, 4],
       [18, 8],
       [21, 8],
-      [24, 8],
-      [27, 8],
     ] as const;
     const accepted = positions.map(([gridX, gridY]) =>
       debug.placeMachine('tracked-conveyor', gridX, gridY),
@@ -2002,32 +2240,21 @@ test('trava novas máquinas no dobro do orçamento e libera verba ao excluir', a
     return { accepted, lastId, rejectedAtDouble, snapshot: debug.getSnapshot() };
   });
 
-  expect(placement.accepted).toEqual(Array(8).fill(true));
+  expect(placement.accepted).toEqual(Array(6).fill(true));
   expect(placement.rejectedAtDouble).toBe(false);
-  expect(placement.snapshot.metrics.spent).toBe(20_000);
+  expect(placement.snapshot.metrics.spent).toBe(15_000);
   expect(placement.snapshot.economy).toMatchObject({
-    spent: 20_000,
-    budgetLimit: 10_000,
-    hardLimit: 20_000,
+    spent: 15_000,
+    budgetLimit: 8_000,
+    hardLimit: 16_000,
   });
-  await expect(page.locator('#budget-meter')).toHaveClass(/is-at-hard-limit/);
-  await expect(page.locator('[data-budget-spent]')).toHaveText('$20,000');
+  await expect(page.locator('[data-budget-spent]')).toHaveText('$15,000');
   await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
     'aria-disabled',
     'true',
   );
-  await page.evaluate((machineId) => {
-    const debug = (window as DebugWindow).__FACTORY_DEBUG__;
-    if (!debug || !machineId || !debug.selectMachine(machineId)) {
-      throw new Error('Could not select a conveyor at the hard limit');
-    }
-  }, placement.lastId);
-  await page.getByRole('radio', { name: 'Velocidade 3' }).click();
-  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(20_000);
-  await expect(page.getByRole('radio', { name: 'Velocidade 2' })).toHaveAttribute(
-    'aria-checked',
-    'true',
-  );
+  await expect(page.locator('#conveyor-speed-control')).toHaveCount(0);
+  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(15_000);
 
   const replacementAccepted = await page.evaluate((machineId) => {
     const debug = (window as DebugWindow).__FACTORY_DEBUG__;
@@ -2039,7 +2266,7 @@ test('trava novas máquinas no dobro do orçamento e libera verba ao excluir', a
   }, placement.lastId);
 
   expect(replacementAccepted).toBe(true);
-  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(20_000);
+  await expect.poll(async () => (await debugState(page)).metrics.spent).toBe(15_000);
 });
 
 test('oculta orçamento sem limite e omite estrelas e perdas do HUD', async ({ page }) => {
@@ -2092,12 +2319,13 @@ test('oculta orçamento sem limite e omite estrelas e perdas do HUD', async ({ p
 
   expect(placement.accepted).toEqual(Array(12).fill(true));
   expect(placement.snapshot.metrics.spent).toBe(30_000);
-  expect(placement.snapshot.economy).toEqual({
+  expect(placement.snapshot.economy).toMatchObject({
     spent: 30_000,
     machineCosts: {
       'tracked-conveyor': 2_500,
       spring: 5_000,
     },
+    conveyorSpeedCosts: { slow: 2_000, normal: 2_500, fast: 3_000 },
   });
   await expect(page.locator('[data-tool="tracked-conveyor"]')).toHaveAttribute(
     'aria-disabled',
@@ -2138,19 +2366,30 @@ test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ pa
   if (!placed) throw new Error('Máquina arrastada não foi encontrada');
   expect(placed.type).toBe('spring');
   await expect.poll(async () => (await debugState(page)).selectedMachine?.id).toBe(placed.id);
+  await expect(page.locator('.build-palette')).toBeVisible();
+  const buildRailWidth = await page
+    .locator('.action-rail')
+    .evaluate((rail) => rail.getBoundingClientRect().width);
+  expect(buildRailWidth).toBeCloseTo(64, 0);
 
   await page.locator('[data-action="run"]').click();
 
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
   await expect.poll(async () => (await debugState(page)).selectedMachine).toBeUndefined();
+  await expect(page.locator('.build-palette')).toBeHidden();
+  await expect(page.locator('.action-rail')).toHaveCSS('width', '64px');
   await expect
     .poll(async () =>
       page.evaluate(() => (window as DebugWindow).__FACTORY_DEBUG__?.getSimulationSeconds() ?? 0),
     )
     .toBeGreaterThan(0);
+
+  await page.locator('[data-action="run"]').click();
+  await expect.poll(async () => (await debugState(page)).status).toBe('build');
+  await expect(page.locator('.build-palette')).toBeVisible();
 });
 
-test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
+test('câmera faz pan e limita o zoom entre 50% e 200%', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
@@ -2176,13 +2415,13 @@ test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
 
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   for (let index = 0; index < 20; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, -900);
   await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(2, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
 
   const beforeResize = (await debugState(page)).camera;
   await page.setViewportSize({ width: 1920, height: 1080 });
@@ -2200,7 +2439,7 @@ test('câmera faz pan e limita o zoom entre 100% e 200%', async ({ page }) => {
     .toBeLessThan(0.05);
   await page.mouse.move(960, 540);
   for (let index = 0; index < 20; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(1, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
 });
 
 test('repetir retorna à construção sem iniciar outra simulação', async ({ page }) => {
@@ -2229,6 +2468,22 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
   test.setTimeout(45_000);
   await openApp(page);
   await openPlayMenu(page);
+  const campaignContracts = await page.evaluate(async () => {
+    const response = await fetch('/data/contracts.json');
+    const catalog = (await response.json()) as {
+      contracts: Array<{
+        id: string;
+        revision: number;
+        economy: { budgetLimit?: number };
+      }>;
+    };
+    return catalog.contracts.slice(0, 3).map(({ id, revision, economy }) => ({
+      id,
+      revision,
+      budgetLimit: economy.budgetLimit,
+    }));
+  });
+  expect(campaignContracts).toHaveLength(3);
 
   for (const contractIndex of [0, 1, 2]) {
     if (contractIndex === 0) {
@@ -2246,8 +2501,11 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
       debug.completeContract();
     });
     await expect(page.locator('#result-modal')).not.toHaveClass(/is-hidden/);
+    const budgetLimit = campaignContracts[contractIndex]!.budgetLimit;
     await expect(page.locator('[data-result="budget"] strong')).toHaveText(
-      `$0 / $${[10_000, 15_000, 20_000][contractIndex]!.toLocaleString('en-US')}`,
+      budgetLimit === undefined
+        ? '$0 / Sem limite'
+        : `$0 / $${budgetLimit.toLocaleString('en-US')}`,
     );
 
     if (contractIndex < 2) {
@@ -2271,13 +2529,11 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
   expect(storedProgress.version).toBe(5);
   expect(storedProgress.unlockedContracts).toHaveLength(4);
   expect(storedProgress.unlockedContracts).toEqual(
-    expect.arrayContaining(['assembly-line', 'quality-curve', 'first-jump']),
+    expect.arrayContaining(campaignContracts.map(({ id }) => id)),
   );
-  expect(storedProgress.completedContracts).toEqual({
-    'assembly-line': 3,
-    'quality-curve': 4,
-    'first-jump': 5,
-  });
+  expect(storedProgress.completedContracts).toEqual(
+    Object.fromEntries(campaignContracts.map(({ id, revision }) => [id, revision])),
+  );
 
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
@@ -2298,8 +2554,7 @@ test('restaura o layout persistido do sandbox e migra a esteira antiga', async (
     reversed: true,
     fixed: false,
   };
-  await openApp(page);
-  await page.evaluate(
+  await page.addInitScript(
     ({ key, machine }) => {
       localStorage.setItem(
         key,
@@ -2314,9 +2569,7 @@ test('restaura o layout persistido do sandbox e migra a esteira antiga', async (
     },
     { key: STORAGE_KEY, machine: legacySandboxMachine },
   );
-  await page.reload();
-  await expect(page.locator('#menu-title')).toBeVisible();
-  await page.waitForFunction(() => Boolean((window as DebugWindow).__FACTORY_DEBUG__));
+  await openApp(page);
   await startSandbox(page);
 
   await expect

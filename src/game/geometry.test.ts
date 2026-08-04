@@ -46,6 +46,12 @@ describe('geometria das máquinas', () => {
     expect(MACHINE_PHYSICS_DIMENSIONS['tracked-conveyor']).toEqual(
       MACHINE_PHYSICS_DIMENSIONS.conveyor,
     );
+    expect(MACHINE_PHYSICS_DIMENSIONS['slow-conveyor']).toEqual(
+      MACHINE_PHYSICS_DIMENSIONS.conveyor,
+    );
+    expect(MACHINE_PHYSICS_DIMENSIONS['fast-conveyor']).toEqual(
+      MACHINE_PHYSICS_DIMENSIONS.conveyor,
+    );
     expect(MACHINE_PHYSICS_DIMENSIONS.spring).toEqual(MACHINE_DIMENSIONS.spring);
   });
 

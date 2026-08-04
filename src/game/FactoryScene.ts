@@ -3,7 +3,12 @@ import Phaser from 'phaser';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import { appEvents } from '../core/events';
 import { getContract, SANDBOX_DEFINITION } from '../domain/contracts';
-import { resolveConveyorSpeedCosts } from '../domain/economy';
+import {
+  canonicalMachineType,
+  conveyorCostForMachineType,
+  conveyorSpeedForMachineType,
+  isConveyorMachineType,
+} from '../domain/economy';
 import { CommandHistory, createSnapshotCommand } from '../domain/history';
 import { evaluateRun } from '../domain/rules';
 import {
@@ -15,6 +20,7 @@ import {
   PLAY_AREA_MAX_ROW,
   PLAY_AREA_MIN_COLUMN,
   PLAY_AREA_MIN_ROW,
+  type CampaignWorldDefinition,
   type ContractCamera,
   type ContractDefinition,
   type ContractId,
@@ -66,7 +72,7 @@ const PLAY_AREA_MIN_Y = PLAY_AREA_MIN_ROW * CELL_SIZE;
 const PLAY_AREA_MAX_Y = PLAY_AREA_MAX_ROW * CELL_SIZE;
 const PLAY_AREA_WIDTH = PLAY_AREA_MAX_X - PLAY_AREA_MIN_X;
 const PLAY_AREA_HEIGHT = PLAY_AREA_MAX_Y - PLAY_AREA_MIN_Y;
-const MIN_ZOOM = 1;
+const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 const GRID_ROTATION_STEP = 5;
 const GRID_POSITION_STEP = 0.25;
@@ -129,6 +135,14 @@ const COLORS = {
   starLight: 0xfff2a6,
   starDark: 0xc97819,
 } as const;
+
+function hexColorNumber(value: string, fallback: number): number {
+  return /^#[0-9a-f]{6}$/i.test(value) ? Number.parseInt(value.slice(1), 16) : fallback;
+}
+
+function colorNumberToHex(value: number): string {
+  return `#${value.toString(16).padStart(6, '0')}`;
+}
 
 interface PhysicsMachine {
   machine: MachineState;
@@ -265,6 +279,7 @@ interface InvalidEntityFlash {
 
 export interface FactoryDebugApi {
   getSnapshot(): GameSnapshot;
+  getBoardTheme(): { backgroundColor: string; gridColor: string };
   getSimulationSeconds(): number;
   getMachines(): MachineState[];
   getObstacles(): ObstacleDefinition[];
@@ -348,12 +363,12 @@ function cloneEditorDocument(document: EditorDocument): EditorDocument {
   };
 }
 
-function activeMachineType(type: MachineType): MachineType {
-  return type === 'conveyor' ? 'tracked-conveyor' : type;
+function activeMachineType(type: MachineType, legacySpeed?: ConveyorSpeed): MachineType {
+  return canonicalMachineType(type, legacySpeed);
 }
 
 function isConveyorType(type: MachineType): boolean {
-  return type === 'conveyor' || type === 'tracked-conveyor';
+  return isConveyorMachineType(type);
 }
 
 function isSpringType(type: MachineType): boolean {
@@ -371,7 +386,7 @@ function entityIndexFromValidationPath(
 }
 
 function conveyorSpeed(machine: Pick<MachineState, 'type' | 'conveyorSpeed'>): ConveyorSpeed {
-  return isConveyorType(machine.type) ? (machine.conveyorSpeed ?? 'normal') : 'normal';
+  return conveyorSpeedForMachineType(machine.type, machine.conveyorSpeed ?? 'normal');
 }
 
 function conveyorSpeedMultiplier(machine: Pick<MachineState, 'type' | 'conveyorSpeed'>): number {
@@ -379,7 +394,7 @@ function conveyorSpeedMultiplier(machine: Pick<MachineState, 'type' | 'conveyorS
 }
 
 function normalizeAvailableMachineTypes(types: readonly MachineType[]): MachineType[] {
-  return [...new Set(types.map(activeMachineType))];
+  return [...new Set(types.map((type) => activeMachineType(type)))];
 }
 
 function cloneContract(contract: ContractDefinition): ContractDefinition {
@@ -396,10 +411,16 @@ function cloneContract(contract: ContractDefinition): ContractDefinition {
     },
     initialCamera: { ...contract.initialCamera },
     availableMachines: normalizeAvailableMachineTypes(contract.availableMachines),
-    fixedMachines: cloneMachines(contract.fixedMachines).map((machine) => ({
-      ...machine,
-      type: activeMachineType(machine.type),
-    })),
+    fixedMachines: cloneMachines(contract.fixedMachines).map((machine) => {
+      const type = activeMachineType(machine.type, machine.conveyorSpeed);
+      return {
+        ...machine,
+        type,
+        conveyorSpeed: isConveyorType(type)
+          ? conveyorSpeedForMachineType(type, machine.conveyorSpeed ?? 'normal')
+          : undefined,
+      };
+    }),
     obstacles: cloneObstacles(contract.obstacles),
     collectibles: cloneCollectibles(contract.collectibles ?? []),
   };
@@ -616,6 +637,12 @@ export class FactoryScene extends Phaser.Scene {
   private effectsGraphics!: Phaser.GameObjects.Graphics;
   private overlayGraphics!: Phaser.GameObjects.Graphics;
 
+  private boardColor: number = COLORS.board;
+  private gridColor: number = COLORS.grid;
+  private gridStrongColor: number = COLORS.gridStrong;
+  private gridAlpha = 0.9;
+  private gridStrongAlpha = 0.9;
+
   private mode: GameMode = 'sandbox';
   private contract?: ContractDefinition;
   private machines: MachineState[] = [];
@@ -665,7 +692,6 @@ export class FactoryScene extends Phaser.Scene {
   private muted = false;
   private gridEnabled = true;
   private simulationSpeed = 1;
-  private preferredConveyorSpeed: ConveyorSpeed = 'normal';
   private spawnAccumulator = 0;
   private physicsAccumulator = 0;
   private simulationTimeMs = 0;
@@ -674,10 +700,11 @@ export class FactoryScene extends Phaser.Scene {
   private lastIdleRenderSignature = '';
   private machineSequence = 0;
   private boxSequence = 0;
-  private budgetCompletionWarningShown = false;
+  private resolutionReason?: NonNullable<GameSnapshot['resolutionReason']>;
   private lastGridZoom = -1;
   private currentCamera?: ContractCamera;
   private contextMenuHandler?: (event: MouseEvent) => void;
+  private windowBlurHandler?: () => void;
 
   private get selectedMachineId(): string | undefined {
     return this.selectedMachineIds.values().next().value;
@@ -792,6 +819,7 @@ export class FactoryScene extends Phaser.Scene {
     contractId?: ContractId,
     restoredMachines?: readonly MachineState[],
     contractDefinition?: ContractDefinition,
+    worldTheme?: CampaignWorldDefinition,
   ): void {
     this.editorActive = false;
     this.editorPreview = false;
@@ -800,6 +828,7 @@ export class FactoryScene extends Phaser.Scene {
     this.editorBaseline = '';
     this.editorPersistenceLocked = false;
     this.mode = mode;
+    this.applyWorldTheme(mode === 'campaign' ? worldTheme : undefined);
     if (mode === 'campaign' && !contractDefinition && !contractId) {
       throw new Error('Uma fase deve ser informada para iniciar o modo campanha.');
     }
@@ -829,7 +858,6 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostObstacle = undefined;
     this.ghostCollectible = undefined;
     this.simulationSpeed = 1;
-    this.preferredConveyorSpeed = 'normal';
     this.history.clear();
     this.editorHistory.clear();
     this.resetSimulation('build');
@@ -842,8 +870,13 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   /** Opens a contract as an editable, fixed scenario. No campaign result is emitted in this mode. */
-  public startEditor(contract: ContractDefinition, isNew = false): void {
+  public startEditor(
+    contract: ContractDefinition,
+    isNew = false,
+    worldTheme?: CampaignWorldDefinition,
+  ): void {
     const draft = cloneContract(contract);
+    this.applyWorldTheme(worldTheme);
     this.invalidEntityFlash = undefined;
     this.editorHitboxesVisible = false;
     this.mode = 'editor';
@@ -853,7 +886,15 @@ export class FactoryScene extends Phaser.Scene {
     this.editorContract = draft;
     this.editorPersistenceLocked = false;
     this.contract = draft;
-    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring', 'turbo-spring'];
+    this.availableMachines = [
+      'source',
+      'receiver',
+      'slow-conveyor',
+      'tracked-conveyor',
+      'fast-conveyor',
+      'spring',
+      'turbo-spring',
+    ];
     this.obstacles = this.normalizeObstacles(draft.obstacles);
     this.collectibles = this.normalizeCollectibles(draft.collectibles ?? []);
     this.machines = this.normalizeMachineIds(
@@ -871,7 +912,6 @@ export class FactoryScene extends Phaser.Scene {
     this.ghostCollectible = undefined;
     this.setDragState(undefined);
     this.simulationSpeed = 1;
-    this.preferredConveyorSpeed = 'normal';
     this.history.clear();
     this.editorHistory.clear();
     this.resetSimulation('build');
@@ -963,7 +1003,15 @@ export class FactoryScene extends Phaser.Scene {
     this.mode = 'editor';
     this.editorContract = cloneContract(state.contract);
     this.contract = this.editorContract;
-    this.availableMachines = ['source', 'receiver', 'tracked-conveyor', 'spring', 'turbo-spring'];
+    this.availableMachines = [
+      'source',
+      'receiver',
+      'slow-conveyor',
+      'tracked-conveyor',
+      'fast-conveyor',
+      'spring',
+      'turbo-spring',
+    ];
     this.applyEditorDocument(state.document, false);
     this.clearClipboard();
     this.selectedTool = undefined;
@@ -1109,7 +1157,7 @@ export class FactoryScene extends Phaser.Scene {
       gridY: this.isAuthoring() ? snapToGrid(gridY, GRID_POSITION_STEP) : gridY,
       angle: normalizeAngle(angle),
       reversed: false,
-      conveyorSpeed: isConveyorType(type) ? this.preferredConveyorSpeed : undefined,
+      conveyorSpeed: isConveyorType(type) ? conveyorSpeedForMachineType(type) : undefined,
       fixed: this.isAuthoring(),
     };
     if (!this.canAffordMachines([machine])) {
@@ -1131,6 +1179,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedTool = undefined;
     this.selectedEditorTool = undefined;
     this.audio('place');
+    this.emitMachineCostFeedback([machine]);
     this.emitSnapshot();
     this.emitEditorChanged();
     return true;
@@ -1168,7 +1217,7 @@ export class FactoryScene extends Phaser.Scene {
     if (
       !selected ||
       !this.canEditMachine(selected) ||
-      (selected.type !== 'conveyor' && selected.type !== 'tracked-conveyor')
+      !isConveyorType(selected.type)
     ) {
       this.toast('Selecione uma esteira para inverter.', 'neutral');
       return false;
@@ -1178,37 +1227,6 @@ export class FactoryScene extends Phaser.Scene {
       { ...selected, reversed: !selected.reversed },
       'Inverter esteira',
     );
-    this.audio('place');
-    this.emitEditorChanged();
-    return true;
-  }
-
-  public setSelectedConveyorSpeed(speed: ConveyorSpeed): boolean {
-    if (!this.canBuild() || this.selectionCount() !== 1) return false;
-    const selected = this.getSelectedMachine();
-    if (!selected || !this.canEditMachine(selected) || !isConveyorType(selected.type)) {
-      return false;
-    }
-    if (conveyorSpeed(selected) === speed) {
-      this.preferredConveyorSpeed = speed;
-      return true;
-    }
-    const candidate = { ...selected, conveyorSpeed: speed };
-    const nextMachines = this.machines.map((machine) =>
-      machine.id === selected.id ? candidate : machine,
-    );
-    const budgetLimit = this.getBudgetLimit();
-    if (
-      !this.isAuthoring() &&
-      budgetLimit !== undefined &&
-      this.calculateSpentBudget(nextMachines) > budgetLimit * 2
-    ) {
-      this.toast('Esse nível de velocidade ultrapassa o limite máximo do orçamento.', 'danger');
-      this.audio('error');
-      return false;
-    }
-    this.replaceMachineWithHistory(selected, candidate, 'Ajustar velocidade da esteira');
-    this.preferredConveyorSpeed = speed;
     this.audio('place');
     this.emitEditorChanged();
     return true;
@@ -1581,6 +1599,7 @@ export class FactoryScene extends Phaser.Scene {
     for (const obstacle of obstacles) this.selectedObstacleIds.add(obstacle.id);
     for (const collectible of collectibles) this.selectedCollectibleIds.add(collectible.id);
     this.audio('place');
+    this.emitMachineCostFeedback(machines);
     this.emitSnapshot();
     this.emitEditorChanged();
     return true;
@@ -1752,6 +1771,7 @@ export class FactoryScene extends Phaser.Scene {
     this.selectedMachineId = machine.id;
     this.selectedObstacleId = undefined;
     this.audio('place');
+    this.emitMachineCostFeedback([machine]);
     this.emitSnapshot();
     this.emitEditorChanged();
     return true;
@@ -2025,6 +2045,7 @@ export class FactoryScene extends Phaser.Scene {
     this.collectedCollectibleIds.clear();
     this.collectibleDisappear.clear();
     this.metrics = this.freshMetrics();
+    this.resolutionReason = undefined;
     this.spawnAccumulator = this.getSpawnInterval();
     this.status = 'running';
     this.rebuildStaticBodies();
@@ -2114,7 +2135,6 @@ export class FactoryScene extends Phaser.Scene {
       this.matter.world.resume();
     }
     this.metrics.delivered = this.contract.goal.deliveries;
-    this.metrics.collectedStars = this.collectibles.length;
     this.evaluateContract();
   }
 
@@ -2125,12 +2145,14 @@ export class FactoryScene extends Phaser.Scene {
     const selectedObstacle = selectedObstacles[0];
     const economy = this.contract?.economy;
     const budgetLimit = this.getBudgetLimit();
+    const selectionRotationHandleClient = this.selectionRotationHandleClient();
     return {
       mode: this.mode,
       ...(this.contract ? { contractId: this.contract.id } : {}),
       contractTitle: this.contract?.title ?? SANDBOX_DEFINITION.title,
       contractDescription: this.contract?.description ?? SANDBOX_DEFINITION.description,
       status: this.status,
+      ...(this.resolutionReason ? { resolutionReason: this.resolutionReason } : {}),
       metrics: { ...this.metrics },
       ...(this.contract ? { goal: { ...this.contract.goal } } : {}),
       ...(economy
@@ -2146,7 +2168,8 @@ export class FactoryScene extends Phaser.Scene {
           }
         : {}),
       ...(selected ? { selectedMachine: { ...selected } } : {}),
-      ...(selected ? { selectedMachineClientBounds: this.machineClientBounds(selected) } : {}),
+      ...(this.selectionCount() > 0 ? { selectionClientBounds: this.selectionClientBounds() } : {}),
+      ...(selectionRotationHandleClient ? { selectionRotationHandleClient } : {}),
       ...(selectedObstacle ? { selectedObstacle: { ...selectedObstacle } } : {}),
       selection: {
         machineIds: selectedMachines.map((machine) => machine.id),
@@ -2165,10 +2188,12 @@ export class FactoryScene extends Phaser.Scene {
 
   private bindApplicationEvents(): void {
     this.eventUnsubscribers.push(
-      appEvents.on('ui:start-mode', ({ mode, contractId, contract, machines }) =>
-        this.startMode(mode, contractId, machines, contract),
+      appEvents.on('ui:start-mode', ({ mode, contractId, contract, machines, worldTheme }) =>
+        this.startMode(mode, contractId, machines, contract, worldTheme),
       ),
-      appEvents.on('ui:start-editor', ({ contract, isNew }) => this.startEditor(contract, isNew)),
+      appEvents.on('ui:start-editor', ({ contract, isNew, worldTheme }) =>
+        this.startEditor(contract, isNew, worldTheme),
+      ),
       appEvents.on('ui:editor-tool', ({ type }) => this.selectEditorTool(type)),
       appEvents.on('ui:editor-update-settings', ({ contract }) =>
         this.updateEditorSettings(contract),
@@ -2197,7 +2222,6 @@ export class FactoryScene extends Phaser.Scene {
       appEvents.on('ui:copy-selected', () => this.copySelected()),
       appEvents.on('ui:cut-selected', () => this.cutSelected()),
       appEvents.on('ui:reverse-selected', () => this.reverseSelected()),
-      appEvents.on('ui:set-conveyor-speed', ({ speed }) => this.setSelectedConveyorSpeed(speed)),
       appEvents.on('ui:toggle-grid', () => this.toggleGrid()),
       appEvents.on('ui:set-simulation-speed', ({ speed }) => {
         this.setSimulationSpeed(speed);
@@ -2216,6 +2240,7 @@ export class FactoryScene extends Phaser.Scene {
     this.input.on(Phaser.Input.Events.POINTER_DOWN, this.handlePointerDown, this);
     this.input.on(Phaser.Input.Events.POINTER_MOVE, this.handlePointerMove, this);
     this.input.on(Phaser.Input.Events.POINTER_UP, this.handlePointerUp, this);
+    this.input.on(Phaser.Input.Events.POINTER_UP_OUTSIDE, this.handlePointerUpOutside, this);
     this.input.on(Phaser.Input.Events.POINTER_WHEEL, this.handleWheel, this);
 
     this.input.keyboard?.on('keydown-SPACE', (event: KeyboardEvent) => {
@@ -2269,9 +2294,15 @@ export class FactoryScene extends Phaser.Scene {
       event.preventDefault();
       this.redo();
     });
+    this.input.keyboard?.on('keydown', (event: KeyboardEvent) => {
+      this.handleArrowShortcut(event);
+    });
 
     this.contextMenuHandler = (event: MouseEvent) => event.preventDefault();
     this.game.canvas.addEventListener('contextmenu', this.contextMenuHandler);
+    this.windowBlurHandler = () => this.cancelActiveDrag();
+    window.addEventListener('blur', this.windowBlurHandler);
+    window.addEventListener('pointercancel', this.windowBlurHandler);
   }
 
   private shouldIgnoreGameplayShortcut(event: KeyboardEvent): boolean {
@@ -2371,7 +2402,9 @@ export class FactoryScene extends Phaser.Scene {
         gridY: grid.y,
         angle: 0,
         reversed: false,
-        conveyorSpeed: isConveyorType(payload.type) ? this.preferredConveyorSpeed : undefined,
+        conveyorSpeed: isConveyorType(payload.type)
+          ? conveyorSpeedForMachineType(payload.type)
+          : undefined,
         fixed: this.isAuthoring(),
       };
       this.ghostValid =
@@ -2929,7 +2962,7 @@ export class FactoryScene extends Phaser.Scene {
           angle: 0,
           reversed: false,
           conveyorSpeed: isConveyorType(this.selectedTool)
-            ? this.preferredConveyorSpeed
+            ? conveyorSpeedForMachineType(this.selectedTool)
             : undefined,
           fixed: this.isAuthoring(),
         };
@@ -3075,6 +3108,40 @@ export class FactoryScene extends Phaser.Scene {
     }
   }
 
+  private handlePointerUpOutside(pointer: Phaser.Input.Pointer): void {
+    const bounds = this.game.canvas.getBoundingClientRect();
+    const event = pointer.event;
+    let clientX = Number.NaN;
+    let clientY = Number.NaN;
+    if (event && 'clientX' in event) {
+      clientX = Number(event.clientX);
+      clientY = Number(event.clientY);
+    } else if (event && 'changedTouches' in event) {
+      const touch = event.changedTouches[0];
+      clientX = touch?.clientX ?? Number.NaN;
+      clientY = touch?.clientY ?? Number.NaN;
+    }
+    const insideCanvas =
+      Number.isFinite(clientX) &&
+      Number.isFinite(clientY) &&
+      clientX >= bounds.left &&
+      clientX <= bounds.right &&
+      clientY >= bounds.top &&
+      clientY <= bounds.bottom;
+    if (insideCanvas) this.handlePointerUp(pointer);
+    else this.cancelActiveDrag();
+  }
+
+  private cancelActiveDrag(): void {
+    const drag = this.drag;
+    this.setDragState(undefined);
+    if (!drag) return;
+    if (drag.kind === 'rotate' || drag.kind === 'obstacle-rotate') {
+      appEvents.emit('game:angle', { angle: 0, clientX: 0, clientY: 0, visible: false });
+    }
+    this.emitSnapshot();
+  }
+
   private handleWheel(
     pointer: Phaser.Input.Pointer,
     _gameObjects: Phaser.GameObjects.GameObject[],
@@ -3121,6 +3188,10 @@ export class FactoryScene extends Phaser.Scene {
     this.updateCollectibles();
     this.updateSprings();
     this.updateReceivers();
+    // Delivery is terminal. Resolve before processing any other box so losses,
+    // generation and accounting cannot advance after the exact target is met.
+    this.evaluateContract();
+    if (this.status !== 'running') return;
     this.updateLostBoxes();
     this.evaluateContract();
   }
@@ -3288,7 +3359,12 @@ export class FactoryScene extends Phaser.Scene {
 
   private updateReceivers(): void {
     const delivered: BoxRuntime[] = [];
+    const remainingDeliveries = this.contract
+      ? Math.max(0, this.contract.goal.deliveries - this.metrics.delivered)
+      : Number.POSITIVE_INFINITY;
+    if (remainingDeliveries === 0) return;
     for (const box of this.boxes.values()) {
+      if (delivered.length >= remainingDeliveries) break;
       for (const receiver of this.receiverMachines) {
         const dimensions = MACHINE_PHYSICS_DIMENSIONS.receiver;
         if (
@@ -3311,8 +3387,8 @@ export class FactoryScene extends Phaser.Scene {
     }
     for (const box of delivered) {
       this.removeBox(box);
-      this.metrics.delivered += 1;
     }
+    this.metrics.delivered += delivered.length;
   }
 
   private updateLostBoxes(): void {
@@ -3338,30 +3414,11 @@ export class FactoryScene extends Phaser.Scene {
   private evaluateContract(): void {
     if (!this.contract || this.status !== 'running') return;
     const budgetLimit = this.getBudgetLimit();
-    const evaluation = evaluateRun(
-      this.metrics,
-      this.contract.goal,
-      this.collectibles.length,
-      budgetLimit,
-    );
-    if (
-      !evaluation.resolution &&
-      !this.budgetCompletionWarningShown &&
-      budgetLimit !== undefined &&
-      this.metrics.spent > budgetLimit &&
-      this.metrics.delivered >= this.contract.goal.deliveries &&
-      this.metrics.collectedStars >= this.collectibles.length
-    ) {
-      this.budgetCompletionWarningShown = true;
-      this.toast(
-        'Meta atingida, mas o orçamento foi ultrapassado. Pause e remova itens para concluir.',
-        'danger',
-      );
-      this.audio('error');
-    }
+    const evaluation = evaluateRun(this.metrics, this.contract.goal, budgetLimit);
     if (!evaluation.resolution) return;
 
     this.status = evaluation.resolution;
+    this.resolutionReason = evaluation.reason;
     this.matter.world.pause();
     if (this.status === 'success') {
       for (let index = 0; index < 42; index += 1) {
@@ -3378,7 +3435,6 @@ export class FactoryScene extends Phaser.Scene {
       }
       this.audio('success');
     } else {
-      this.toast('Muitas caixas foram perdidas.', 'danger');
       this.audio('error');
     }
     if (!this.editorActive) {
@@ -3674,7 +3730,7 @@ export class FactoryScene extends Phaser.Scene {
     this.lastGridZoom = zoom;
     const graphics = this.gridGraphics;
     graphics.clear();
-    graphics.fillStyle(COLORS.board, 1);
+    graphics.fillStyle(this.boardColor, 1);
     graphics.fillRect(PLAY_AREA_MIN_X, PLAY_AREA_MIN_Y, PLAY_AREA_WIDTH, PLAY_AREA_HEIGHT);
 
     if (this.gridEnabled) {
@@ -3682,8 +3738,8 @@ export class FactoryScene extends Phaser.Scene {
         const strong = column % 5 === 0;
         graphics.lineStyle(
           (strong ? 1.35 : 1) / zoom,
-          strong ? COLORS.gridStrong : COLORS.grid,
-          0.9,
+          strong ? this.gridStrongColor : this.gridColor,
+          strong ? this.gridStrongAlpha : this.gridAlpha,
         );
         graphics.lineBetween(
           column * CELL_SIZE,
@@ -3696,8 +3752,8 @@ export class FactoryScene extends Phaser.Scene {
         const strong = row % 5 === 0;
         graphics.lineStyle(
           (strong ? 1.35 : 1) / zoom,
-          strong ? COLORS.gridStrong : COLORS.grid,
-          0.9,
+          strong ? this.gridStrongColor : this.gridColor,
+          strong ? this.gridStrongAlpha : this.gridAlpha,
         );
         graphics.lineBetween(PLAY_AREA_MIN_X, row * CELL_SIZE, PLAY_AREA_MAX_X, row * CELL_SIZE);
       }
@@ -3815,7 +3871,9 @@ export class FactoryScene extends Phaser.Scene {
         this.drawSource(graphics, machine, center, alpha, valid);
         break;
       case 'conveyor':
+      case 'slow-conveyor':
       case 'tracked-conveyor':
+      case 'fast-conveyor':
         this.drawTrackedConveyor(
           graphics,
           machine,
@@ -4115,10 +4173,11 @@ export class FactoryScene extends Phaser.Scene {
       TRACKED_CONVEYOR_STRAIGHT_LENGTH +
       TRACKED_CONVEYOR_TRACK_RADIUS * 2 +
       TRACKED_CONVEYOR_LINK_HEIGHT;
-    const panelColor = muted ? COLORS.fixedPanel : COLORS.machinePanel;
-    const conveyorColor = muted ? COLORS.fixedConveyor : COLORS.conveyor;
-    const highlightColor = muted ? COLORS.fixedHighlight : COLORS.white;
-    const outlineColor = muted ? COLORS.fixedOutline : COLORS.graphite;
+    const visual = this.conveyorVisual(machine.type, muted);
+    const panelColor = visual.panel;
+    const conveyorColor = visual.belt;
+    const highlightColor = visual.highlight;
+    const outlineColor = visual.outline;
     graphics.fillStyle(valid ? panelColor : COLORS.graphite, alpha);
     drawPolygon(
       graphics,
@@ -4138,7 +4197,7 @@ export class FactoryScene extends Phaser.Scene {
       graphics.fillCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
       graphics.lineStyle(
         1.5,
-        valid ? (muted ? COLORS.fixedHighlight : COLORS.blueLight) : COLORS.graphite,
+        valid ? visual.wheelOutline : COLORS.graphite,
         alpha * 0.95,
       );
       graphics.strokeCircle(wheelCenter.x, wheelCenter.y, TRACKED_CONVEYOR_WHEEL_RADIUS);
@@ -4188,6 +4247,37 @@ export class FactoryScene extends Phaser.Scene {
       const lower = localToWorld(wheelCenter, machine.angle, -2.5 * direction, 3.4);
       drawPolygon(graphics, [tip, upper, lower]);
     }
+  }
+
+  private conveyorVisual(
+    type: MachineType,
+    muted: boolean,
+  ): { panel: number; belt: number; highlight: number; outline: number; wheelOutline: number } {
+    if (type === 'slow-conveyor') {
+      return {
+        panel: 0xd9eef9,
+        belt: 0x6eb8e2,
+        highlight: COLORS.white,
+        outline: 0x4d91bb,
+        wheelOutline: 0x93cdec,
+      };
+    }
+    if (type === 'fast-conveyor') {
+      return {
+        panel: 0x6b2032,
+        belt: 0xd74b55,
+        highlight: COLORS.white,
+        outline: 0x4b1423,
+        wheelOutline: 0xf08a91,
+      };
+    }
+    return {
+      panel: muted ? COLORS.fixedPanel : COLORS.machinePanel,
+      belt: muted ? COLORS.fixedConveyor : COLORS.conveyor,
+      highlight: muted ? COLORS.fixedHighlight : COLORS.white,
+      outline: muted ? COLORS.fixedOutline : COLORS.graphite,
+      wheelOutline: muted ? COLORS.fixedHighlight : COLORS.blueLight,
+    };
   }
 
   private drawSpring(
@@ -4535,7 +4625,7 @@ export class FactoryScene extends Phaser.Scene {
     }
 
     for (const machine of this.machines) {
-      if (machine.type === 'tracked-conveyor') {
+      if (isConveyorType(machine.type)) {
         this.trackedConveyors.set(machine.id, this.createTrackedConveyorRuntime(machine));
         continue;
       }
@@ -4594,11 +4684,14 @@ export class FactoryScene extends Phaser.Scene {
     obstacles = this.obstacles,
     machines = this.machines,
   ): boolean {
+    const positionStep = this.gridEnabled ? GRID_POSITION_STEP : 1 / CELL_SIZE;
     if (
       !Number.isFinite(candidate.gridX) ||
       !Number.isFinite(candidate.gridY) ||
-      Math.abs(candidate.gridX * 4 - Math.round(candidate.gridX * 4)) > 0.000_001 ||
-      Math.abs(candidate.gridY * 4 - Math.round(candidate.gridY * 4)) > 0.000_001 ||
+      Math.abs(candidate.gridX / positionStep - Math.round(candidate.gridX / positionStep)) >
+        0.000_001 ||
+      Math.abs(candidate.gridY / positionStep - Math.round(candidate.gridY / positionStep)) >
+        0.000_001 ||
       !Number.isInteger(candidate.columns) ||
       !Number.isInteger(candidate.rows) ||
       candidate.columns < 1 ||
@@ -4796,7 +4889,7 @@ export class FactoryScene extends Phaser.Scene {
     this.physicsAccumulator = 0;
     this.simulationTimeMs = 0;
     this.simulationVisualTimeMs = 0;
-    this.budgetCompletionWarningShown = false;
+    this.resolutionReason = undefined;
     this.status = nextStatus;
     this.matter.world.pause();
   }
@@ -4969,6 +5062,124 @@ export class FactoryScene extends Phaser.Scene {
     return a.id === b.id && a.type === b.type && a.gridX === b.gridX && a.gridY === b.gridY;
   }
 
+  private handleArrowShortcut(event: KeyboardEvent): void {
+    const direction =
+      event.key === 'ArrowLeft'
+        ? { x: -1, y: 0 }
+        : event.key === 'ArrowRight'
+          ? { x: 1, y: 0 }
+          : event.key === 'ArrowUp'
+            ? { x: 0, y: -1 }
+            : event.key === 'ArrowDown'
+              ? { x: 0, y: 1 }
+              : undefined;
+    if (!direction || this.shouldIgnoreGameplayShortcut(event)) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+    event.preventDefault();
+    if (event.shiftKey && direction.x !== 0) {
+      this.rotateSelectedBy(direction.x * this.rotationStep());
+      return;
+    }
+    this.nudgeSelection(direction.x, direction.y);
+  }
+
+  private keyboardPositionDelta(value: number, direction: number): number {
+    if (direction === 0) return 0;
+    if (!this.gridEnabled) return direction / CELL_SIZE;
+
+    const scaled = value / GRID_POSITION_STEP;
+    const epsilon = 0.000_001;
+    const nextIndex =
+      direction > 0
+        ? Math.floor(scaled + epsilon) + 1
+        : Math.ceil(scaled - epsilon) - 1;
+    return nextIndex * GRID_POSITION_STEP - value;
+  }
+
+  private nudgeSelection(directionX: number, directionY: number): boolean {
+    if (!this.canBuild() || this.selectionCount() === 0) return false;
+
+    const machines = this.getSelectedMachines();
+    const obstacles = this.getSelectedObstacles();
+    const collectibles = this.getSelectedCollectibles();
+    if (machines.some((machine) => !this.canEditMachine(machine))) return false;
+    if (!this.isAuthoring() && (obstacles.length > 0 || collectibles.length > 0)) return false;
+
+    const xPositions = [
+      ...machines.map((machine) => machine.gridX),
+      ...obstacles.map((obstacle) => obstacle.gridX),
+      ...collectibles.map((collectible) => collectible.gridX),
+    ];
+    const yPositions = [
+      ...machines.map((machine) => machine.gridY),
+      ...obstacles.map((obstacle) => obstacle.gridY),
+      ...collectibles.map((collectible) => collectible.gridY),
+    ];
+    if (xPositions.length === 0 || yPositions.length === 0) return false;
+
+    const deltaX = this.keyboardPositionDelta(Math.min(...xPositions), directionX);
+    const deltaY = this.keyboardPositionDelta(Math.min(...yPositions), directionY);
+    const movedMachines = machines.map((machine) => ({
+      ...machine,
+      gridX: machine.gridX + deltaX,
+      gridY: machine.gridY + deltaY,
+    }));
+    const movedObstacles = obstacles.map((obstacle) => ({
+      ...obstacle,
+      gridX: obstacle.gridX + deltaX,
+      gridY: obstacle.gridY + deltaY,
+    }));
+    const movedCollectibles = collectibles.map((collectible) => ({
+      ...collectible,
+      gridX: collectible.gridX + deltaX,
+      gridY: collectible.gridY + deltaY,
+    }));
+
+    if (
+      !this.isGroupPlacementValid(
+        movedMachines,
+        movedObstacles,
+        movedCollectibles,
+        this.selectedMachineIds,
+        this.selectedObstacleIds,
+      )
+    ) {
+      return false;
+    }
+
+    const machineById = new Map(movedMachines.map((machine) => [machine.id, machine]));
+    if (this.isAuthoring()) {
+      const obstacleById = new Map(movedObstacles.map((obstacle) => [obstacle.id, obstacle]));
+      const collectibleById = new Map(
+        movedCollectibles.map((collectible) => [collectible.id, collectible]),
+      );
+      const before = this.captureEditorDocument();
+      const after = cloneEditorDocument(before);
+      after.machines = after.machines.map((machine) => ({
+        ...(machineById.get(machine.id) ?? machine),
+      }));
+      after.obstacles = after.obstacles.map((obstacle) => ({
+        ...(obstacleById.get(obstacle.id) ?? obstacle),
+      }));
+      after.collectibles = after.collectibles.map((collectible) => ({
+        ...(collectibleById.get(collectible.id) ?? collectible),
+      }));
+      this.executeEditorSnapshotCommand('Mover seleção', before, after);
+    } else {
+      const before = cloneMachines(this.machines);
+      const after = before.map((machine) => ({
+        ...(machineById.get(machine.id) ?? machine),
+      }));
+      this.executeSnapshotCommand('Mover seleção', before, after);
+    }
+
+    this.audio('place');
+    this.emitSnapshot();
+    this.emitEditorChanged();
+    return true;
+  }
+
   private rotateSelectedBy(delta: number): void {
     const selected = this.getSelectedMachine();
     if (selected) {
@@ -5030,7 +5241,8 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private snapEditorPosition(value: number): number {
-    return Math.round(value / GRID_POSITION_STEP) * GRID_POSITION_STEP;
+    const step = this.gridEnabled ? GRID_POSITION_STEP : 1 / CELL_SIZE;
+    return Math.round(value / step) * step;
   }
 
   private isCollectiblePlacementValid(collectible: CollectibleDefinition): boolean {
@@ -5046,8 +5258,7 @@ export class FactoryScene extends Phaser.Scene {
 
   private isRotatable(machine: MachineState): boolean {
     return (
-      machine.type === 'conveyor' ||
-      machine.type === 'tracked-conveyor' ||
+      isConveyorType(machine.type) ||
       machine.type === 'spring' ||
       machine.type === 'turbo-spring' ||
       (this.isAuthoring() && (machine.type === 'source' || machine.type === 'receiver'))
@@ -5096,16 +5307,32 @@ export class FactoryScene extends Phaser.Scene {
 
   private machineCost(machine: Pick<MachineState, 'type' | 'fixed' | 'conveyorSpeed'>): number {
     if (machine.fixed || !this.contract) return 0;
-    const type = activeMachineType(machine.type);
+    const type = activeMachineType(machine.type, machine.conveyorSpeed);
     const rawCost =
-      type === 'tracked-conveyor'
-        ? resolveConveyorSpeedCosts(this.contract.economy)[conveyorSpeed(machine)]
+      isConveyorType(type)
+        ? conveyorCostForMachineType(this.contract.economy, type, machine.conveyorSpeed)
         : type === 'spring'
           ? this.contract.economy.machineCosts.spring
           : type === 'turbo-spring'
             ? (this.contract.economy.machineCosts['turbo-spring'] ?? 7_500)
             : 0;
     return Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0;
+  }
+
+  private emitMachineCostFeedback(machines: readonly MachineState[]): void {
+    const amount = this.calculateSpentBudget(machines);
+    if (amount <= 0 || machines.length === 0) return;
+    const centers = machines.map(machineCenter);
+    const center = {
+      x: centers.reduce((sum, point) => sum + point.x, 0) / centers.length,
+      y: centers.reduce((sum, point) => sum + point.y, 0) / centers.length,
+    };
+    const bounds = this.worldPointsClientBounds([center]);
+    appEvents.emit('game:cost-feedback', {
+      amount,
+      clientX: bounds.left,
+      clientY: bounds.top,
+    });
   }
 
   private calculateSpentBudget(machines: readonly MachineState[] = this.machines): number {
@@ -5218,12 +5445,15 @@ export class FactoryScene extends Phaser.Scene {
       let id = machine.id.trim();
       if (!id || used.has(id)) id = this.createMachineId(used);
       used.add(id);
+      const type = activeMachineType(machine.type, machine.conveyorSpeed);
       return {
         ...machine,
         id,
-        type: activeMachineType(machine.type),
+        type,
         angle: normalizeAngle(machine.angle),
-        conveyorSpeed: isConveyorType(machine.type) ? conveyorSpeed(machine) : undefined,
+        conveyorSpeed: isConveyorType(type)
+          ? conveyorSpeedForMachineType(type, machine.conveyorSpeed ?? 'normal')
+          : undefined,
         fixed: preserveFixed ? machine.fixed : false,
       };
     });
@@ -5233,32 +5463,77 @@ export class FactoryScene extends Phaser.Scene {
     appEvents.emit('game:snapshot', this.getSnapshot());
   }
 
-  private machineClientBounds(machine: MachineState): {
-    left: number;
-    top: number;
-    right: number;
-    bottom: number;
-  } {
+  private selectionClientBounds(): NonNullable<GameSnapshot['selectionClientBounds']> {
+    const bounds = [
+      ...this.getSelectedMachines().map((machine) => this.machineClientBounds(machine)),
+      ...this.getSelectedObstacles().map((obstacle) =>
+        this.worldPointsClientBounds(this.obstaclePolygon(obstacle), 10),
+      ),
+      ...this.getSelectedCollectibles().map((collectible) => {
+        const center = this.collectibleCenter(collectible);
+        const radius = STAR_RENDER_RADIUS + 8;
+        return this.worldPointsClientBounds([
+          { x: center.x - radius, y: center.y - radius },
+          { x: center.x + radius, y: center.y + radius },
+        ]);
+      }),
+    ];
+    return {
+      left: Math.min(...bounds.map(({ left }) => left)),
+      top: Math.min(...bounds.map(({ top }) => top)),
+      right: Math.max(...bounds.map(({ right }) => right)),
+      bottom: Math.max(...bounds.map(({ bottom }) => bottom)),
+    };
+  }
+
+  private selectionRotationHandleClient(): GameSnapshot['selectionRotationHandleClient'] {
+    if (this.selectionCount() !== 1) return undefined;
+
+    const machine = this.getSelectedMachine();
+    const obstacle = this.getSelectedObstacle();
+    const handle =
+      machine && this.canEditMachine(machine) && this.isRotatable(machine)
+        ? rotationHandle(machine)
+        : this.isAuthoring() && obstacle
+          ? this.obstacleRotationHandle(obstacle)
+          : undefined;
+    if (!handle) return undefined;
+
+    const client = this.worldPointsClientBounds([handle]);
+    return { x: client.left, y: client.top, radius: 20 };
+  }
+
+  private machineClientBounds(
+    machine: MachineState,
+  ): NonNullable<GameSnapshot['selectionClientBounds']> {
+    const dimensions = MACHINE_DIMENSIONS[machine.type];
+    return this.worldPointsClientBounds(
+      rectangleCorners(
+        machineCenter(machine),
+        dimensions.width + 14,
+        dimensions.height + 14,
+        machine.angle,
+      ),
+    );
+  }
+
+  private worldPointsClientBounds(
+    points: readonly Point[],
+    padding = 0,
+  ): NonNullable<GameSnapshot['selectionClientBounds']> {
     const camera = this.cameras.main;
     const canvasBounds = this.game.canvas.getBoundingClientRect();
     const scaleX = canvasBounds.width / this.game.canvas.width;
     const scaleY = canvasBounds.height / this.game.canvas.height;
-    const dimensions = MACHINE_DIMENSIONS[machine.type];
-    const corners = rectangleCorners(
-      machineCenter(machine),
-      dimensions.width + 14,
-      dimensions.height + 14,
-      machine.angle,
-    );
-    const clientPoints = corners.map((point) => ({
+    const clientPoints = points.map((point) => ({
       x: canvasBounds.left + (camera.x + (point.x - camera.worldView.x) * camera.zoom) * scaleX,
       y: canvasBounds.top + (camera.y + (point.y - camera.worldView.y) * camera.zoom) * scaleY,
     }));
     return {
-      left: Math.min(...clientPoints.map(({ x }) => x)),
-      top: Math.min(...clientPoints.map(({ y }) => y)),
-      right: Math.max(...clientPoints.map(({ x }) => x)),
-      bottom: Math.max(...clientPoints.map(({ y }) => y)),
+      left: Math.min(...clientPoints.map(({ x }) => x)) - padding,
+      top: Math.min(...clientPoints.map(({ y }) => y)) - padding,
+      right: Math.max(...clientPoints.map(({ x }) => x)) + padding,
+      bottom: Math.max(...clientPoints.map(({ y }) => y)) + padding,
     };
   }
 
@@ -5412,6 +5687,7 @@ export class FactoryScene extends Phaser.Scene {
   }
 
   private initializeIdleState(): void {
+    this.applyWorldTheme();
     this.mode = 'sandbox';
     this.contract = undefined;
     this.availableMachines = [...SANDBOX_DEFINITION.availableMachines];
@@ -5454,7 +5730,7 @@ export class FactoryScene extends Phaser.Scene {
         camera.width / DISPLAY_DENSITY / STAGE_WIDTH,
         camera.height / DISPLAY_DENSITY / STAGE_HEIGHT,
       ) * 0.92;
-    camera.setZoom(toCameraZoom(Phaser.Math.Clamp(fit, MIN_ZOOM, 1.12)));
+    camera.setZoom(toCameraZoom(Phaser.Math.Clamp(fit, 1, 1.12)));
     camera.centerOn(STAGE_WIDTH / 2, STAGE_HEIGHT / 2);
     this.drawGrid(true);
     this.emitCamera();
@@ -5465,9 +5741,32 @@ export class FactoryScene extends Phaser.Scene {
     else this.fitCamera();
   }
 
+  private applyWorldTheme(worldTheme?: CampaignWorldDefinition): void {
+    if (worldTheme) {
+      this.boardColor = hexColorNumber(worldTheme.backgroundColor, COLORS.board);
+      const grid = hexColorNumber(worldTheme.gridColor, COLORS.gridStrong);
+      this.gridColor = grid;
+      this.gridStrongColor = grid;
+      this.gridAlpha = 0.32;
+      this.gridStrongAlpha = 0.9;
+    } else {
+      this.boardColor = COLORS.board;
+      this.gridColor = COLORS.grid;
+      this.gridStrongColor = COLORS.gridStrong;
+      this.gridAlpha = 0.9;
+      this.gridStrongAlpha = 0.9;
+    }
+    this.cameras.main.setBackgroundColor(this.boardColor);
+    if (this.gridGraphics) this.drawGrid(true);
+  }
+
   private installDebugApi(): void {
     window.__FACTORY_DEBUG__ = {
       getSnapshot: () => this.getSnapshot(),
+      getBoardTheme: () => ({
+        backgroundColor: colorNumberToHex(this.boardColor),
+        gridColor: colorNumberToHex(this.gridStrongColor),
+      }),
       getSimulationSeconds: () => this.simulationTimeMs / 1000,
       getMachines: () => cloneMachines(this.machines),
       getObstacles: () => cloneObstacles(this.obstacles),
@@ -5545,6 +5844,9 @@ export class FactoryScene extends Phaser.Scene {
       setMachines: (machines) => this.replaceMachines(machines),
       setSimulationSpeed: (speed) => this.setSimulationSpeed(speed),
       advance: (seconds) => {
+        if (this.status === 'success' || this.status === 'failure') {
+          return this.getSnapshot();
+        }
         if (this.status !== 'running') this.runSimulation();
         const steps = Math.max(0, Math.min(60 * 120, Math.round(seconds * 60)));
         for (let index = 0; index < steps && this.status === 'running'; index += 1) {
@@ -5566,6 +5868,10 @@ export class FactoryScene extends Phaser.Scene {
     this.scale.off(Phaser.Scale.Events.RESIZE, this.handleResize, this);
     if (this.contextMenuHandler) {
       this.game.canvas.removeEventListener('contextmenu', this.contextMenuHandler);
+    }
+    if (this.windowBlurHandler) {
+      window.removeEventListener('blur', this.windowBlurHandler);
+      window.removeEventListener('pointercancel', this.windowBlurHandler);
     }
     if (window.__FACTORY_DEBUG__) delete window.__FACTORY_DEBUG__;
   }

@@ -7,10 +7,8 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
   await page.locator('#admin-toggle').click();
   await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
-  await expect(page.locator('#editor-rail')).toHaveCSS(
-    'background-color',
-    'rgba(0, 0, 0, 0)',
-  );
+  await expect(page.locator('#hotbar')).not.toContainText(/Sem custo|Custo|\$/);
+  await expect(page.locator('#editor-rail')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   await expect(page.locator('#editor-rail')).toHaveCSS('box-shadow', 'none');
   const editorBack = page.locator('[data-action="editor-cancel"]');
   await expect(editorBack).toHaveAttribute('aria-label', 'Voltar para a seleção de fases');
@@ -25,6 +23,38 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
   const canvas = page.locator('#game-container canvas');
   const canvasBounds = await canvas.boundingBox();
   if (!canvasBounds) throw new Error('Canvas sem dimensões');
+  const expectContextOutsideSelection = async (): Promise<void> => {
+    await page.waitForTimeout(220);
+    const dockBounds = await page.locator('#selection-dock').boundingBox();
+    const railBounds = await page.locator('.action-rail').boundingBox();
+    const snapshot = await page.evaluate(() => window.__FACTORY_DEBUG__!.getSnapshot());
+    const selectedBounds = snapshot.selectionClientBounds;
+    if (!dockBounds || !railBounds || !selectedBounds) {
+      throw new Error('Controles contextuais sem limites');
+    }
+    const overlaps = !(
+      dockBounds.x + dockBounds.width <= selectedBounds.left ||
+      dockBounds.x >= selectedBounds.right ||
+      dockBounds.y + dockBounds.height <= selectedBounds.top ||
+      dockBounds.y >= selectedBounds.bottom
+    );
+    expect(overlaps).toBe(false);
+    expect(dockBounds.x + dockBounds.width).toBeLessThanOrEqual(railBounds.x - 12);
+    const rotationHandle = snapshot.selectionRotationHandleClient;
+    if (rotationHandle) {
+      const closestX = Math.max(
+        dockBounds.x,
+        Math.min(rotationHandle.x, dockBounds.x + dockBounds.width),
+      );
+      const closestY = Math.max(
+        dockBounds.y,
+        Math.min(rotationHandle.y, dockBounds.y + dockBounds.height),
+      );
+      expect(Math.hypot(rotationHandle.x - closestX, rotationHandle.y - closestY)).toBeGreaterThanOrEqual(
+        rotationHandle.radius + 7,
+      );
+    }
+  };
 
   const machineTool = page.locator('[data-editor-tool="tracked-conveyor"]');
   await machineTool.click();
@@ -32,9 +62,9 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
     canvasBounds.x + canvasBounds.width * 0.32,
     canvasBounds.y + canvasBounds.height * 0.32,
   );
-  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length)).toBe(
-    before.machines,
-  );
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length))
+    .toBe(before.machines);
   await expect(machineTool).not.toHaveClass(/is-active/);
 
   const dragToolTo = async (selector: string, xRatio: number, yRatio: number): Promise<void> => {
@@ -62,31 +92,70 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
     if (!conveyor || !debug.selectMachine(conveyor.id)) {
       throw new Error('Editor conveyor could not be selected');
     }
-    return conveyor.id;
+    return { id: conveyor.id, reversed: conveyor.reversed };
   });
   await expect(page.locator('[data-action="reverse"]')).not.toHaveClass(/is-hidden/);
+  await expectContextOutsideSelection();
   await page.locator('[data-action="reverse"]').click();
   await expect
     .poll(() =>
       page.evaluate(
         (id) =>
           window.__FACTORY_DEBUG__!.getMachines().find((machine) => machine.id === id)?.reversed,
-        editorConveyorId,
+        editorConveyorId.id,
       ),
     )
-    .toBe(true);
+    .toBe(!editorConveyorId.reversed);
 
   await dragToolTo('[data-editor-tool="obstacle"]', 0.5, 0.44);
-  await dragToolTo('[data-editor-tool="star"]', 0.68, 0.34);
-
-  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length)).toBe(
-    before.machines + 1,
-  );
-  await expect.poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles().length)).toBe(
-    before.obstacles + 1,
-  );
+  await expectContextOutsideSelection();
+  const obstacleBeforeKeys = await page.evaluate(() => {
+    const obstacle = window.__FACTORY_DEBUG__!.getObstacles().at(-1);
+    if (!obstacle) throw new Error('Editor obstacle was not found');
+    return obstacle;
+  });
+  await page.keyboard.press('ArrowDown');
   await expect
-    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.length ?? 0))
+    .poll(() =>
+      page.evaluate(
+        (id) => window.__FACTORY_DEBUG__!.getObstacles().find((item) => item.id === id),
+        obstacleBeforeKeys.id,
+      ),
+    )
+    .toMatchObject({
+      gridY: obstacleBeforeKeys.gridY + 0.25,
+    });
+
+  await dragToolTo('[data-editor-tool="star"]', 0.68, 0.34);
+  await expectContextOutsideSelection();
+  const collectibleBeforeKeys = await page.evaluate(() => {
+    const collectible = window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.at(-1);
+    if (!collectible) throw new Error('Editor collectible was not found');
+    return collectible;
+  });
+  await page.keyboard.press('ArrowLeft');
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (id) =>
+          window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.find(
+            (item) => item.id === id,
+          ),
+        collectibleBeforeKeys.id,
+      ),
+    )
+    .toMatchObject({ gridX: collectibleBeforeKeys.gridX - 0.25 });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getMachines().length))
+    .toBe(before.machines + 1);
+  await expect
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getObstacles().length))
+    .toBe(before.obstacles + 1);
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__FACTORY_DEBUG__!.getEditorDraft().collectibles?.length ?? 0),
+    )
     .toBe(before.collectibles + 1);
 });
 
@@ -393,7 +462,9 @@ test('editor arrasta máquina e bloqueador selecionados em uma única operação
   });
 });
 
-test('editor collectible is non-solid, collected once and restored on restart', async ({ page }) => {
+test('editor collectible is non-solid, collected once and restored on restart', async ({
+  page,
+}) => {
   await page.goto('/');
   await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
   await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
@@ -537,7 +608,8 @@ test('bloqueador gira e redimensiona pelos pontos laterais e de canto', async ({
   await expect
     .poll(() =>
       page.evaluate(
-        (id) => window.__FACTORY_DEBUG__!.getObstacles().find((obstacle) => obstacle.id === id)?.angle,
+        (id) =>
+          window.__FACTORY_DEBUG__!.getObstacles().find((obstacle) => obstacle.id === id)?.angle,
         obstacleId,
       ),
     )
@@ -588,6 +660,18 @@ test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e cont
   await page.locator('#admin-toggle').click();
   await page.getByRole('button', { name: 'Editar fase 6-1' }).click();
   await expect(page.locator('#editor-rail')).not.toHaveClass(/is-hidden/);
+  await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__!;
+    const draft = debug.getEditorDraft();
+    debug.startEditor({
+      ...draft,
+      id: 'selection-priority-test',
+      availableMachines: ['spring'],
+      fixedMachines: [],
+      obstacles: [],
+      collectibles: [],
+    });
+  });
 
   const ids = await page.evaluate(() => {
     const debug = window.__FACTORY_DEBUG__!;
@@ -657,7 +741,7 @@ test('objeto selecionado tem prioridade sobre estrela apenas em seu corpo e cont
     .toMatchObject({
       spring: { gridX: 11, gridY: 10, angle: 90 },
       centerStar: { gridX: 10, gridY: 10 },
-  });
+    });
 
   // Once the star is outside the selected object and its controls, it remains directly draggable.
   await drag(screenPoint(516, 504), screenPoint(516, 552));
@@ -800,9 +884,7 @@ test('seleção por área inclui paredes e várias estrelas no editor', async ({
   await page.mouse.up({ button: 'right' });
 
   await expect
-    .poll(() =>
-      page.evaluate(() => window.__FACTORY_DEBUG__!.getSnapshot().selection),
-    )
+    .poll(() => page.evaluate(() => window.__FACTORY_DEBUG__!.getSnapshot().selection))
     .toEqual({
       machineIds: [],
       obstacleIds: [expect.any(String)],

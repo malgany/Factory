@@ -40,7 +40,7 @@ test('a entrada recebe a caixa assim que os contornos visuais se encostam', asyn
         },
       ],
       obstacles: [],
-      collectibles: [],
+      collectibles: [{ id: 'optional-star', type: 'star', gridX: 20, gridY: 12 }],
       goal: { deliveries: 1, maxLosses: 1 },
       economy: {
         budgetLimit: 10_000,
@@ -54,8 +54,84 @@ test('a entrada recebe a caixa assim que os contornos visuais se encostam', asyn
   });
 
   expect(snapshot.metrics.delivered).toBe(1);
+  expect(snapshot.metrics.collectedStars).toBe(0);
   expect(snapshot.metrics.active).toBe(0);
   expect(snapshot.status).toBe('success');
+});
+
+test('limita entregas à meta quando duas caixas alcançam a entrada no mesmo tick', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+
+  const result = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+
+    debug.startEditor({
+      id: 'delivery-cap-test',
+      world: 1,
+      stage: 4,
+      revision: 1,
+      order: 4,
+      title: 'Delivery cap test',
+      subtitle: '',
+      description: '',
+      grid: { columns: 30, rows: 18 },
+      availableMachines: ['tracked-conveyor'],
+      fixedMachines: [
+        {
+          id: 'cap-source-a',
+          type: 'source',
+          gridX: 4.25,
+          gridY: 4.25,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+        {
+          id: 'cap-source-b',
+          type: 'source',
+          gridX: 4.25,
+          gridY: 4.25,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+        {
+          id: 'cap-receiver',
+          type: 'receiver',
+          gridX: 4.25,
+          gridY: 6,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+      ],
+      obstacles: [],
+      collectibles: [],
+      goal: { deliveries: 1 },
+      economy: {
+        budgetLimit: 10_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
+      spawnIntervalSeconds: 0.8,
+      initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
+    });
+    debug.beginEditorPreview();
+    const terminal = debug.advance(0.82);
+    const terminalAt = debug.getSimulationSeconds();
+    const afterTerminal = debug.advance(2);
+    return { terminal, terminalAt, afterTerminal, afterTerminalAt: debug.getSimulationSeconds() };
+  });
+
+  expect(result.terminal.metrics.delivered).toBe(1);
+  expect(result.terminal.metrics.active).toBe(1);
+  expect(result.terminal.status).toBe('success');
+  expect(result.afterTerminal.metrics).toEqual(result.terminal.metrics);
+  expect(result.afterTerminal.status).toBe('success');
+  expect(result.afterTerminalAt).toBe(result.terminalAt);
 });
 
 test('o trampolim espera a caixa alcançar a superfície antes de impulsioná-la', async ({

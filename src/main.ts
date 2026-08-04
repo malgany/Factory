@@ -2,10 +2,14 @@ import './style.css';
 
 import { appEvents } from './core/events';
 import {
+  appendCampaignWorld,
   createEmptyContractDraft,
+  deleteCampaignWorld,
   deleteContractFromCatalog,
   mergeContractCatalog,
   saveContractToCatalog,
+  swapContractSlots,
+  updateCampaignWorld,
   validateContractDefinition,
 } from './domain/catalog';
 import {
@@ -40,6 +44,7 @@ const initialProgressSave = platform.saveProgress(progress);
 
 const ui = new AppUI({
   root,
+  worlds: catalog.worlds,
   contracts,
   progress,
   adminAvailable: import.meta.env.DEV && isLocalAdminHost(window.location.hostname),
@@ -89,11 +94,52 @@ const eventUnsubscribers = [
     }
     void platform.unlockAchievement(`contract:${contractId}`);
   }),
-  appEvents.on('ui:admin-create-contract', () => {
+  appEvents.on('ui:admin-create-contract', ({ world }) => {
     try {
-      openEditor(createEmptyContractDraft(catalog), true);
+      openEditor(createEmptyContractDraft(catalog, world), true);
     } catch (error) {
       notify(errorMessage(error, 'Não há outro slot disponível neste mundo.'), 'danger');
+    }
+  }),
+  appEvents.on('ui:admin-create-world', ({ backgroundColor, gridColor }) => {
+    try {
+      const created = appendCampaignWorld(catalog, { backgroundColor, gridColor });
+      void commitCatalogChange(
+        created.catalog,
+        (activeContracts) => reconcileProgress(progress, activeContracts),
+        `Mundo ${created.world.world} criado.`,
+      ).then((saved) => {
+        if (saved) ui.selectAdminWorld(created.world.world);
+      });
+    } catch (error) {
+      notify(errorMessage(error, 'Não foi possível criar o mundo.'), 'danger');
+    }
+  }),
+  appEvents.on('ui:admin-update-world', ({ world, backgroundColor, gridColor }) => {
+    try {
+      const nextCatalog = updateCampaignWorld(catalog, world, { backgroundColor, gridColor });
+      void commitCatalogChange(
+        nextCatalog,
+        (activeContracts) => reconcileProgress(progress, activeContracts),
+        `Cores do Mundo ${world} atualizadas.`,
+      );
+    } catch (error) {
+      notify(errorMessage(error, 'Não foi possível atualizar o mundo.'), 'danger');
+    }
+  }),
+  appEvents.on('ui:admin-delete-world', ({ world }) => {
+    try {
+      const nextCatalog = deleteCampaignWorld(catalog, world);
+      const nextActiveWorld = Math.min(world, nextCatalog.worlds.length);
+      void commitCatalogChange(
+        nextCatalog,
+        (activeContracts) => reconcileProgress(progress, activeContracts),
+        `Mundo ${world} excluído.`,
+      ).then((saved) => {
+        if (saved) ui.selectAdminWorld(nextActiveWorld);
+      });
+    } catch (error) {
+      notify(errorMessage(error, 'Não foi possível excluir o mundo.'), 'danger');
     }
   }),
   appEvents.on('ui:admin-edit-contract', ({ contractId }) => {
@@ -106,6 +152,12 @@ const eventUnsubscribers = [
   appEvents.on('ui:editor-test', ({ contract }) => {
     void saveEditorContract(contract, true);
   }),
+  appEvents.on(
+    'ui:editor-swap-contracts',
+    ({ contract, conflictingContractId, beginPreviewAfterSave }) => {
+      void saveEditorContract(contract, beginPreviewAfterSave, conflictingContractId);
+    },
+  ),
   appEvents.on('ui:admin-delete-contract', ({ contractId }) => {
     const title = findContract(contractId)?.title ?? 'Fase';
     try {
@@ -123,13 +175,19 @@ const eventUnsubscribers = [
 
 function openEditor(contract: ContractDefinition, isNew: boolean): void {
   const draft = structuredClone(contract);
+  const worldTheme = catalog.worlds.find(({ world }) => world === draft.world);
   ui.openAdminEditor(draft, { isNew, dirty: isNew });
-  appEvents.emit('ui:start-editor', { contract: draft, isNew });
+  appEvents.emit('ui:start-editor', {
+    contract: draft,
+    isNew,
+    ...(worldTheme ? { worldTheme: structuredClone(worldTheme) } : {}),
+  });
 }
 
 async function saveEditorContract(
   contract: ContractDefinition,
   beginPreviewAfterSave = false,
+  conflictingContractId?: ContractId,
 ): Promise<void> {
   const validation = validateContractDefinition(contract);
   if (!validation.valid) {
@@ -150,7 +208,9 @@ async function saveEditorContract(
 
   let nextCatalog: ContractCatalogFile;
   try {
-    nextCatalog = saveContractToCatalog(catalog, contract);
+    nextCatalog = conflictingContractId
+      ? swapContractSlots(catalog, contract, conflictingContractId)
+      : saveContractToCatalog(catalog, contract);
   } catch (error) {
     ui.setEditorMessage({
       tone: 'danger',
@@ -179,11 +239,20 @@ async function saveEditorContract(
     return;
   }
 
-  progress = reconcileProgress(clearContractCompletion(progress, contract.id), contracts);
+  let nextProgress = clearContractCompletion(progress, contract.id);
+  if (conflictingContractId) {
+    nextProgress = clearContractCompletion(nextProgress, conflictingContractId);
+  }
+  progress = reconcileProgress(nextProgress, contracts);
   const progressSaved = platform.saveProgress(progress);
   ui.setCatalogSaving(false, 'editor');
   refreshUI();
-  ui.markEditorSaved(savedContract);
+  ui.markEditorSaved(
+    savedContract,
+    conflictingContractId
+      ? 'Fases trocadas e salvas no JSON local.'
+      : 'Fase salva no JSON local.',
+  );
   appEvents.emit('ui:editor-mark-saved', { contract: structuredClone(savedContract) });
 
   if (!progressSaved.ok) {
@@ -229,6 +298,7 @@ async function commitCatalogChange(
 }
 
 function refreshUI(): void {
+  ui.updateWorlds(catalog.worlds);
   ui.updateContracts(contracts);
   ui.updateProgress(progress);
 }

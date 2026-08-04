@@ -1,10 +1,20 @@
 import { appEvents } from '../core/events';
+import { getNextContractId } from '../domain/contracts';
 import { updateCampaignLayout } from '../domain/progress';
 import factoryBoxTextureUrl from '../assets/factory-box-game.png?url';
 import factoryCampaignEnvironmentUrl from '../assets/factory-campaign-environment.webp?url';
-import { DEFAULT_MACHINE_COSTS } from '../domain/catalog';
-import { resolveConveyorSpeedCosts } from '../domain/economy';
+import {
+  DEFAULT_MACHINE_COSTS,
+  DEFAULT_WORLD_BACKGROUND_COLOR,
+  DEFAULT_WORLD_GRID_COLOR,
+} from '../domain/catalog';
+import {
+  conveyorCostForMachineType,
+  isConveyorMachineType,
+  resolveConveyorSpeedCosts,
+} from '../domain/economy';
 import type {
+  CampaignWorldDefinition,
   ContractDefinition,
   ContractId,
   ConveyorSpeed,
@@ -20,6 +30,7 @@ import { AudioService } from './AudioService';
 
 export interface AppUIOptions {
   root: HTMLElement;
+  worlds: readonly CampaignWorldDefinition[];
   contracts: readonly ContractDefinition[];
   progress: ProgressSave;
   adminAvailable?: boolean;
@@ -82,11 +93,22 @@ type IconName =
 
 type AdminTool = MachineType | 'obstacle' | 'star';
 export type CatalogSavingContext = 'editor' | 'operation';
+type PendingAdminAction =
+  | { kind: 'delete'; contractId: ContractId }
+  | { kind: 'delete-world'; world: number }
+  | {
+      kind: 'swap';
+      contract: ContractDefinition;
+      conflictingContractId: ContractId;
+      beginPreviewAfterSave: boolean;
+    };
 
 const MACHINE_COPY: Record<MachineType, { name: string; hint: string }> = {
   source: { name: 'Saída', hint: 'Gera caixas' },
   conveyor: { name: 'Esteira', hint: 'Conduz o fluxo' },
-  'tracked-conveyor': { name: 'Esteira física', hint: 'Move por corrente e atrito' },
+  'slow-conveyor': { name: 'Esteira lenta', hint: 'Move caixas com mais controle' },
+  'tracked-conveyor': { name: 'Esteira normal', hint: 'Move por corrente e atrito' },
+  'fast-conveyor': { name: 'Esteira rápida', hint: 'Move caixas em alta velocidade' },
   receiver: { name: 'Entrada', hint: 'Recebe caixas' },
   spring: { name: 'Trampolim', hint: 'Projeta caixas' },
   'turbo-spring': { name: 'Trampolim turbo', hint: 'Projeta caixas com força dupla' },
@@ -103,8 +125,6 @@ const DRAG_UI_RESTORE_DELAY_MS = 300;
 const MINIMUM_LOADING_DURATION_MS = 360;
 const MENU_CAMERA_DURATION_MS = 650;
 const MENU_CAMERA_FALLBACK_MS = MENU_CAMERA_DURATION_MS + 100;
-const CAMPAIGN_WORLD = 1;
-const CAMPAIGN_WORLDS = [{ value: 1, label: 'Mundo 1' }] as const;
 const CAMPAIGN_STAGE_POSITIONS = [
   { stage: 1, x: 132, y: 724 },
   { stage: 2, x: 336, y: 655 },
@@ -144,6 +164,7 @@ export class AppUI {
   readonly gameContainerId = 'game-container';
 
   private readonly root: HTMLElement;
+  private worlds: CampaignWorldDefinition[];
   private contracts: ContractDefinition[];
   private readonly adminAvailable: boolean;
   private readonly onProgressChange?: (progress: ProgressSave) => void;
@@ -160,7 +181,10 @@ export class AppUI {
   private catalogSavingContext?: CatalogSavingContext;
   private resultContractId?: ContractId;
   private selectedCampaignContractId?: ContractId;
-  private pendingAdminAction?: { contractId: ContractId };
+  private activeCampaignWorld = 1;
+  private activeAdminWorld = 1;
+  private editingWorld?: number;
+  private pendingAdminAction?: PendingAdminAction;
   private gameReady = false;
   private readonly loadingStartedAt = performance.now();
   private readonly domEvents = new AbortController();
@@ -175,6 +199,7 @@ export class AppUI {
 
   constructor(options: AppUIOptions) {
     this.root = options.root;
+    this.worlds = structuredClone([...options.worlds]);
     this.contracts = [...options.contracts].sort((a, b) => a.order - b.order);
     this.adminAvailable =
       options.adminAvailable ?? (import.meta.env.DEV && isLocalAdminHost(window.location.hostname));
@@ -208,9 +233,28 @@ export class AppUI {
     this.renderMenuCards();
   }
 
+  updateWorlds(worlds: readonly CampaignWorldDefinition[]): void {
+    this.worlds = structuredClone([...worlds]).sort((left, right) => left.world - right.world);
+    if (!this.worlds.some(({ world }) => world === this.activeCampaignWorld)) {
+      this.activeCampaignWorld = this.worlds[0]?.world ?? 1;
+    }
+    if (!this.worlds.some(({ world }) => world === this.activeAdminWorld)) {
+      this.activeAdminWorld = this.worlds[0]?.world ?? 1;
+    }
+    this.renderEditorWorldOptions();
+    this.renderMenuCards();
+  }
+
+  selectAdminWorld(world: number): void {
+    if (!this.worlds.some((candidate) => candidate.world === world)) return;
+    this.activeAdminWorld = world;
+    this.renderMenuCards();
+  }
+
   openAdminEditor(contract: ContractDefinition, options: AdminEditorOpenOptions = {}): void {
     if (!this.adminAvailable || !this.adminEnabled) return;
     this.editorContract = structuredClone(contract);
+    this.activeAdminWorld = contract.world;
     this.editorIsNew = options.isNew ?? false;
     this.editorDirty = options.dirty ?? false;
     this.editorPreviewActive = false;
@@ -232,6 +276,8 @@ export class AppUI {
     this.root.classList.remove('is-admin-editor', 'is-admin-preview');
     this.element('#editor-config-panel').classList.add('is-hidden');
     this.element('#editor-confirm-modal').classList.add('is-hidden');
+    this.element('#admin-confirm-modal').classList.add('is-hidden');
+    this.pendingAdminAction = undefined;
     this.clearEditorMessage();
     this.showMenu('play');
   }
@@ -263,7 +309,10 @@ export class AppUI {
     }
   }
 
-  markEditorSaved(contract: ContractDefinition): void {
+  markEditorSaved(
+    contract: ContractDefinition,
+    message = 'Fase salva no JSON local.',
+  ): void {
     if (!this.editorContract || this.editorContract.id !== contract.id) return;
     this.catalogSaving = false;
     this.catalogSavingContext = undefined;
@@ -272,7 +321,7 @@ export class AppUI {
     this.editorDirty = false;
     this.renderEditorState();
     this.renderCatalogSavingState();
-    this.setEditorMessage({ tone: 'success', message: 'Fase salva no JSON local.' });
+    this.setEditorMessage({ tone: 'success', message });
   }
 
   showMenu(view: MenuView = 'home'): void {
@@ -520,42 +569,38 @@ export class AppUI {
             </div>
           </header>
 
-          <nav class="action-rail" aria-label="Ferramentas da grade">
-            <button class="rail-button is-active" data-action="toggle-grid" type="button" aria-pressed="true" aria-label="Desligar grade" title="Grade ligada">
-              ${icon('grid')}
-            </button>
-            <span class="rail-divider" aria-hidden="true"></span>
-            <button class="rail-button" data-action="undo" aria-label="Desfazer" title="Desfazer · Ctrl+Z">${icon('undo')}</button>
-            <button class="rail-button" data-action="redo" aria-label="Refazer" title="Refazer · Ctrl+Y">${icon('redo')}</button>
-            <button class="rail-button rail-danger is-hidden" data-action="clear" aria-label="Limpar todas as máquinas" title="Limpar tudo">
-              ${icon('clear')}
-            </button>
+          <nav class="action-rail" aria-label="Ferramentas de construção">
+            <div class="rail-primary-actions" aria-label="Ferramentas da grade">
+              <button class="rail-button is-active" data-action="toggle-grid" type="button" aria-pressed="true" aria-label="Desligar grade" title="Grade ligada">
+                ${icon('grid')}
+              </button>
+              <span class="rail-divider" aria-hidden="true"></span>
+              <button class="rail-button" data-action="undo" aria-label="Desfazer" title="Desfazer · Ctrl+Z">${icon('undo')}</button>
+              <button class="rail-button" data-action="redo" aria-label="Refazer" title="Refazer · Ctrl+Y">${icon('redo')}</button>
+              <button class="rail-button rail-danger is-hidden" data-action="clear" aria-label="Limpar todas as máquinas" title="Limpar tudo">
+                ${icon('clear')}
+              </button>
+            </div>
+            <section class="build-palette" aria-label="Objetos disponíveis">
+              <div id="hotbar" class="hotbar" role="toolbar" aria-label="Máquinas"></div>
+            </section>
           </nav>
 
-          <section class="build-dock glass-panel" aria-label="Ferramentas de construção">
-            <div id="hotbar" class="hotbar" role="toolbar" aria-label="Máquinas"></div>
-          </section>
-          <aside id="conveyor-speed-control" class="conveyor-speed-popover glass-panel is-hidden" aria-label="Velocidade da esteira selecionada">
-            <span>VELOCIDADE</span>
-            <div class="conveyor-speed-toggle" role="radiogroup" aria-label="Velocidade da esteira">
-              <button class="conveyor-speed-option" data-action="conveyor-speed-slow" data-conveyor-speed-option="slow" type="button" role="radio" aria-label="Velocidade 1" aria-checked="false">1</button>
-              <button class="conveyor-speed-option" data-action="conveyor-speed-normal" data-conveyor-speed-option="normal" type="button" role="radio" aria-label="Velocidade 2" aria-checked="true">2</button>
-              <button class="conveyor-speed-option" data-action="conveyor-speed-fast" data-conveyor-speed-option="fast" type="button" role="radio" aria-label="Velocidade 3" aria-checked="false">3</button>
-            </div>
-          </aside>
           <section id="selection-dock" class="selection-dock glass-panel is-hidden" aria-label="Ações da seleção">
-            <button class="selection-action" data-action="copy" type="button" aria-label="Copiar item" title="Copiar · Ctrl+C">
-              ${icon('copy')}
-            </button>
-            <button class="selection-action" data-action="cut" type="button" aria-label="Recortar item" title="Recortar · Ctrl+X">
-              ${icon('cut')}
-            </button>
-            <button class="selection-action is-hidden" data-action="reverse" type="button" aria-label="Inverter sentido da esteira" title="Inverter sentido · R">
-              ${icon('reverse')}
-            </button>
-            <button class="selection-action selection-action-danger" data-action="delete" type="button" aria-label="Excluir item" title="Excluir · Delete">
-              ${icon('trash')}
-            </button>
+            <div class="selection-actions">
+              <button class="selection-action" data-action="copy" type="button" aria-label="Copiar item" title="Copiar · Ctrl+C">
+                ${icon('copy')}
+              </button>
+              <button class="selection-action" data-action="cut" type="button" aria-label="Recortar item" title="Recortar · Ctrl+X">
+                ${icon('cut')}
+              </button>
+              <button class="selection-action is-hidden" data-action="reverse" type="button" aria-label="Inverter sentido da esteira" title="Inverter sentido · R">
+                ${icon('reverse')}
+              </button>
+              <button class="selection-action selection-action-danger" data-action="delete" type="button" aria-label="Excluir item" title="Excluir · Delete">
+                ${icon('trash')}
+              </button>
+            </div>
           </section>
           <div id="editor-preview-bar" class="editor-preview-bar glass-panel is-hidden" role="status">
             <span><strong>PRÉVIA DO JOGADOR</strong> · alterações temporárias não serão salvas</span>
@@ -570,7 +615,7 @@ export class AppUI {
             <form id="editor-contract-form" autocomplete="off">
               <fieldset class="field-group phase-identity-fields">
                 <legend>Identificação</legend>
-                <label class="field"><span>Mundo *</span><select name="world" required>${CAMPAIGN_WORLDS.map(({ value, label }) => `<option value="${value}">${label}</option>`).join('')}</select></label>
+                <label class="field"><span>Mundo *</span><select name="world" required disabled aria-readonly="true" title="Definido pelo mundo selecionado na tela anterior" data-fixed-admin-world>${this.worlds.map(({ world }) => `<option value="${world}">Mundo ${world}</option>`).join('')}</select></label>
                 <label class="field"><span>Fase *</span><select name="stage" required>${Array.from({ length: 10 }, (_, index) => `<option value="${index + 1}">${index + 1}</option>`).join('')}</select></label>
                 <output class="phase-identity-preview field-wide" data-stage-label>1-1</output>
               </fieldset>
@@ -579,15 +624,15 @@ export class AppUI {
                 <label class="field"><span>Meta de entregas *</span><input name="deliveries" type="number" min="1" step="1" inputmode="numeric" required /></label>
                 <label class="check-field objective-losses-toggle"><input name="lossesEnabled" type="checkbox" /><span>Limitar perdas</span></label>
                 <label class="field field-wide optional-setting-field" data-losses-setting><span>Perdas máximas</span><input name="maxLosses" type="number" min="0" step="1" inputmode="numeric" /></label>
-                <p class="field-note field-wide">Todas as estrelas posicionadas no mapa fazem parte da meta.</p>
+                <p class="field-note field-wide">Estrelas são bônus opcionais e não impedem a conclusão da fase.</p>
               </fieldset>
               <fieldset class="field-group economy-fields">
                 <legend>Orçamento</legend>
                 <label class="check-field field-wide"><input name="budgetEnabled" type="checkbox" /><span>Limitar orçamento da fase</span></label>
                 <label class="field field-wide optional-setting-field" data-budget-setting><span>Orçamento máximo (US$)</span><input name="budgetLimit" type="number" min="0" step="1" inputmode="numeric" placeholder="Sem limite" /></label>
-                <label class="field"><span>Esteira · velocidade 1 (US$) *</span><input name="conveyorSlowCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
-                <label class="field"><span>Esteira · velocidade 2 (US$) *</span><input name="conveyorNormalCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
-                <label class="field"><span>Esteira · velocidade 3 (US$) *</span><input name="conveyorFastCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Custo da esteira lenta (US$) *</span><input name="conveyorSlowCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Custo da esteira normal (US$) *</span><input name="conveyorNormalCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
+                <label class="field"><span>Custo da esteira rápida (US$) *</span><input name="conveyorFastCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <label class="field"><span>Custo do trampolim (US$) *</span><input name="springCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <label class="field"><span>Custo do trampolim turbo (US$) *</span><input name="turboSpringCost" type="number" min="0" step="1" inputmode="numeric" required /></label>
                 <p class="field-note field-wide">Sem orçamento máximo, o jogador pode gastar sem limite e o medidor fica oculto.</p>
@@ -601,7 +646,9 @@ export class AppUI {
               </fieldset>
               <fieldset class="field-group tool-availability">
                 <legend>Ferramentas do jogador</legend>
-                <label class="check-field"><input name="availableTrackedConveyor" type="checkbox" /><span>${icon('conveyor')} Esteira física</span></label>
+                <label class="check-field"><input name="availableSlowConveyor" type="checkbox" /><span>${icon('slow-conveyor')} Esteira lenta</span></label>
+                <label class="check-field"><input name="availableTrackedConveyor" type="checkbox" /><span>${icon('tracked-conveyor')} Esteira normal</span></label>
+                <label class="check-field"><input name="availableFastConveyor" type="checkbox" /><span>${icon('fast-conveyor')} Esteira rápida</span></label>
                 <label class="check-field"><input name="availableSpring" type="checkbox" /><span>${icon('spring')} Trampolim</span></label>
                 <label class="check-field"><input name="availableTurboSpring" type="checkbox" /><span>${icon('turbo-spring')} Trampolim turbo</span></label>
               </fieldset>
@@ -629,15 +676,16 @@ export class AppUI {
 
                 <section class="menu-view menu-play-view is-hidden" data-menu-panel="play" aria-label="Jogar" aria-hidden="true" inert>
                   <div class="campaign-map-stage">
-                    <div class="campaign-map-art" id="campaign-map-art">
-                      <img class="campaign-map-image" src="${factoryCampaignEnvironmentUrl}" alt="Cenário industrial da campanha" draggable="false" />
-                      <div id="campaign-route-root" class="campaign-route-root"></div>
-                      <div id="campaign-stage-nodes" class="campaign-stage-nodes" role="group" aria-label="Fases do Mundo 1"></div>
-                    </div>
+                    <div id="campaign-world-track" class="campaign-world-track"></div>
                     <div class="campaign-map-brand" role="img" aria-label="Factory">Factory<span aria-hidden="true">.</span></div>
                     <button class="options-back-button campaign-map-back-button" data-action="menu-home" type="button" aria-label="Voltar ao menu principal">
                       ${icon('back')}
                     </button>
+                    <nav class="campaign-world-navigation" aria-label="Navegar entre mundos">
+                      <button class="campaign-world-arrow" data-action="campaign-world-previous" type="button" aria-label="Mundo anterior">${icon('back')}</button>
+                      <strong id="campaign-world-label">Mundo 1</strong>
+                      <button class="campaign-world-arrow campaign-world-arrow-next" data-action="campaign-world-next" type="button" aria-label="Próximo mundo">${icon('back')}</button>
+                    </nav>
                     <section id="campaign-stage-actions" class="campaign-stage-actions is-hidden" aria-live="polite">
                       <button class="main-menu-action campaign-stage-play" data-action="campaign-play" type="button">Jogar</button>
                     </section>
@@ -651,7 +699,18 @@ export class AppUI {
                       <span class="progress-copy" id="campaign-progress">0 de 3 concluídos</span>
                     </header>
                     <div class="contract-browser campaign-browser">
-                      <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
+                      <nav id="admin-world-tabs" class="admin-world-tabs" role="tablist" aria-label="Mundos da campanha"></nav>
+                      <div class="admin-world-toolbar">
+                        <span id="menu-admin-badge" class="admin-badge menu-admin-badge is-hidden" role="status" aria-live="polite">ADMIN LOCAL</span>
+                        <div class="admin-world-actions" aria-label="Configurações do mundo ativo">
+                          <button class="admin-world-action" data-action="admin-configure-world" type="button">
+                            ${icon('settings')}<span>Configurar mundo</span>
+                          </button>
+                          <button class="admin-world-action is-danger" data-action="admin-delete-world" type="button">
+                            ${icon('trash')}<span>Excluir mundo</span>
+                          </button>
+                        </div>
+                      </div>
                       <div id="contract-list" class="contract-list" aria-label="Fases da campanha"></div>
                       <nav id="contract-pagination" class="contract-pagination" aria-label="Selecionar fase"></nav>
                       <div class="campaign-actions">
@@ -741,6 +800,8 @@ export class AppUI {
                         </header>
                         <ul class="control-help-list">
                           <li><kbd>Espaço</kbd><span>Iniciar ou pausar</span></li>
+                          <li><kbd>Setas</kbd><span>Mover seleção com precisão</span></li>
+                          <li><kbd>Shift + ← / →</kbd><span>Girar seleção com precisão</span></li>
                           <li><kbd>Q / E</kbd><span>Girar seleção</span></li>
                           <li><kbd>R</kbd><span>Inverter</span></li>
                           <li><kbd>Delete</kbd><span>Excluir seleção</span></li>
@@ -807,7 +868,7 @@ export class AppUI {
             </header>
             <div class="result-metrics">
               ${resultMetric('Entregas', '0 / 0', 'delivered', 'deliveries')}
-              ${resultMetric('Estrelas', '0 / 0', 'collected-stars', 'stars')}
+              ${resultMetric('Estrelas bônus', '0 / 0', 'collected-stars', 'stars')}
               ${resultMetric('Orçamento', '$0 / Sem limite', 'budget', 'budget')}
               ${resultMetric('Perdas', '0', 'lost', 'losses', true)}
             </div>
@@ -851,6 +912,24 @@ export class AppUI {
           </div>
         </section>
 
+        <section id="world-create-modal" class="modal-layer is-hidden" role="dialog" aria-modal="true" aria-labelledby="world-create-title">
+          <div class="modal-scrim"></div>
+          <form id="world-create-form" class="confirm-card world-create-card">
+            <span class="eyebrow accent" id="world-create-kicker">NOVO MUNDO</span>
+            <h2 id="world-create-title">Criar Mundo 2</h2>
+            <p id="world-create-copy">Escolha as cores do mapa. As fases poderão ser adicionadas depois, uma por uma.</p>
+            <div class="world-color-preview" aria-hidden="true"></div>
+            <div class="world-color-fields">
+              <label class="field"><span>Cor do fundo</span><input name="backgroundColor" type="color" value="${DEFAULT_WORLD_BACKGROUND_COLOR}" required /></label>
+              <label class="field"><span>Cor da grade</span><input name="gridColor" type="color" value="${DEFAULT_WORLD_GRID_COLOR}" required /></label>
+            </div>
+            <div class="result-actions">
+              <button class="soft-button" data-action="world-create-cancel" type="button">Cancelar</button>
+              <button class="soft-button" id="world-create-submit" data-action="world-create-confirm" type="button">Criar mundo</button>
+            </div>
+          </form>
+        </section>
+
         <div id="game-loading" class="game-loading" role="status" aria-live="polite">
           <div class="loading-card">
             <span class="loading-spinner" aria-hidden="true"></span>
@@ -881,11 +960,6 @@ export class AppUI {
         event.stopPropagation();
         void this.audio.resume();
       },
-      { signal: this.domEvents.signal },
-    );
-    this.element('#conveyor-speed-control').addEventListener(
-      'pointerdown',
-      (event) => event.stopPropagation(),
       { signal: this.domEvents.signal },
     );
     this.root.addEventListener(
@@ -977,6 +1051,10 @@ export class AppUI {
           this.handleEditorFormInput();
           return;
         }
+        if (input.closest('#world-create-form')) {
+          this.updateWorldColorPreview();
+          return;
+        }
         if (input.dataset.speed !== undefined) {
           const index = Math.max(0, Math.min(SIMULATION_SPEEDS.length - 1, Number(input.value)));
           const speed = SIMULATION_SPEEDS[index] ?? 1;
@@ -1004,6 +1082,7 @@ export class AppUI {
       appEvents.on('game:snapshot', (snapshot) => this.renderSnapshot(snapshot)),
       appEvents.on('game:angle', (payload) => this.renderAngle(payload)),
       appEvents.on('game:dragging', ({ active }) => this.setDragUiOccluded(active)),
+      appEvents.on('game:cost-feedback', (payload) => this.showCostFeedback(payload)),
       appEvents.on('game:toast', ({ message, tone }) => this.showToast(message, tone)),
       appEvents.on('game:audio', ({ kind }) => this.audio.play(kind)),
       appEvents.on('game:result', ({ contractId, snapshot }) => {
@@ -1012,14 +1091,13 @@ export class AppUI {
       }),
       appEvents.on('game:completion-recorded', ({ contractId, snapshot }) => {
         const contract = this.contracts.find(({ id }) => id === contractId);
-        const next = contract
-          ? this.contracts.find(
-              (candidate) =>
-                candidate.world === contract.world && candidate.stage === contract.stage + 1,
-            )
+        const nextId = contract ? getNextContractId(contract.id, this.contracts) : undefined;
+        const next = nextId
+          ? this.contracts.find((candidate) => candidate.id === nextId)
           : undefined;
         if (next && this.progress.unlockedContracts.includes(next.id)) {
           this.selectedCampaignContractId = next.id;
+          this.activeCampaignWorld = next.world;
           this.renderCampaignMap();
         }
         this.renderResult({
@@ -1106,6 +1184,12 @@ export class AppUI {
       case 'campaign-play':
         this.startSelectedCampaign();
         break;
+      case 'campaign-world-previous':
+        this.changeCampaignWorld(-1);
+        break;
+      case 'campaign-world-next':
+        this.changeCampaignWorld(1);
+        break;
       case 'options-audio-video':
         this.setOptionsCategory('audio-video');
         break;
@@ -1168,14 +1252,6 @@ export class AppUI {
       case 'reverse':
         appEvents.emit('ui:reverse-selected', undefined);
         break;
-      case 'conveyor-speed-slow':
-      case 'conveyor-speed-normal':
-      case 'conveyor-speed-fast': {
-        const speed = action.replace('conveyor-speed-', '') as ConveyorSpeed;
-        this.renderConveyorSpeed(speed);
-        appEvents.emit('ui:set-conveyor-speed', { speed });
-        break;
-      }
       case 'toggle-grid':
         appEvents.emit('ui:toggle-grid', undefined);
         break;
@@ -1195,7 +1271,26 @@ export class AppUI {
         break;
       case 'admin-create':
         if (this.catalogSaving) break;
-        appEvents.emit('ui:admin-create-contract', undefined);
+        appEvents.emit('ui:admin-create-contract', { world: this.activeAdminWorld });
+        break;
+      case 'admin-new-world':
+        if (this.catalogSaving) break;
+        this.openWorldCreateModal();
+        break;
+      case 'admin-configure-world':
+        if (this.catalogSaving) break;
+        this.openWorldEditModal();
+        break;
+      case 'admin-delete-world':
+        if (this.catalogSaving) break;
+        this.openWorldDeleteConfirmation();
+        break;
+      case 'world-create-cancel':
+        this.closeWorldCreateModal();
+        break;
+      case 'world-create-confirm':
+        if (this.catalogSaving) break;
+        this.confirmWorldCreation();
         break;
       case 'editor-configure':
         this.toggleEditorConfiguration();
@@ -1205,22 +1300,14 @@ export class AppUI {
         break;
       case 'editor-test':
         if (this.catalogSaving) break;
-        if (this.editorContract && this.validateEditorSettings()) {
-          this.setEditorMessage({ tone: 'neutral', message: 'Validando e salvando no JSON…' });
-          appEvents.emit('ui:editor-test', {
-            contract: structuredClone(this.editorContract),
-          });
-        }
+        this.requestEditorPersistence(true);
         break;
       case 'editor-return':
         appEvents.emit('ui:editor-return', undefined);
         break;
       case 'editor-save':
         if (this.catalogSaving) break;
-        if (this.editorContract && this.validateEditorSettings()) {
-          this.setEditorMessage({ tone: 'neutral', message: 'Salvando no JSON…' });
-          appEvents.emit('ui:editor-save', { contract: structuredClone(this.editorContract) });
-        }
+        this.requestEditorPersistence(false);
         break;
       case 'editor-cancel':
         this.requestEditorCancel();
@@ -1331,6 +1418,26 @@ export class AppUI {
     list.innerHTML = '';
     pagination.innerHTML = '';
     pagination.classList.remove('is-hidden');
+    if (this.adminEnabled) {
+      this.renderAdminWorldTabs();
+      const worldContracts = this.contracts.filter(
+        ({ world }) => world === this.activeAdminWorld,
+      );
+      this.renderAdminWorldActionState();
+      pagination.classList.add('is-hidden');
+      if (worldContracts.length === 0) {
+        this.element('#campaign-progress').textContent = `Mundo ${this.activeAdminWorld} sem fases`;
+        list.innerHTML = `
+          <div class="contract-empty-state" role="status">
+            <strong>Nenhuma fase no Mundo ${this.activeAdminWorld}</strong>
+            <span>Crie a primeira fase deste mundo para começar a montar o mapa.</span>
+          </div>`;
+      } else {
+        this.renderAdminMenuCards(list, worldContracts);
+      }
+      this.renderCatalogSavingState();
+      return;
+    }
     if (this.contracts.length === 0) {
       this.element('#campaign-progress').textContent = 'Nenhuma fase publicada';
       list.innerHTML = `
@@ -1343,11 +1450,6 @@ export class AppUI {
           }</span>
         </div>`;
       pagination.classList.add('is-hidden');
-      this.renderCatalogSavingState();
-      return;
-    }
-    if (this.adminEnabled) {
-      this.renderAdminMenuCards(list);
       this.renderCatalogSavingState();
       return;
     }
@@ -1386,7 +1488,7 @@ export class AppUI {
             <span class="contract-title-row"><strong>${label}</strong></span>
             <span class="contract-tags">
               <i>${contract.goal.deliveries} caixas</i>
-              <i>${contract.collectibles.length} estrelas</i>
+              <i>${contract.collectibles.length} estrelas bônus</i>
               <i>${formatBudgetLabel(contract.economy.budgetLimit)}</i>
             </span>
           <span class="stage-card-cta">${unlocked ? `Jogar ${icon('play')}` : `Bloqueada ${icon('lock')}`}</span>
@@ -1401,6 +1503,7 @@ export class AppUI {
             contractId: contract.id,
             contract: structuredClone(contract),
             machines: structuredClone(this.progress.campaignLayouts[contract.id]?.machines ?? []),
+            worldTheme: this.worldThemeFor(contract.world),
           });
         });
       }
@@ -1432,14 +1535,14 @@ export class AppUI {
   }
 
   private renderCampaignMap(): void {
-    const contractsByStage = new Map(
-      this.contracts
-        .filter((contract) => contract.world === CAMPAIGN_WORLD)
-        .map((contract) => [contract.stage, contract] as const),
-    );
+    if (this.worlds.length === 0) return;
+    if (!this.worlds.some(({ world }) => world === this.activeCampaignWorld)) {
+      this.activeCampaignWorld = this.worlds[0]!.world;
+    }
     const unlockedContracts = this.contracts.filter(
       (contract) =>
-        contract.world === CAMPAIGN_WORLD && this.progress.unlockedContracts.includes(contract.id),
+        contract.world === this.activeCampaignWorld &&
+        this.progress.unlockedContracts.includes(contract.id),
     );
     const currentSelection = unlockedContracts.find(
       (contract) => contract.id === this.selectedCampaignContractId,
@@ -1452,6 +1555,33 @@ export class AppUI {
         firstIncomplete?.id ?? unlockedContracts.at(-1)?.id ?? unlockedContracts[0]?.id;
     }
 
+    const activeIndex = Math.max(
+      0,
+      this.worlds.findIndex(({ world }) => world === this.activeCampaignWorld),
+    );
+    const track = this.element<HTMLElement>('#campaign-world-track');
+    track.innerHTML = this.worlds.map((world) => this.campaignWorldPage(world)).join('');
+    track.style.setProperty('--campaign-world-index', String(activeIndex));
+    track.querySelectorAll<HTMLButtonElement>('[data-campaign-contract]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const contractId = button.dataset.campaignContract;
+        if (contractId) this.selectCampaignContract(contractId, true);
+      });
+    });
+    this.element('#campaign-world-label').textContent = `Mundo ${this.activeCampaignWorld}`;
+    this.element<HTMLButtonElement>('[data-action="campaign-world-previous"]').disabled =
+      activeIndex === 0;
+    this.element<HTMLButtonElement>('[data-action="campaign-world-next"]').disabled =
+      activeIndex === this.worlds.length - 1;
+    this.renderCampaignStageActions();
+  }
+
+  private campaignWorldPage(world: CampaignWorldDefinition): string {
+    const contractsByStage = new Map(
+      this.contracts
+        .filter((contract) => contract.world === world.world)
+        .map((contract) => [contract.stage, contract] as const),
+    );
     const lockedStages = new Set<number>();
     for (const position of CAMPAIGN_STAGE_POSITIONS) {
       const contract = contractsByStage.get(position.stage);
@@ -1459,15 +1589,13 @@ export class AppUI {
         lockedStages.add(position.stage);
       }
     }
-    this.element('#campaign-route-root').innerHTML = campaignRouteLinks(lockedStages);
-
-    const nodes = this.element('#campaign-stage-nodes');
-    nodes.innerHTML = CAMPAIGN_STAGE_POSITIONS.map((position) => {
+    const active = world.world === this.activeCampaignWorld;
+    const nodes = CAMPAIGN_STAGE_POSITIONS.map((position) => {
       const contract = contractsByStage.get(position.stage);
       const unlocked = Boolean(contract && this.progress.unlockedContracts.includes(contract.id));
-      const selected = unlocked && contract?.id === this.selectedCampaignContractId;
+      const selected = active && unlocked && contract?.id === this.selectedCampaignContractId;
       const completed = Boolean(contract && isContractCompleted(this.progress, contract));
-      const label = `${position.stage}-${CAMPAIGN_WORLD}`;
+      const label = `${position.stage}-${world.world}`;
       const ariaLabel = !contract
         ? `Fase ${label}, não cadastrada`
         : unlocked
@@ -1490,18 +1618,38 @@ export class AppUI {
         </button>`;
     }).join('');
 
-    nodes.querySelectorAll<HTMLButtonElement>('[data-campaign-contract]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const contractId = button.dataset.campaignContract;
-        if (contractId) this.selectCampaignContract(contractId, true);
-      });
-    });
-    this.renderCampaignStageActions();
+    return `<section
+      class="campaign-world-page${active ? ' is-active' : ''}"
+      data-campaign-world="${world.world}"
+      style="--world-background:${escapeHTML(world.backgroundColor)};--world-grid:${escapeHTML(world.gridColor)}"
+      aria-label="Mapa do Mundo ${world.world}"
+      aria-hidden="${!active}"
+      ${active ? '' : 'inert'}>
+        <div class="campaign-world-grid"></div>
+        <div class="campaign-map-art">
+          ${world.world === 1 ? `<img class="campaign-map-image" src="${factoryCampaignEnvironmentUrl}" alt="Cenário industrial da campanha" draggable="false" />` : ''}
+          ${world.world === 1 ? '' : `<span class="campaign-world-watermark" aria-hidden="true">Mundo ${world.world}</span>`}
+          <div class="campaign-route-root">${campaignRouteLinks(lockedStages)}</div>
+          <div class="campaign-stage-nodes" role="group" aria-label="Fases do Mundo ${world.world}">${nodes}</div>
+        </div>
+      </section>`;
+  }
+
+  private changeCampaignWorld(direction: -1 | 1): void {
+    const currentIndex = this.worlds.findIndex(
+      ({ world }) => world === this.activeCampaignWorld,
+    );
+    const next = this.worlds[currentIndex + direction];
+    if (!next) return;
+    this.activeCampaignWorld = next.world;
+    this.selectedCampaignContractId = undefined;
+    this.renderCampaignMap();
   }
 
   private selectCampaignContract(contractId: ContractId, focus = false): void {
     const contract = this.contracts.find(({ id }) => id === contractId);
     if (!contract || !this.progress.unlockedContracts.includes(contract.id)) return;
+    this.activeCampaignWorld = contract.world;
     this.selectedCampaignContractId = contract.id;
     this.renderCampaignMap();
     if (focus) {
@@ -1527,6 +1675,7 @@ export class AppUI {
       contractId: contract.id,
       contract: structuredClone(contract),
       machines: structuredClone(this.progress.campaignLayouts[contract.id]?.machines ?? []),
+      worldTheme: this.worldThemeFor(contract.world),
     });
   }
 
@@ -1550,14 +1699,64 @@ export class AppUI {
     if (scroll) cards[safeIndex]?.scrollIntoView({ behavior, block: 'nearest', inline: 'center' });
   }
 
-  private renderAdminMenuCards(list: HTMLElement): void {
-    const completed = this.contracts.filter((contract) =>
+  private renderAdminWorldTabs(): void {
+    const tabs = this.element('#admin-world-tabs');
+    tabs.innerHTML = this.worlds
+      .map(
+        ({ world }) => `<button
+          class="admin-world-tab${world === this.activeAdminWorld ? ' is-active' : ''}"
+          type="button"
+          role="tab"
+          data-admin-world="${world}"
+          aria-selected="${world === this.activeAdminWorld}">Mundo ${world}</button>`,
+      )
+      .join('');
+    const add = document.createElement('button');
+    add.className = 'admin-world-add';
+    add.type = 'button';
+    add.dataset.action = 'admin-new-world';
+    add.setAttribute('aria-label', 'Criar novo mundo');
+    add.title = 'Criar novo mundo';
+    add.innerHTML = icon('plus');
+    tabs.append(add);
+    tabs.querySelectorAll<HTMLButtonElement>('[data-admin-world]').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const world = Number(tab.dataset.adminWorld);
+        if (!Number.isInteger(world) || this.catalogSaving) return;
+        this.activeAdminWorld = world;
+        this.renderMenuCards();
+      });
+    });
+  }
+
+  private renderAdminWorldActionState(): void {
+    const configure = this.element<HTMLButtonElement>('[data-action="admin-configure-world"]');
+    const remove = this.element<HTMLButtonElement>('[data-action="admin-delete-world"]');
+    const hasPhases = this.contracts.some(({ world }) => world === this.activeAdminWorld);
+    const isOnlyWorld = this.worlds.length === 1;
+    configure.disabled = this.catalogSaving;
+    configure.setAttribute('aria-label', `Configurar Mundo ${this.activeAdminWorld}`);
+    configure.title = `Alterar as cores do Mundo ${this.activeAdminWorld}`;
+    remove.disabled = this.catalogSaving || hasPhases || isOnlyWorld;
+    remove.setAttribute('aria-label', `Excluir Mundo ${this.activeAdminWorld}`);
+    remove.title = hasPhases
+      ? 'Exclua todas as fases deste mundo antes de removê-lo.'
+      : isOnlyWorld
+        ? 'É necessário manter pelo menos um mundo cadastrado.'
+        : `Excluir o Mundo ${this.activeAdminWorld}`;
+  }
+
+  private renderAdminMenuCards(
+    list: HTMLElement,
+    worldContracts: readonly ContractDefinition[],
+  ): void {
+    const completed = worldContracts.filter((contract) =>
       isContractCompleted(this.progress, contract),
     ).length;
     this.element('#campaign-progress').textContent =
-      `${completed} de ${this.contracts.length} concluídos`;
+      `${completed} de ${worldContracts.length} concluídos · Mundo ${this.activeAdminWorld}`;
 
-    for (const contract of this.contracts) {
+    for (const contract of worldContracts) {
       const unlocked = this.progress.unlockedContracts.includes(contract.id);
       const completedContract = isContractCompleted(this.progress, contract);
       const label = contractLabel(contract);
@@ -1574,14 +1773,17 @@ export class AppUI {
           </span>
           <span class="contract-tags">
             <i>${contract.goal.deliveries} caixas</i>
-            <i>${contract.collectibles.length} estrelas</i>
+            <i>${contract.collectibles.length} estrelas bônus</i>
             <i>${formatBudgetLabel(contract.economy.budgetLimit)}</i>
           </span>
         </span>
         <span class="card-arrow" aria-hidden="true">${icon('edit')}</span>`;
       button.addEventListener('click', () => {
         this.openAdminEditor(contract);
-        appEvents.emit('ui:start-editor', { contract: structuredClone(contract) });
+        appEvents.emit('ui:start-editor', {
+          contract: structuredClone(contract),
+          worldTheme: this.worldThemeFor(contract.world),
+        });
       });
       entry.append(button);
 
@@ -1600,6 +1802,10 @@ export class AppUI {
 
   private renderSnapshot(snapshot: GameSnapshot): void {
     this.snapshot = snapshot;
+    this.element('.factory-app').classList.toggle(
+      'is-simulation-active',
+      snapshot.status !== 'build',
+    );
     this.renderBudgetMeter(snapshot.economy);
     const runIcon = this.element('[data-run-icon]');
     const runButton = this.element<HTMLButtonElement>('[data-action="run"]');
@@ -1656,7 +1862,8 @@ export class AppUI {
       snapshot.selectedMachine,
       snapshot.selectedObstacle,
       snapshot.selection.count,
-      snapshot.selectedMachineClientBounds,
+      snapshot.selectionClientBounds,
+      snapshot.selectionRotationHandleClient,
     );
   }
 
@@ -1713,12 +1920,17 @@ export class AppUI {
         button.dataset.tool = machine;
         button.setAttribute(
           'aria-label',
-          `${copy.name}: ${copy.hint}. Custo ${formatCurrency(cost)}`,
+          `${copy.name}: ${copy.hint}. ${economy ? `Custo ${formatCurrency(cost)}` : 'Sem custo'}`,
         );
         button.setAttribute('aria-describedby', tooltipId);
         button.innerHTML = `
           <span class="tool-glyph tool-${machine}">${machineThumbnail(machine)}</span>
-          ${toolTooltip(tooltipId, copy.name, copy.hint, formatCurrency(cost))}`;
+          ${toolTooltip(
+            tooltipId,
+            copy.name,
+            copy.hint,
+            economy ? formatCurrency(cost) : 'Sem custo',
+          )}`;
         this.bindPaletteDrag(button, hotbar, machine);
         hotbar.append(button);
       }
@@ -1736,11 +1948,7 @@ export class AppUI {
       tooltip?.classList.toggle('is-unaffordable', unavailable);
       const status = tooltip?.querySelector<HTMLElement>('[data-tool-status]');
       if (status) {
-        status.textContent = unavailable
-          ? 'Limite máximo atingido'
-          : economy?.budgetLimit === undefined
-            ? 'Sem limite'
-            : '';
+        status.textContent = unavailable ? 'Limite máximo atingido' : '';
       }
     });
   }
@@ -1755,10 +1963,22 @@ export class AppUI {
       { type: 'source', label: 'Saída', hint: 'Gera caixas', icon: 'source' },
       { type: 'receiver', label: 'Entrada', hint: 'Recebe caixas', icon: 'receiver' },
       {
+        type: 'slow-conveyor',
+        label: 'Esteira lenta',
+        hint: 'Corrente de baixa velocidade',
+        icon: 'slow-conveyor',
+      },
+      {
         type: 'tracked-conveyor',
-        label: 'Esteira física',
+        label: 'Esteira normal',
         hint: 'Corrente motorizada',
-        icon: 'conveyor',
+        icon: 'tracked-conveyor',
+      },
+      {
+        type: 'fast-conveyor',
+        label: 'Esteira rápida',
+        hint: 'Corrente de alta velocidade',
+        icon: 'fast-conveyor',
       },
       { type: 'spring', label: 'Trampolim', hint: 'Cenário fixo', icon: 'spring' },
       {
@@ -1852,7 +2072,8 @@ export class AppUI {
     machine?: MachineState,
     obstacle?: ObstacleDefinition,
     selectionCount = 0,
-    machineClientBounds?: GameSnapshot['selectedMachineClientBounds'],
+    selectionClientBounds?: GameSnapshot['selectionClientBounds'],
+    selectionRotationHandleClient?: GameSnapshot['selectionRotationHandleClient'],
   ): void {
     const editing = Boolean(this.editorContract && !this.editorPreviewActive);
     const canManipulate = Boolean(
@@ -1865,7 +2086,6 @@ export class AppUI {
     const copy = this.element<HTMLButtonElement>('[data-action="copy"]');
     const cut = this.element<HTMLButtonElement>('[data-action="cut"]');
     const reverse = this.element<HTMLButtonElement>('[data-action="reverse"]');
-    const speedControl = this.element('#conveyor-speed-control');
     remove.disabled = !canManipulate;
     copy.disabled = !canManipulate;
     cut.disabled = !canManipulate;
@@ -1873,17 +2093,11 @@ export class AppUI {
     const canReverse = Boolean(
       !multiple &&
       machine &&
-      (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') &&
+      isConveyorMachineType(machine.type) &&
       (editing || !machine.fixed),
     );
     reverse.classList.toggle('is-hidden', !canReverse);
     reverse.disabled = !canReverse;
-    const showSpeed = Boolean(canReverse && machine && machineClientBounds);
-    speedControl.classList.toggle('is-hidden', !showSpeed);
-    if (showSpeed && machine && machineClientBounds) {
-      this.renderConveyorSpeed(machine.conveyorSpeed ?? 'normal');
-      this.positionConveyorSpeed(speedControl, machineClientBounds);
-    }
     remove.setAttribute(
       'aria-label',
       multiple ? `Excluir ${selectionCount} itens` : 'Excluir item',
@@ -1908,50 +2122,132 @@ export class AppUI {
       copy.title = 'Copiar item · Ctrl+C';
       cut.title = 'Recortar item · Ctrl+X';
     }
-    this.element('#selection-dock').classList.toggle('is-hidden', !canManipulate);
+    const selectionDock = this.element('#selection-dock');
+    selectionDock.classList.toggle('is-hidden', !canManipulate);
+    if (canManipulate && selectionClientBounds) {
+      this.positionSelectionDock(
+        selectionDock,
+        selectionClientBounds,
+        selectionRotationHandleClient,
+      );
+    }
     this.root.classList.toggle('has-selection-actions', canManipulate);
   }
 
-  private positionConveyorSpeed(
+  private positionSelectionDock(
     control: HTMLElement,
-    bounds: NonNullable<GameSnapshot['selectedMachineClientBounds']>,
+    bounds: NonNullable<GameSnapshot['selectionClientBounds']>,
+    rotationHandle?: GameSnapshot['selectionRotationHandleClient'],
   ): void {
     const containerBounds = this.element('#game-ui').getBoundingClientRect();
     const safeEdge = 16;
-    const verticalGap = 14;
-    const rotationClearance = 54;
-    const width = control.offsetWidth || 176;
-    const height = control.offsetHeight || 72;
-    const centeredLeft = (bounds.left + bounds.right) / 2 - containerBounds.left - width / 2;
-    const maximumLeft = Math.max(safeEdge, containerBounds.width - width - safeEdge);
-    const left = Math.min(Math.max(centeredLeft, safeEdge), maximumLeft);
-    const belowTop = bounds.bottom - containerBounds.top + verticalGap;
-    const selectionDockBounds = this.element('#selection-dock').getBoundingClientRect();
-    const selectionDockTop = selectionDockBounds.top - containerBounds.top;
-    const bottomLimit = Math.min(containerBounds.height - 104, selectionDockTop - verticalGap);
-    const fitsBelow = belowTop + height <= bottomLimit;
-    const aboveTop = bounds.top - containerBounds.top - height - rotationClearance;
-    const top = fitsBelow ? belowTop : Math.max(96, Math.min(aboveTop, bottomLimit - height));
+    const sideGap = 18;
+    const rotationHandleClearance = 42;
+    const topSafeArea = 96;
+    const width = control.offsetWidth || 220;
+    const height = control.offsetHeight || 76;
+    const railBounds = this.element('.action-rail').getBoundingClientRect();
+    const rightLimit = Math.min(
+      containerBounds.width - safeEdge,
+      railBounds.left - containerBounds.left - sideGap,
+    );
+    const centerX = (bounds.left + bounds.right) / 2 - containerBounds.left;
+    const centerY = (bounds.top + bounds.bottom) / 2 - containerBounds.top;
+    const localBounds = {
+      left: bounds.left - containerBounds.left,
+      top: bounds.top - containerBounds.top,
+      right: bounds.right - containerBounds.left,
+      bottom: bounds.bottom - containerBounds.top,
+    };
+    const localRotationHandle = rotationHandle
+      ? {
+          x: rotationHandle.x - containerBounds.left,
+          y: rotationHandle.y - containerBounds.top,
+          radius: rotationHandle.radius + 8,
+        }
+      : undefined;
+    const candidates = [
+      {
+        placement: 'left',
+        left: localBounds.left - width - sideGap,
+        top: centerY - height / 2,
+      },
+      {
+        placement: 'right',
+        left: localBounds.right + rotationHandleClearance,
+        top: centerY - height / 2,
+      },
+      {
+        placement: 'bottom',
+        left: centerX - width / 2,
+        top: localBounds.bottom + sideGap,
+      },
+      {
+        placement: 'top',
+        left: centerX - width / 2,
+        top: localBounds.top - height - sideGap,
+      },
+    ] as const;
+    const rotationHandleOverlap = (left: number, top: number): number => {
+      if (!localRotationHandle) return 0;
+      const closestX = Math.max(left, Math.min(localRotationHandle.x, left + width));
+      const closestY = Math.max(top, Math.min(localRotationHandle.y, top + height));
+      const overlap = Math.max(
+        0,
+        localRotationHandle.radius -
+          Math.hypot(localRotationHandle.x - closestX, localRotationHandle.y - closestY),
+      );
+      return overlap * overlap;
+    };
+    const fits = (candidate: (typeof candidates)[number]): boolean =>
+      candidate.left >= safeEdge &&
+      candidate.left + width <= rightLimit &&
+      candidate.top >= topSafeArea &&
+      candidate.top + height <= containerBounds.height - safeEdge &&
+      rotationHandleOverlap(candidate.left, candidate.top) === 0;
+    const clampCandidate = (candidate: (typeof candidates)[number]) => {
+      const left = Math.min(
+        Math.max(candidate.left, safeEdge),
+        Math.max(safeEdge, rightLimit - width),
+      );
+      const top = Math.min(
+        Math.max(candidate.top, topSafeArea),
+        Math.max(topSafeArea, containerBounds.height - height - safeEdge),
+      );
+      const overlapWidth = Math.max(
+        0,
+        Math.min(left + width, localBounds.right) - Math.max(left, localBounds.left),
+      );
+      const overlapHeight = Math.max(
+        0,
+        Math.min(top + height, localBounds.bottom) - Math.max(top, localBounds.top),
+      );
+      return {
+        ...candidate,
+        left,
+        top,
+        overlapArea: overlapWidth * overlapHeight,
+        rotationHandleOverlap: rotationHandleOverlap(left, top),
+      };
+    };
+    const exact = candidates.find(fits);
+    const clamped = candidates.map(clampCandidate);
+    const selected = exact
+      ? clampCandidate(exact)
+      : (clamped.find(
+          ({ overlapArea, rotationHandleOverlap }) =>
+            overlapArea === 0 && rotationHandleOverlap === 0,
+        ) ??
+        clamped.reduce((best, candidate) =>
+          candidate.overlapArea + candidate.rotationHandleOverlap * 4 <
+          best.overlapArea + best.rotationHandleOverlap * 4
+            ? candidate
+            : best,
+        ));
 
-    control.dataset.placement = fitsBelow ? 'bottom' : 'top';
-    control.style.left = `${Math.round(left)}px`;
-    control.style.top = `${Math.round(top)}px`;
-  }
-
-  private renderConveyorSpeed(speed: ConveyorSpeed): void {
-    const normalized = CONVEYOR_SPEEDS.includes(speed) ? speed : 'normal';
-    const control = this.element('#conveyor-speed-control');
-    control.dataset.level = normalized;
-    control
-      .querySelectorAll<HTMLButtonElement>('[data-conveyor-speed-option]')
-      .forEach((button) => {
-        const active = button.dataset.conveyorSpeedOption === normalized;
-        button.classList.toggle('is-active', active);
-        button.setAttribute('aria-checked', String(active));
-        button.title = active
-          ? `${CONVEYOR_SPEED_LABELS[normalized]} selecionado`
-          : `Usar velocidade ${button.textContent?.trim().toLocaleLowerCase('pt-BR') ?? ''}`;
-      });
+    control.dataset.placement = selected.placement;
+    control.style.left = `${Math.round(selected.left)}px`;
+    control.style.top = `${Math.round(selected.top)}px`;
   }
 
   private renderSimulationSpeed(speed: number): void {
@@ -2031,13 +2327,16 @@ export class AppUI {
       : 'Contrato não concluído';
     this.element('#result-summary').textContent = success
       ? budgetLimit === undefined
-        ? 'As metas de entregas e os serviços foram concluídos.'
-        : 'As metas de entregas e os serviços foram concluídos dentro do orçamento.'
-      : tracksLosses && snapshot.metrics.lost > snapshot.goal!.maxLosses!
-        ? 'Muitas caixas foram perdidas. Ajuste os ângulos e tente de novo.'
-        : budgetLimit !== undefined && spent > budgetLimit
-          ? 'O orçamento nominal foi ultrapassado. Reduza os itens para concluir a fase.'
-          : 'A meta não foi concluída. Ajuste a linha e tente de novo.';
+        ? 'A meta de entregas foi concluída. Estrelas coletadas contam como bônus.'
+        : 'A meta de entregas foi concluída dentro do orçamento.'
+      : snapshot.resolutionReason === 'budget'
+        ? 'A meta foi atingida, mas o orçamento foi ultrapassado.'
+        : snapshot.resolutionReason === 'losses' ||
+            (tracksLosses && snapshot.metrics.lost > snapshot.goal!.maxLosses!)
+          ? 'Muitas caixas foram perdidas. Ajuste os ângulos e tente de novo.'
+          : budgetLimit !== undefined && spent > budgetLimit
+            ? 'A meta foi atingida, mas o orçamento foi ultrapassado.'
+            : 'A meta não foi concluída. Ajuste a linha e tente de novo.';
 
     this.element('[data-result="delivered"] strong').textContent = String(
       `${snapshot.metrics.delivered} / ${goalDeliveries}`,
@@ -2063,20 +2362,31 @@ export class AppUI {
       'is-over-budget',
       budgetLimit !== undefined && spent > budgetLimit,
     );
+    budgetMetric.classList.toggle(
+      'is-failure-cause',
+      !success && snapshot.resolutionReason === 'budget',
+    );
     const lostMetric = this.element('[data-result="lost"]');
     lostMetric.classList.toggle('is-hidden', !tracksLosses);
+    lostMetric.classList.toggle(
+      'is-failure-cause',
+      !success && snapshot.resolutionReason === 'losses',
+    );
     this.element('.result-metrics').classList.toggle('without-losses', !tracksLosses);
     if (tracksLosses) {
+      const maximumLosses = snapshot.goal!.maxLosses!;
       lostMetric.querySelector('strong')!.textContent =
-        `${snapshot.metrics.lost} / ${snapshot.goal!.maxLosses}`;
+        maximumLosses === 0
+          ? String(snapshot.metrics.lost)
+          : `${snapshot.metrics.lost} / ${maximumLosses}`;
     }
 
     const next = this.element<HTMLButtonElement>('[data-action="next"]');
-    const nextContract = contract
-      ? this.contracts.find(
-          (candidate) =>
-            candidate.world === contract.world && candidate.stage === contract.stage + 1,
-        )
+    const nextContractId = contract
+      ? getNextContractId(contract.id, this.contracts)
+      : undefined;
+    const nextContract = nextContractId
+      ? this.contracts.find((candidate) => candidate.id === nextContractId)
       : undefined;
     next.classList.toggle(
       'is-hidden',
@@ -2099,6 +2409,10 @@ export class AppUI {
   private setAdminEnabled(enabled: boolean): void {
     if (!this.adminAvailable) return;
     this.adminEnabled = enabled;
+    if (!enabled) {
+      this.element('#world-create-modal').classList.add('is-hidden');
+      this.editingWorld = undefined;
+    }
     if (enabled) this.setMenuView('play');
     this.root.classList.toggle('is-admin-enabled', enabled);
     const toggle = this.element<HTMLButtonElement>('#admin-toggle');
@@ -2143,6 +2457,7 @@ export class AppUI {
 
   private populateEditorForm(contract: ContractDefinition): void {
     const form = this.element<HTMLFormElement>('#editor-contract-form');
+    this.renderEditorWorldOptions();
     setFormControlValue(form, 'world', contract.world);
     setFormControlValue(form, 'stage', contract.stage);
     setFormControlValue(form, 'deliveries', contract.goal.deliveries);
@@ -2169,12 +2484,34 @@ export class AppUI {
       contract.availableMachines.includes('tracked-conveyor') ||
         contract.availableMachines.includes('conveyor'),
     );
+    setFormControlChecked(
+      form,
+      'availableSlowConveyor',
+      contract.availableMachines.includes('slow-conveyor'),
+    );
+    setFormControlChecked(
+      form,
+      'availableFastConveyor',
+      contract.availableMachines.includes('fast-conveyor'),
+    );
     setFormControlChecked(form, 'availableSpring', contract.availableMachines.includes('spring'));
     setFormControlChecked(
       form,
       'availableTurboSpring',
       contract.availableMachines.includes('turbo-spring'),
     );
+  }
+
+  private renderEditorWorldOptions(): void {
+    const select = this.root.querySelector<HTMLSelectElement>(
+      '#editor-contract-form select[name="world"]',
+    );
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = this.worlds
+      .map(({ world }) => `<option value="${world}">Mundo ${world}</option>`)
+      .join('');
+    if (this.worlds.some(({ world }) => String(world) === current)) select.value = current;
   }
 
   private handleEditorFormInput(): void {
@@ -2190,8 +2527,14 @@ export class AppUI {
     }
     this.syncEditorOptionalFields(form);
     const availableMachines: MachineType[] = [];
+    if (formCheckbox(form, 'availableSlowConveyor').checked) {
+      availableMachines.push('slow-conveyor');
+    }
     if (formCheckbox(form, 'availableTrackedConveyor').checked) {
       availableMachines.push('tracked-conveyor');
+    }
+    if (formCheckbox(form, 'availableFastConveyor').checked) {
+      availableMachines.push('fast-conveyor');
     }
     if (formCheckbox(form, 'availableSpring').checked) availableMachines.push('spring');
     if (formCheckbox(form, 'availableTurboSpring').checked) {
@@ -2240,24 +2583,65 @@ export class AppUI {
     appEvents.emit('ui:editor-update-settings', { contract: structuredClone(contract) });
   }
 
+  private requestEditorPersistence(beginPreviewAfterSave: boolean): void {
+    const contract = this.editorContract;
+    if (!contract || this.catalogSaving || !this.validateEditorSettings()) return;
+
+    const conflicting = this.contracts.find(
+      (candidate) =>
+        candidate.id !== contract.id &&
+        candidate.world === contract.world &&
+        candidate.stage === contract.stage,
+    );
+    if (conflicting) {
+      const persisted = this.contracts.find((candidate) => candidate.id === contract.id);
+      if (this.editorIsNew || !persisted) {
+        this.setEditorMessage({
+          tone: 'danger',
+          message: 'A fase ainda não pode ser salva.',
+          errors: [`A fase ${contractLabel(contract)} já está cadastrada.`],
+        });
+        this.element('#editor-config-panel').classList.remove('is-hidden');
+        this.element<HTMLButtonElement>('[data-action="editor-configure"]').setAttribute(
+          'aria-expanded',
+          'true',
+        );
+        return;
+      }
+      this.openContractSwapConfirmation(
+        contract,
+        persisted,
+        conflicting,
+        beginPreviewAfterSave,
+      );
+      return;
+    }
+
+    this.emitEditorPersistence(contract, beginPreviewAfterSave);
+  }
+
+  private emitEditorPersistence(
+    contract: ContractDefinition,
+    beginPreviewAfterSave: boolean,
+  ): void {
+    this.setEditorMessage({
+      tone: 'neutral',
+      message: beginPreviewAfterSave ? 'Validando e salvando no JSON…' : 'Salvando no JSON…',
+    });
+    appEvents.emit(beginPreviewAfterSave ? 'ui:editor-test' : 'ui:editor-save', {
+      contract: structuredClone(contract),
+    });
+  }
+
   private validateEditorSettings(): boolean {
     const contract = this.editorContract;
     if (!contract) return false;
     const form = this.element<HTMLFormElement>('#editor-contract-form');
     const errors: string[] = [];
-    if (!CAMPAIGN_WORLDS.some(({ value }) => value === contract.world))
+    if (!this.worlds.some(({ world }) => world === contract.world))
       errors.push('Selecione um mundo válido.');
     if (!Number.isInteger(contract.stage) || contract.stage < 1 || contract.stage > 10)
       errors.push('Selecione uma fase entre 1 e 10.');
-    if (
-      this.contracts.some(
-        (candidate) =>
-          candidate.id !== contract.id &&
-          candidate.world === contract.world &&
-          candidate.stage === contract.stage,
-      )
-    )
-      errors.push(`A fase ${contractLabel(contract)} já está cadastrada.`);
     if (contract.goal.deliveries < 1) errors.push('Entregas deve ser pelo menos 1.');
     if (!Number.isInteger(contract.goal.deliveries))
       errors.push('Entregas deve usar um número inteiro.');
@@ -2273,10 +2657,12 @@ export class AppUI {
     )
       errors.push('O orçamento máximo deve usar dólares inteiros.');
     if (contract.economy.conveyorSpeedCosts) {
-      for (const [index, speed] of CONVEYOR_SPEEDS.entries()) {
+      for (const speed of CONVEYOR_SPEEDS) {
         const cost = contract.economy.conveyorSpeedCosts[speed];
         if (cost < 0 || !Number.isInteger(cost)) {
-          errors.push(`O custo da velocidade ${index + 1} deve ser um inteiro não negativo.`);
+          errors.push(
+            `O custo da esteira ${CONVEYOR_SPEED_LABELS[speed].toLocaleLowerCase('pt-BR')} deve ser um inteiro não negativo.`,
+          );
         }
       }
     }
@@ -2332,6 +2718,74 @@ export class AppUI {
       `${contract.spawnIntervalSeconds.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} s`;
   }
 
+  private openWorldCreateModal(): void {
+    const nextWorld = (this.worlds.at(-1)?.world ?? 0) + 1;
+    const form = this.element<HTMLFormElement>('#world-create-form');
+    this.editingWorld = undefined;
+    setFormControlValue(form, 'backgroundColor', DEFAULT_WORLD_BACKGROUND_COLOR);
+    setFormControlValue(form, 'gridColor', DEFAULT_WORLD_GRID_COLOR);
+    this.element('#world-create-kicker').textContent = 'NOVO MUNDO';
+    this.element('#world-create-title').textContent = `Criar Mundo ${nextWorld}`;
+    this.element('#world-create-copy').textContent =
+      'Escolha as cores do mapa. As fases poderão ser adicionadas depois, uma por uma.';
+    this.element('#world-create-submit').textContent = 'Criar mundo';
+    this.updateWorldColorPreview();
+    this.element('#world-create-modal').classList.remove('is-hidden');
+    window.requestAnimationFrame(() => formControl(form, 'backgroundColor').focus());
+  }
+
+  private openWorldEditModal(): void {
+    const world = this.worlds.find(({ world }) => world === this.activeAdminWorld);
+    if (!world) return;
+    const form = this.element<HTMLFormElement>('#world-create-form');
+    this.editingWorld = world.world;
+    setFormControlValue(form, 'backgroundColor', world.backgroundColor);
+    setFormControlValue(form, 'gridColor', world.gridColor);
+    this.element('#world-create-kicker').textContent = 'CONFIGURAR MUNDO';
+    this.element('#world-create-title').textContent = `Configurar Mundo ${world.world}`;
+    this.element('#world-create-copy').textContent =
+      'Atualize as cores do fundo e da grade deste mundo.';
+    this.element('#world-create-submit').textContent = 'Salvar alterações';
+    this.updateWorldColorPreview();
+    this.element('#world-create-modal').classList.remove('is-hidden');
+    window.requestAnimationFrame(() => formControl(form, 'backgroundColor').focus());
+  }
+
+  private closeWorldCreateModal(): void {
+    if (this.catalogSaving) return;
+    this.element('#world-create-modal').classList.add('is-hidden');
+    this.editingWorld = undefined;
+  }
+
+  private updateWorldColorPreview(): void {
+    const form = this.element<HTMLFormElement>('#world-create-form');
+    const preview = this.element<HTMLElement>('.world-color-preview');
+    preview.style.setProperty('--world-background', formValue(form, 'backgroundColor'));
+    preview.style.setProperty('--world-grid', formValue(form, 'gridColor'));
+  }
+
+  private confirmWorldCreation(): void {
+    const form = this.element<HTMLFormElement>('#world-create-form');
+    if (!form.checkValidity()) {
+      form.reportValidity();
+      return;
+    }
+    const backgroundColor = formValue(form, 'backgroundColor');
+    const gridColor = formValue(form, 'gridColor');
+    const editingWorld = this.editingWorld;
+    this.element('#world-create-modal').classList.add('is-hidden');
+    this.editingWorld = undefined;
+    if (editingWorld !== undefined) {
+      appEvents.emit('ui:admin-update-world', {
+        world: editingWorld,
+        backgroundColor,
+        gridColor,
+      });
+      return;
+    }
+    appEvents.emit('ui:admin-create-world', { backgroundColor, gridColor });
+  }
+
   private toggleEditorConfiguration(): void {
     if (!this.editorContract || this.editorPreviewActive) return;
     const panel = this.element('#editor-config-panel');
@@ -2363,10 +2817,9 @@ export class AppUI {
   private startNextContract(): void {
     if (!this.resultContractId) return;
     const current = this.contracts.find((contract) => contract.id === this.resultContractId);
-    const next = current
-      ? this.contracts.find(
-          (contract) => contract.world === current.world && contract.stage === current.stage + 1,
-        )
+    const nextId = current ? getNextContractId(current.id, this.contracts) : undefined;
+    const next = nextId
+      ? this.contracts.find((contract) => contract.id === nextId)
       : undefined;
     if (!next || !this.progress.unlockedContracts.includes(next.id)) {
       appEvents.emit('ui:menu', undefined);
@@ -2378,17 +2831,69 @@ export class AppUI {
       contractId: next.id,
       contract: structuredClone(next),
       machines: structuredClone(this.progress.campaignLayouts[next.id]?.machines ?? []),
+      worldTheme: this.worldThemeFor(next.world),
     });
+  }
+
+  private worldThemeFor(world: number): CampaignWorldDefinition | undefined {
+    const theme = this.worlds.find((candidate) => candidate.world === world);
+    return theme ? structuredClone(theme) : undefined;
   }
 
   private openAdminConfirmation(contractId: ContractId, title: string): void {
     if (this.catalogSaving) return;
-    this.pendingAdminAction = { contractId };
+    this.pendingAdminAction = { kind: 'delete', contractId };
     this.element('#admin-confirm-kicker').textContent = 'EXCLUIR FASE';
     this.element('#admin-confirm-title').textContent = `Excluir “${title}”?`;
     this.element('#admin-confirm-copy').textContent =
       'A fase e seu resultado salvo serão removidos do catálogo JSON local. Você poderá recuperá-la pelo histórico do Git.';
-    this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]').textContent = 'Excluir';
+    const accept = this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]');
+    accept.textContent = 'Excluir';
+    accept.classList.add('danger');
+    this.element('#admin-confirm-modal').classList.remove('is-hidden');
+  }
+
+  private openWorldDeleteConfirmation(): void {
+    const world = this.activeAdminWorld;
+    const hasPhases = this.contracts.some((contract) => contract.world === world);
+    if (this.catalogSaving || hasPhases || this.worlds.length === 1) return;
+    this.pendingAdminAction = { kind: 'delete-world', world };
+    this.element('#admin-confirm-kicker').textContent = 'EXCLUIR MUNDO';
+    this.element('#admin-confirm-title').textContent = `Excluir Mundo ${world}?`;
+    const hasLaterWorlds = this.worlds.some((candidate) => candidate.world > world);
+    this.element('#admin-confirm-copy').textContent = hasLaterWorlds
+      ? 'Este mundo está vazio e será removido. Os mundos seguintes serão renumerados para manter a sequência da campanha.'
+      : 'Este mundo está vazio e será removido do catálogo JSON local.';
+    const accept = this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]');
+    accept.textContent = 'Excluir mundo';
+    accept.classList.add('danger');
+    this.element('#admin-confirm-modal').classList.remove('is-hidden');
+  }
+
+  private openContractSwapConfirmation(
+    contract: ContractDefinition,
+    persisted: ContractDefinition,
+    conflicting: ContractDefinition,
+    beginPreviewAfterSave: boolean,
+  ): void {
+    if (this.catalogSaving) return;
+    const previousLabel = contractLabel(persisted);
+    const nextLabel = contractLabel(conflicting);
+    this.pendingAdminAction = {
+      kind: 'swap',
+      contract: structuredClone(contract),
+      conflictingContractId: conflicting.id,
+      beginPreviewAfterSave,
+    };
+    this.clearEditorMessage();
+    this.element('#admin-confirm-kicker').textContent = 'INVERTER FASES';
+    this.element('#admin-confirm-title').textContent =
+      `Trocar ${previousLabel} com ${nextLabel}?`;
+    this.element('#admin-confirm-copy').textContent =
+      `A fase ${previousLabel} passará a ocupar ${nextLabel}, e a fase ${nextLabel} passará a ocupar ${previousLabel}. O conteúdo das duas será preservado.`;
+    const accept = this.element<HTMLButtonElement>('[data-action="admin-confirm-accept"]');
+    accept.textContent = 'Trocar fases';
+    accept.classList.remove('danger');
     this.element('#admin-confirm-modal').classList.remove('is-hidden');
   }
 
@@ -2397,7 +2902,20 @@ export class AppUI {
     if (!pending || this.catalogSaving) return;
     this.pendingAdminAction = undefined;
     this.element('#admin-confirm-modal').classList.add('is-hidden');
-    appEvents.emit('ui:admin-delete-contract', { contractId: pending.contractId });
+    if (pending.kind === 'delete') {
+      appEvents.emit('ui:admin-delete-contract', { contractId: pending.contractId });
+      return;
+    }
+    if (pending.kind === 'delete-world') {
+      appEvents.emit('ui:admin-delete-world', { world: pending.world });
+      return;
+    }
+    this.setEditorMessage({ tone: 'neutral', message: 'Trocando e salvando as fases…' });
+    appEvents.emit('ui:editor-swap-contracts', {
+      contract: structuredClone(pending.contract),
+      conflictingContractId: pending.conflictingContractId,
+      beginPreviewAfterSave: pending.beginPreviewAfterSave,
+    });
   }
 
   private renderCatalogSavingState(): void {
@@ -2414,7 +2932,7 @@ export class AppUI {
         HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement
       >('input, textarea, select, button')
       .forEach((control) => {
-        control.disabled = editorSaving;
+        control.disabled = editorSaving || control.hasAttribute('data-fixed-admin-world');
       });
     this.root
       .querySelectorAll<HTMLButtonElement>(
@@ -2426,9 +2944,23 @@ export class AppUI {
 
     this.element<HTMLButtonElement>('#admin-toggle').disabled = saving;
     const createButton = this.element<HTMLButtonElement>('#create-contract-button');
-    const worldIsFull = this.contracts.filter(({ world }) => world === CAMPAIGN_WORLD).length >= 10;
+    const worldIsFull =
+      this.contracts.filter(({ world }) => world === this.activeAdminWorld).length >= 10;
     createButton.disabled = saving || worldIsFull;
-    createButton.title = worldIsFull ? 'O Mundo 1 já possui as dez fases cadastradas.' : '';
+    createButton.title = worldIsFull
+      ? `O Mundo ${this.activeAdminWorld} já possui as dez fases cadastradas.`
+      : '';
+    this.root
+      .querySelectorAll<HTMLButtonElement>('.admin-world-tab, .admin-world-add')
+      .forEach((button) => {
+        button.disabled = saving;
+      });
+    this.renderAdminWorldActionState();
+    this.element('#world-create-form')
+      .querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')
+      .forEach((control) => {
+        control.disabled = saving;
+      });
     this.root
       .querySelectorAll<HTMLButtonElement>('.contract-admin-actions button')
       .forEach((button) => {
@@ -2451,6 +2983,19 @@ export class AppUI {
     toast.dataset.tone = tone;
     toast.classList.add('is-visible');
     this.toastTimer = window.setTimeout(() => toast.classList.remove('is-visible'), 2300);
+  }
+
+  private showCostFeedback(payload: { amount: number; clientX: number; clientY: number }): void {
+    if (payload.amount <= 0) return;
+    const feedback = document.createElement('div');
+    feedback.className = 'cost-feedback';
+    feedback.setAttribute('aria-hidden', 'true');
+    feedback.textContent = formatCurrency(payload.amount);
+    feedback.style.left = `${Math.round(payload.clientX)}px`;
+    feedback.style.top = `${Math.round(payload.clientY - 18)}px`;
+    this.root.append(feedback);
+    feedback.addEventListener('animationend', () => feedback.remove(), { once: true });
+    window.setTimeout(() => feedback.remove(), 1_600);
   }
 
   private commitSettings(patch: Partial<ProgressSave['settings']>): void {
@@ -2586,8 +3131,8 @@ function machineCost(economy: GameSnapshot['economy'], machine: MachineType): nu
   if (machine === 'turbo-spring') {
     return economy.machineCosts['turbo-spring'] ?? DEFAULT_MACHINE_COSTS['turbo-spring']!;
   }
-  if (machine === 'tracked-conveyor' || machine === 'conveyor') {
-    return resolveConveyorSpeedCosts(economy).normal;
+  if (isConveyorMachineType(machine)) {
+    return conveyorCostForMachineType(economy, machine);
   }
   return 0;
 }
@@ -2674,21 +3219,10 @@ function machineThumbnail(type: MachineType): string {
         <rect x="21" y="55" width="30" height="11" rx="3" fill="#ff7629" />
       </svg>`;
     case 'conveyor':
+    case 'slow-conveyor':
     case 'tracked-conveyor':
-      return `<svg class="machine-thumbnail machine-thumbnail-tracked-conveyor" viewBox="0 0 112 36" aria-hidden="true">
-        <rect x="4" y="4" width="104" height="28" rx="14" fill="#202a33" />
-        <g fill="#40566b" stroke="#82a5c5" stroke-width="1.5">
-          <circle cx="18" cy="18" r="9"/><circle cx="56" cy="18" r="9"/><circle cx="94" cy="18" r="9"/>
-        </g>
-        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#293139" stroke-width="9" stroke-linejoin="round" />
-        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#40566b" stroke-width="6.5" stroke-linejoin="round" />
-        <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#fff" stroke-width="6.5" stroke-dasharray="8 7" stroke-linejoin="round" />
-        <g fill="#fff">
-          <path d="M14.5 12.5 22 18l-7.5 5.5z"/>
-          <path d="M52.5 12.5 60 18l-7.5 5.5z"/>
-          <path d="M90.5 12.5 98 18l-7.5 5.5z"/>
-        </g>
-      </svg>`;
+    case 'fast-conveyor':
+      return conveyorThumbnail(type);
     case 'receiver':
       return `<svg class="machine-thumbnail machine-thumbnail-receiver" viewBox="0 0 72 72" aria-hidden="true">
         <rect x="2" y="2" width="68" height="68" rx="6" fill="#fff" stroke="#258bc4" stroke-width="2" />
@@ -2721,12 +3255,39 @@ function machineThumbnail(type: MachineType): string {
   }
 }
 
+function conveyorThumbnail(type: MachineType): string {
+  const slow = type === 'slow-conveyor';
+  const fast = type === 'fast-conveyor';
+  const panel = slow ? '#d9eef9' : fast ? '#6b2032' : '#202a33';
+  const belt = slow ? '#6eb8e2' : fast ? '#d74b55' : '#40566b';
+  const outline = slow ? '#4d91bb' : fast ? '#4b1423' : '#293139';
+  const wheelStroke = slow ? '#93cdec' : fast ? '#f08a91' : '#82a5c5';
+  return `<svg class="machine-thumbnail machine-thumbnail-${escapeHTML(type)}" viewBox="0 0 112 36" aria-hidden="true">
+    <rect x="4" y="4" width="104" height="28" rx="14" fill="${panel}" />
+    <g fill="${belt}" stroke="${wheelStroke}" stroke-width="1.5">
+      <circle cx="18" cy="18" r="9"/><circle cx="56" cy="18" r="9"/><circle cx="94" cy="18" r="9"/>
+    </g>
+    <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="${outline}" stroke-width="9" stroke-linejoin="round" />
+    <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="${belt}" stroke-width="6.5" stroke-linejoin="round" />
+    <path d="M18 4h76a14 14 0 0 1 0 28H18a14 14 0 0 1 0-28Z" fill="none" stroke="#fff" stroke-width="6.5" stroke-dasharray="8 7" stroke-linejoin="round" />
+    <g fill="#fff">
+      <path d="M14.5 12.5 22 18l-7.5 5.5z"/>
+      <path d="M52.5 12.5 60 18l-7.5 5.5z"/>
+      <path d="M90.5 12.5 98 18l-7.5 5.5z"/>
+    </g>
+  </svg>`;
+}
+
 function icon(name: IconName): string {
   const paths: Record<IconName, string> = {
     source: '<path d="M4 5h16v14H4z"/><path d="M8 9h8M12 2v7m-3-3 3 3 3-3"/>',
     conveyor:
       '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
+    'slow-conveyor':
+      '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
     'tracked-conveyor':
+      '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
+    'fast-conveyor':
       '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="6" cy="12" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="18" cy="12" r="3"/><path d="m4.8 9.7 3.2 2.3-3.2 2.3zm6 0L14 12l-3.2 2.3zm6 0L20 12l-3.2 2.3z" fill="currentColor" stroke="none"/>',
     receiver: '<path d="M4 5h16v14H4z"/><path d="M8 15h8M12 2v8m-3-3 3 3 3-3"/>',
     spring: '<path d="M3 7h18M5 5v4m14-4v4M6 18l3-7 3 7 3-7 3 7"/>',

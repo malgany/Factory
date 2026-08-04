@@ -9,7 +9,14 @@ export const PLAY_AREA_MIN_ROW = -GRID_ROWS * PLAY_AREA_MARGIN_STAGES;
 export const PLAY_AREA_MAX_ROW = GRID_ROWS * (PLAY_AREA_MARGIN_STAGES + 1);
 
 export type MachineType =
-  'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
+  | 'source'
+  | 'conveyor'
+  | 'slow-conveyor'
+  | 'tracked-conveyor'
+  | 'fast-conveyor'
+  | 'receiver'
+  | 'spring'
+  | 'turbo-spring';
 export type ConveyorSpeed = 'slow' | 'normal' | 'fast';
 export type GameMode = 'campaign' | 'sandbox' | 'editor' | 'preview';
 export type SimulationStatus = 'build' | 'running' | 'paused' | 'success' | 'failure';
@@ -98,6 +105,12 @@ export interface ContractDefinition {
   initialCamera: ContractCamera;
 }
 
+export interface CampaignWorldDefinition {
+  world: number;
+  backgroundColor: string;
+  gridColor: string;
+}
+
 export interface RunMetrics {
   delivered: number;
   lost: number;
@@ -131,7 +144,8 @@ export interface ProgressSave {
 }
 
 export interface ContractCatalogFile {
-  version: 3;
+  version: 4;
+  worlds: CampaignWorldDefinition[];
   contracts: ContractDefinition[];
   updatedAt: string;
 }
@@ -155,6 +169,7 @@ export interface GameSnapshot {
   contractTitle: string;
   contractDescription: string;
   status: SimulationStatus;
+  resolutionReason?: 'deliveries' | 'losses' | 'budget';
   metrics: RunMetrics;
   goal?: ContractGoal;
   economy?: {
@@ -165,11 +180,16 @@ export interface GameSnapshot {
     conveyorSpeedCosts?: ConveyorSpeedCosts;
   };
   selectedMachine?: MachineState;
-  selectedMachineClientBounds?: {
+  selectionClientBounds?: {
     left: number;
     top: number;
     right: number;
     bottom: number;
+  };
+  selectionRotationHandleClient?: {
+    x: number;
+    y: number;
+    radius: number;
   };
   selectedObstacle?: ObstacleDefinition;
   selection: {

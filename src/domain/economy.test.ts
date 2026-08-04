@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canonicalMachineType,
+  conveyorCostForMachineType,
   DEFAULT_CONVEYOR_SPEED_COSTS,
   resolveConveyorSpeedCosts,
 } from './economy';
@@ -29,5 +31,18 @@ describe('economia da esteira', () => {
         conveyorSpeedCosts: { slow: 1_800, normal: 2_900, fast: 4_100 },
       }),
     ).toEqual({ slow: 1_800, normal: 2_900, fast: 4_100 });
+  });
+
+  it('trata as três velocidades como objetos independentes e migra layouts antigos', () => {
+    const economy = {
+      machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      conveyorSpeedCosts: { slow: 2_000, normal: 2_500, fast: 3_000 },
+    };
+
+    expect(conveyorCostForMachineType(economy, 'slow-conveyor')).toBe(2_000);
+    expect(conveyorCostForMachineType(economy, 'tracked-conveyor')).toBe(2_500);
+    expect(conveyorCostForMachineType(economy, 'fast-conveyor')).toBe(3_000);
+    expect(canonicalMachineType('tracked-conveyor', 'slow')).toBe('slow-conveyor');
+    expect(canonicalMachineType('conveyor', 'fast')).toBe('fast-conveyor');
   });
 });

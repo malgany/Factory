@@ -4,7 +4,14 @@ const PROGRESS_KEY = 'factory-flow.progress.v1';
 const LEGACY_CATALOG_KEY = 'factory-flow.contracts.v1';
 
 type AdminMachineType =
-  'source' | 'conveyor' | 'tracked-conveyor' | 'receiver' | 'spring' | 'turbo-spring';
+  | 'source'
+  | 'conveyor'
+  | 'slow-conveyor'
+  | 'tracked-conveyor'
+  | 'fast-conveyor'
+  | 'receiver'
+  | 'spring'
+  | 'turbo-spring';
 
 interface AdminCamera {
   centerX: number;
@@ -77,7 +84,12 @@ interface AdminContract {
 }
 
 interface AdminCatalog {
-  version: 3;
+  version: 4;
+  worlds: Array<{
+    world: number;
+    backgroundColor: string;
+    gridColor: string;
+  }>;
   updatedAt: string;
   contracts: AdminContract[];
 }
@@ -85,6 +97,7 @@ interface AdminCatalog {
 type AdminWindow = Window & {
   __FACTORY_DEBUG__?: {
     getSnapshot(): { mode: string; contractId?: string };
+    getBoardTheme(): { backgroundColor: string; gridColor: string };
     getEditorDraft(): AdminContract;
     startEditor(contract: AdminContract): void;
     getInvalidEntityFlash(): {
@@ -185,8 +198,14 @@ function makeContract(
 }
 
 function makeCatalog(...contracts: AdminContract[]): AdminCatalog {
+  const highestWorld = Math.max(1, ...contracts.map(({ world }) => world));
   return normalizeHarnessCatalog({
-    version: 3,
+    version: 4,
+    worlds: Array.from({ length: highestWorld }, (_, index) => ({
+      world: index + 1,
+      backgroundColor: '#377fbd',
+      gridColor: '#ffffff',
+    })),
     updatedAt: new Date(0).toISOString(),
     contracts,
   });
@@ -194,6 +213,7 @@ function makeCatalog(...contracts: AdminContract[]): AdminCatalog {
 
 function normalizeHarnessCatalog(catalog: AdminCatalog): AdminCatalog {
   const normalized = clone(catalog);
+  normalized.worlds = [...normalized.worlds].sort((left, right) => left.world - right.world);
   normalized.contracts = [...normalized.contracts]
     .sort(
       (left, right) =>
@@ -425,7 +445,9 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
     .toBe(1);
   await page.locator('[data-action="editor-configure"]').first().click();
   await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toBeDisabled();
   await expect(page.locator('#editor-contract-form select[name="stage"]')).toHaveValue('1');
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toBeEnabled();
   await page.locator('#editor-contract-form input[name="deliveries"]').fill('11');
   await page.locator('#editor-contract-form input[name="lossesEnabled"]').uncheck();
   await page.locator('#editor-contract-form input[name="budgetLimit"]').fill('30000');
@@ -436,9 +458,13 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   await expect(page.locator('#editor-contract-form input[name="turboSpringCost"]')).toHaveValue(
     '7500',
   );
+  await page.locator('#editor-contract-form input[name="availableSlowConveyor"]').check();
+  await page.locator('#editor-contract-form input[name="availableFastConveyor"]').check();
   await page.locator('#editor-contract-form input[name="availableTurboSpring"]').check();
   await page.locator('[data-action="editor-save"]').click();
   await expect(page.locator('#editor-feedback')).toContainText('Fase salva no JSON local');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toBeDisabled();
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toBeEnabled();
   await expect.poll(() => harness.posts().length).toBe(1);
   expect(harness.current().contracts.find(({ id }) => id === first.id)).toMatchObject({
     world: 1,
@@ -446,7 +472,12 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
     revision: 2,
     order: 1,
     title: '1-1',
-    availableMachines: expect.arrayContaining(['turbo-spring']),
+    availableMachines: expect.arrayContaining([
+      'slow-conveyor',
+      'tracked-conveyor',
+      'fast-conveyor',
+      'turbo-spring',
+    ]),
     goal: { deliveries: 11 },
     economy: {
       budgetLimit: 30_000,
@@ -535,6 +566,348 @@ test('cria, testa, edita e exclui fases pelo catálogo HTTP sem usar localStorag
   expect(await page.evaluate((key) => localStorage.getItem(key), LEGACY_CATALOG_KEY)).toBeNull();
 });
 
+test('confirma ou cancela a troca de posição entre duas fases existentes', async ({ page }) => {
+  const fourth = makeContract('fourth-stage', 4);
+  const fifth = makeContract('fifth-stage', 5);
+  const harness = await installCatalogHarness(page, makeCatalog(fourth, fifth));
+  await seedProgress(page, [fourth, fifth]);
+  await openApp(page);
+  await enableAdmin(page);
+
+  await page.getByRole('button', { name: 'Editar fase 4-1' }).click();
+  await page.locator('[data-action="editor-configure"]').first().click();
+  await page.locator('#editor-contract-form select[name="stage"]').selectOption('5');
+  await expect(page.locator('[data-stage-label]')).toHaveText('5-1');
+
+  await page.locator('[data-action="editor-save"]').click();
+  const confirmation = page.locator('#admin-confirm-modal');
+  await expect(confirmation).toBeVisible();
+  await expect(page.locator('#admin-confirm-kicker')).toHaveText('INVERTER FASES');
+  await expect(page.locator('#admin-confirm-title')).toHaveText('Trocar 4-1 com 5-1?');
+  await expect(page.locator('#admin-confirm-copy')).toContainText(
+    'A fase 4-1 passará a ocupar 5-1, e a fase 5-1 passará a ocupar 4-1.',
+  );
+  await expect(page.locator('[data-action="admin-confirm-accept"]')).toHaveText('Trocar fases');
+
+  await page.locator('[data-action="admin-confirm-cancel"]').click();
+  await expect(confirmation).toBeHidden();
+  expect(harness.posts()).toHaveLength(0);
+  expect(harness.current().contracts.find(({ id }) => id === fourth.id)).toMatchObject({
+    stage: 4,
+    title: '4-1',
+  });
+  expect(harness.current().contracts.find(({ id }) => id === fifth.id)).toMatchObject({
+    stage: 5,
+    title: '5-1',
+  });
+
+  await page.locator('[data-action="editor-save"]').click();
+  await expect(confirmation).toBeVisible();
+  await page.locator('[data-action="admin-confirm-accept"]').click();
+  await expect(page.locator('#editor-feedback')).toContainText(
+    'Fases trocadas e salvas no JSON local.',
+  );
+  await expect.poll(() => harness.posts().length).toBe(1);
+  expect(harness.current().contracts.find(({ id }) => id === fourth.id)).toMatchObject({
+    stage: 5,
+    order: 5,
+    title: '5-1',
+    revision: 2,
+  });
+  expect(harness.current().contracts.find(({ id }) => id === fifth.id)).toMatchObject({
+    stage: 4,
+    order: 4,
+    title: '4-1',
+    revision: 2,
+  });
+  await expect(page.locator('#editor-contract-title')).toHaveText('Fase 5-1');
+
+  const savedProgress = await getProgress(page);
+  expect(savedProgress.completedContracts).toEqual({});
+});
+
+test('cria mundos por abas, salva suas cores e inicia a primeira fase no mundo ativo', async ({
+  page,
+}) => {
+  const first = makeContract('world-one-stage-one', 1);
+  const harness = await installCatalogHarness(page, makeCatalog(first));
+  await openApp(page);
+  await enableAdmin(page);
+
+  const tabs = page.locator('#admin-world-tabs');
+  await expect(tabs.getByRole('tab', { name: 'Mundo 1' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await tabs.getByRole('button', { name: 'Criar novo mundo' }).click();
+
+  const modal = page.locator('#world-create-modal');
+  await expect(modal).toBeVisible();
+  await expect(page.locator('#world-create-title')).toHaveText('Criar Mundo 2');
+  const background = page.locator('#world-create-form input[name="backgroundColor"]');
+  const grid = page.locator('#world-create-form input[name="gridColor"]');
+  await expect(background).toHaveValue('#377fbd');
+  await expect(grid).toHaveValue('#ffffff');
+  await background.fill('#6b2032');
+  await grid.fill('#f4d9e8');
+  await expect
+    .poll(() =>
+      page.locator('.world-color-preview').evaluate((preview) => ({
+        background: getComputedStyle(preview).getPropertyValue('--world-background').trim(),
+        grid: getComputedStyle(preview).getPropertyValue('--world-grid').trim(),
+      })),
+    )
+    .toEqual({ background: '#6b2032', grid: '#f4d9e8' });
+
+  await page.locator('[data-action="world-create-confirm"]').click();
+  await expect(modal).toBeHidden();
+  await expect.poll(() => harness.posts().length).toBe(1);
+  expect(harness.current().worlds).toEqual([
+    { world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' },
+    { world: 2, backgroundColor: '#6b2032', gridColor: '#f4d9e8' },
+  ]);
+  await expect(tabs.getByRole('tab', { name: 'Mundo 2' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await expect(page.locator('.contract-empty-state')).toContainText(
+    'Nenhuma fase no Mundo 2',
+  );
+
+  await page.locator('#create-contract-button').click();
+  await expect(page.locator('#editor-rail')).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const draft = (window as AdminWindow).__FACTORY_DEBUG__?.getEditorDraft();
+        return draft && { world: draft.world, stage: draft.stage, title: draft.title };
+      }),
+    )
+    .toEqual({ world: 2, stage: 1, title: '1-2' });
+  await page.locator('[data-action="editor-configure"]').first().click();
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toHaveValue('2');
+  await expect(page.locator('#editor-contract-form select[name="world"]')).toBeDisabled();
+  await expect(page.locator('#editor-contract-form select[name="stage"]')).toBeEnabled();
+  await expect(
+    page.locator('#editor-contract-form select[name="world"] option'),
+  ).toHaveCount(2);
+});
+
+test('reconfigura as cores e exclui um mundo vazio pela própria aba', async ({ page }) => {
+  const first = makeContract('world-settings-stage', 1);
+  const harness = await installCatalogHarness(page, makeCatalog(first));
+  await openApp(page);
+  await enableAdmin(page);
+
+  const tabs = page.locator('#admin-world-tabs');
+  await tabs.getByRole('button', { name: 'Criar novo mundo' }).click();
+  await page.locator('#world-create-form input[name="backgroundColor"]').fill('#6b2032');
+  await page.locator('#world-create-form input[name="gridColor"]').fill('#f4d9e8');
+  await page.locator('[data-action="world-create-confirm"]').click();
+  await expect.poll(() => harness.posts().length).toBe(1);
+  await expect(tabs.getByRole('tab', { name: 'Mundo 2' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+
+  const configure = page.locator('[data-action="admin-configure-world"]');
+  const remove = page.locator('[data-action="admin-delete-world"]');
+  await expect(configure).toHaveAttribute('aria-label', 'Configurar Mundo 2');
+  await expect(configure).toBeEnabled();
+  await expect(remove).toHaveAttribute('aria-label', 'Excluir Mundo 2');
+  await expect(remove).toBeEnabled();
+
+  await configure.click();
+  await expect(page.locator('#world-create-modal')).toBeVisible();
+  await expect(page.locator('#world-create-kicker')).toHaveText('CONFIGURAR MUNDO');
+  await expect(page.locator('#world-create-title')).toHaveText('Configurar Mundo 2');
+  const background = page.locator('#world-create-form input[name="backgroundColor"]');
+  const grid = page.locator('#world-create-form input[name="gridColor"]');
+  await expect(background).toHaveValue('#6b2032');
+  await expect(grid).toHaveValue('#f4d9e8');
+  await background.fill('#1a6b82');
+  await grid.fill('#e8faff');
+  await expect(page.locator('#world-create-submit')).toHaveText('Salvar alterações');
+  await page.locator('#world-create-submit').click();
+  await expect(page.locator('#world-create-modal')).toBeHidden();
+  await expect.poll(() => harness.posts().length).toBe(2);
+  expect(harness.current().worlds[1]).toEqual({
+    world: 2,
+    backgroundColor: '#1a6b82',
+    gridColor: '#e8faff',
+  });
+
+  await remove.click();
+  await expect(page.locator('#admin-confirm-modal')).toBeVisible();
+  await expect(page.locator('#admin-confirm-kicker')).toHaveText('EXCLUIR MUNDO');
+  await expect(page.locator('#admin-confirm-title')).toHaveText('Excluir Mundo 2?');
+  await expect(page.locator('[data-action="admin-confirm-accept"]')).toHaveText(
+    'Excluir mundo',
+  );
+  await page.locator('[data-action="admin-confirm-accept"]').click();
+  await expect.poll(() => harness.posts().length).toBe(3);
+  expect(harness.current().worlds).toEqual([
+    { world: 1, backgroundColor: '#377fbd', gridColor: '#ffffff' },
+  ]);
+  await expect(tabs.getByRole('tab', { name: 'Mundo 2' })).toHaveCount(0);
+  await expect(tabs.getByRole('tab', { name: 'Mundo 1' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await expect(remove).toBeDisabled();
+});
+
+test('mantém a exclusão do mundo desabilitada enquanto ele possui fases', async ({ page }) => {
+  const first = makeContract('world-one-settings', 1);
+  const second = makeContract(
+    'world-two-settings',
+    1,
+    { centerX: 720, centerY: 432, zoom: 1 },
+    2,
+  );
+  const catalog = makeCatalog(first, second);
+  catalog.worlds[1] = {
+    world: 2,
+    backgroundColor: '#6b2032',
+    gridColor: '#f4d9e8',
+  };
+  await installCatalogHarness(page, catalog);
+  await openApp(page);
+  await enableAdmin(page);
+
+  const worldTwo = page.locator('#admin-world-tabs').getByRole('tab', { name: 'Mundo 2' });
+  await worldTwo.click();
+  const remove = page.locator('[data-action="admin-delete-world"]');
+  await expect(remove).toBeDisabled();
+  await expect(remove).toHaveAttribute(
+    'title',
+    'Exclua todas as fases deste mundo antes de removê-lo.',
+  );
+  await expect(page.locator('[data-action="admin-configure-world"]')).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Editar fase 1-2' }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getBoardTheme()),
+    )
+    .toEqual({ backgroundColor: '#6b2032', gridColor: '#f4d9e8' });
+});
+
+test('navega lateralmente entre mapas e usa grade colorida nos mundos seguintes', async ({
+  page,
+}) => {
+  const first = makeContract('world-one-map', 1);
+  const second = makeContract(
+    'world-two-map',
+    1,
+    { centerX: 720, centerY: 432, zoom: 1 },
+    2,
+  );
+  const catalog = makeCatalog(first, second);
+  catalog.worlds[1] = {
+    world: 2,
+    backgroundColor: '#6b2032',
+    gridColor: '#f4d9e8',
+  };
+  await installCatalogHarness(page, catalog);
+  await seedProgress(page, [first, second]);
+  await openApp(page);
+  await page.locator('[data-action="menu-play"]').click();
+
+  const firstWorld = page.locator('[data-campaign-world="1"]');
+  const secondWorld = page.locator('[data-campaign-world="2"]');
+  await expect(page.locator('#campaign-world-label')).toHaveText('Mundo 1');
+  await expect(firstWorld.locator('.campaign-map-image')).toBeVisible();
+  await expect(secondWorld.locator('.campaign-map-image')).toHaveCount(0);
+  await expect(firstWorld.locator('.campaign-stage-marker')).toHaveCount(10);
+  await expect(secondWorld.locator('.campaign-stage-marker')).toHaveCount(10);
+
+  await page.locator('[data-action="campaign-world-next"]').click();
+  await expect(page.locator('#campaign-world-label')).toHaveText('Mundo 2');
+  await expect(secondWorld).toHaveAttribute('aria-hidden', 'false');
+  await expect(secondWorld).toHaveCSS('background-color', 'rgb(107, 32, 50)');
+  await expect(secondWorld.getByRole('button', { name: 'Selecionar fase 1-2' })).toBeVisible();
+  await expect
+    .poll(async () => Math.round((await secondWorld.boundingBox())?.x ?? -999))
+    .toBe(0);
+
+  await page.locator('[data-action="campaign-world-previous"]').click();
+  await expect(page.locator('#campaign-world-label')).toHaveText('Mundo 1');
+  await expect
+    .poll(async () => Math.round((await firstWorld.boundingBox())?.x ?? -999))
+    .toBe(0);
+});
+
+test('concluir a fase 10 libera e inicia a fase 1 do mundo seguinte', async ({ page }) => {
+  const lastWorldOne = makeContract('world-one-final', 10);
+  const firstWorldTwo = makeContract(
+    'world-two-first',
+    1,
+    { centerX: 720, centerY: 432, zoom: 1 },
+    2,
+  );
+  const catalog = makeCatalog(lastWorldOne, firstWorldTwo);
+  catalog.worlds[1] = {
+    world: 2,
+    backgroundColor: '#1a6b82',
+    gridColor: '#e8faff',
+  };
+  await installCatalogHarness(page, catalog);
+  await page.addInitScript(
+    ({ key, firstId }) => {
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          version: 5,
+          unlockedContracts: [firstId],
+          completedContracts: {},
+          settings: { muted: false, volume: 0.65 },
+          sandbox: { machines: [], updatedAt: new Date(0).toISOString() },
+          campaignLayouts: {},
+        }),
+      );
+    },
+    { key: PROGRESS_KEY, firstId: lastWorldOne.id },
+  );
+  await openApp(page);
+  await page.locator('[data-action="menu-play"]').click();
+  await page.getByRole('button', { name: 'Selecionar fase 10-1' }).click();
+  await page.locator('[data-action="campaign-play"]').click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getSnapshot().contractId),
+    )
+    .toBe(lastWorldOne.id);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getBoardTheme()),
+    )
+    .toEqual({ backgroundColor: '#377fbd', gridColor: '#ffffff' });
+
+  await page.evaluate(() => {
+    const debug = (window as AdminWindow).__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Admin debug API unavailable');
+    debug.completeContract();
+  });
+  await expect(page.locator('#result-modal')).toBeVisible();
+  await expect(page.locator('[data-action="next"]')).toBeVisible();
+  await expect
+    .poll(async () => (await getProgress(page)).unlockedContracts)
+    .toEqual(expect.arrayContaining([lastWorldOne.id, firstWorldTwo.id]));
+
+  await page.locator('[data-action="next"]').click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getSnapshot().contractId),
+    )
+    .toBe(firstWorldTwo.id);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as AdminWindow).__FACTORY_DEBUG__?.getBoardTheme()),
+    )
+    .toEqual({ backgroundColor: '#1a6b82', gridColor: '#e8faff' });
+});
+
 test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ page }) => {
   const onlyContract = makeContract('only-stage', 1);
   const harness = await installCatalogHarness(page, makeCatalog(onlyContract));
@@ -545,7 +918,7 @@ test('permite catálogo vazio e desbloqueia a primeira fase recriada', async ({ 
   await onlyEntry.locator('.text-button.danger').click();
   await page.locator('[data-action="admin-confirm-accept"]').click();
   await expect.poll(() => harness.current().contracts.length).toBe(0);
-  await expect(page.locator('.contract-empty-state')).toContainText('Nenhuma fase publicada');
+  await expect(page.locator('.contract-empty-state')).toContainText('Nenhuma fase no Mundo 1');
   await expect(page.locator('.contract-empty-state')).toContainText('Crie a primeira fase');
   await expect(page.locator('[data-start-sandbox]')).toBeVisible();
   await expect(page.locator('#create-contract-button')).toBeVisible();
@@ -638,7 +1011,9 @@ test('salva a câmera autorada, recarrega o editor e inicia a campanha no mesmo 
 
   const canvasBounds = await page.locator('#game-container canvas').boundingBox();
   if (!canvasBounds) throw new Error('Canvas indisponível para testar a câmera do jogador.');
-  const pointerX = canvasBounds.x + canvasBounds.width * 0.82;
+  // Keep the gesture in the canvas area that is not occupied by the expanded
+  // construction palette on the right.
+  const pointerX = canvasBounds.x + canvasBounds.width * 0.65;
   const pointerY = canvasBounds.y + canvasBounds.height * 0.18;
   await page.mouse.move(pointerX, pointerY);
   await page.mouse.down();

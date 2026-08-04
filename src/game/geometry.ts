@@ -1,4 +1,5 @@
 import { CELL_SIZE, type GridPoint, type MachineState, type MachineType } from '../domain/types';
+import { isConveyorMachineType } from '../domain/economy';
 
 export interface Point {
   x: number;
@@ -13,7 +14,9 @@ export interface MachineDimensions {
 export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   source: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
   conveyor: { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
+  'slow-conveyor': { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
   'tracked-conveyor': { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
+  'fast-conveyor': { width: CELL_SIZE * 2, height: CELL_SIZE / 2 },
   receiver: { width: CELL_SIZE * 1.5, height: CELL_SIZE * 1.5 },
   spring: { width: CELL_SIZE, height: CELL_SIZE / 2 },
   'turbo-spring': { width: CELL_SIZE, height: CELL_SIZE / 2 },
@@ -27,7 +30,9 @@ export const MACHINE_DIMENSIONS: Record<MachineType, MachineDimensions> = {
 export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> = {
   source: MACHINE_DIMENSIONS.source,
   conveyor: { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
+  'slow-conveyor': { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
   'tracked-conveyor': { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
+  'fast-conveyor': { width: CELL_SIZE * 2 - 4, height: CELL_SIZE / 2 - 2 },
   receiver: MACHINE_DIMENSIONS.receiver,
   spring: MACHINE_DIMENSIONS.spring,
   'turbo-spring': MACHINE_DIMENSIONS['turbo-spring'],
@@ -137,7 +142,7 @@ export function capsulePolygon(
 }
 
 export function machinePolygon(machine: MachineState): Point[] {
-  if (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') {
+  if (isConveyorMachineType(machine.type)) {
     return capsulePolygon(
       machineCenter(machine),
       CONVEYOR_PLACEMENT_DIMENSIONS.width,

@@ -4,26 +4,26 @@ export type RunResolution = Extract<SimulationStatus, 'success' | 'failure'> | u
 
 export interface RuleEvaluation {
   resolution: RunResolution;
-  reason?: 'deliveries' | 'losses';
+  reason?: 'deliveries' | 'losses' | 'budget';
 }
 
 /**
- * Evaluates terminal rules in deterministic priority order. A run that meets
- * every objective on the final tick wins before the optional loss limit is
- * considered.
+ * Evaluates terminal rules in deterministic priority order. Reaching the
+ * delivery goal resolves immediately: within budget wins, over budget fails.
+ * Stars remain collectible bonuses and do not participate in completion.
  */
 export function evaluateRun(
   metrics: RunMetrics,
   goal: ContractGoal,
-  requiredStars: number,
   budgetLimit?: number,
 ): RuleEvaluation {
   const completedDeliveries = metrics.delivered >= goal.deliveries;
-  const collectedEveryStar = metrics.collectedStars >= requiredStars;
   const respectedBudget = isWithinBudget(metrics.spent, budgetLimit);
 
-  if (completedDeliveries && collectedEveryStar && respectedBudget) {
-    return { resolution: 'success', reason: 'deliveries' };
+  if (completedDeliveries) {
+    return respectedBudget
+      ? { resolution: 'success', reason: 'deliveries' }
+      : { resolution: 'failure', reason: 'budget' };
   }
 
   if (goal.maxLosses !== undefined && metrics.lost > goal.maxLosses) {

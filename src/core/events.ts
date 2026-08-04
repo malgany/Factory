@@ -1,6 +1,6 @@
 import type {
+  CampaignWorldDefinition,
   ContractDefinition,
-  ConveyorSpeed,
   ContractId,
   GameMode,
   GameSnapshot,
@@ -14,6 +14,7 @@ export interface AppEvents {
   'game:snapshot': GameSnapshot;
   'game:angle': { angle: number; clientX: number; clientY: number; visible: boolean };
   'game:dragging': { active: boolean };
+  'game:cost-feedback': { amount: number; clientX: number; clientY: number };
   'game:camera': { zoom: number; scrollX: number; scrollY: number };
   'game:toast': { message: string; tone: 'neutral' | 'success' | 'danger' };
   'game:result': { contractId: ContractId; snapshot: GameSnapshot };
@@ -35,14 +36,24 @@ export interface AppEvents {
     contractId?: ContractId;
     contract?: ContractDefinition;
     machines?: MachineState[];
+    worldTheme?: CampaignWorldDefinition;
   };
-  'ui:start-editor': { contract: ContractDefinition; isNew?: boolean };
+  'ui:start-editor': {
+    contract: ContractDefinition;
+    isNew?: boolean;
+    worldTheme?: CampaignWorldDefinition;
+  };
   'ui:editor-tool': { type: MachineType | 'obstacle' | 'star' };
   'ui:editor-update-settings': { contract: ContractDefinition };
   'ui:editor-test': { contract: ContractDefinition };
   'ui:editor-begin-preview': undefined;
   'ui:editor-return': undefined;
   'ui:editor-save': { contract: ContractDefinition };
+  'ui:editor-swap-contracts': {
+    contract: ContractDefinition;
+    conflictingContractId: ContractId;
+    beginPreviewAfterSave: boolean;
+  };
   'ui:editor-highlight-invalid': { paths: string[] };
   'ui:editor-persistence': { saving: boolean };
   'ui:editor-mark-saved': { contract: ContractDefinition };
@@ -50,7 +61,17 @@ export interface AppEvents {
   'ui:editor-configure': { open: boolean };
   'ui:editor-hitboxes': { enabled: boolean };
   'ui:admin-mode': { enabled: boolean };
-  'ui:admin-create-contract': undefined;
+  'ui:admin-create-contract': { world: number };
+  'ui:admin-create-world': {
+    backgroundColor: CampaignWorldDefinition['backgroundColor'];
+    gridColor: CampaignWorldDefinition['gridColor'];
+  };
+  'ui:admin-update-world': {
+    world: number;
+    backgroundColor: CampaignWorldDefinition['backgroundColor'];
+    gridColor: CampaignWorldDefinition['gridColor'];
+  };
+  'ui:admin-delete-world': { world: number };
   'ui:admin-edit-contract': { contractId: ContractId };
   'ui:admin-delete-contract': { contractId: ContractId };
   'ui:tool': { type: MachineType };
@@ -71,7 +92,6 @@ export interface AppEvents {
   'ui:copy-selected': undefined;
   'ui:cut-selected': undefined;
   'ui:reverse-selected': undefined;
-  'ui:set-conveyor-speed': { speed: ConveyorSpeed };
   'ui:toggle-grid': undefined;
   'ui:set-simulation-speed': { speed: number };
   'ui:set-muted': { muted: boolean };

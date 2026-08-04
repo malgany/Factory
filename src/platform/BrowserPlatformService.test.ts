@@ -24,8 +24,14 @@ function fakeStorage(initial: Record<string, string> = {}): Storage {
 }
 
 function catalog(): ContractCatalogFile {
+  const highestWorld = Math.max(1, ...CONTRACTS.map(({ world }) => world));
   return {
-    version: 3,
+    version: 4,
+    worlds: Array.from({ length: highestWorld }, (_, index) => ({
+      world: index + 1,
+      backgroundColor: '#377fbd',
+      gridColor: '#ffffff',
+    })),
     updatedAt: new Date(0).toISOString(),
     contracts: CONTRACTS.map((contract) => structuredClone(contract)),
   };

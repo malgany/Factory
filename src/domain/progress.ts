@@ -1,4 +1,9 @@
 import { CONTRACTS, getNextContractId, orderContracts } from './contracts';
+import {
+  canonicalMachineType,
+  conveyorSpeedForMachineType,
+  isConveyorMachineType,
+} from './economy';
 import type {
   ContractDefinition,
   ContractId,
@@ -194,8 +199,8 @@ function migrateProgress(
     candidate.version === 4 || candidate.version === PROGRESS_VERSION;
   const progress: ProgressSave = {
     version: PROGRESS_VERSION,
-    // Score-era campaign data is intentionally discarded. Stars and budget
-    // are now mandatory completion criteria, so prior completions are invalid.
+    // Preserve progress from the two stable save formats. Contract revisions
+    // continue to decide whether an existing completion is still valid.
     unlockedContracts: preservesCampaignProgress
       ? readUnlocked(candidate.unlockedContracts)
       : defaults.unlockedContracts,
@@ -257,13 +262,16 @@ function readCampaignLayouts(value: unknown): ProgressSave['campaignLayouts'] {
 }
 
 function readMachines(value: readonly unknown[]): MachineState[] {
-  return value.filter(isMachineState).map((machine) => ({
-    ...machine,
-    conveyorSpeed:
-      machine.type === 'conveyor' || machine.type === 'tracked-conveyor'
-        ? normalizeConveyorSpeed(machine.conveyorSpeed)
+  return value.filter(isMachineState).map((machine) => {
+    const type = canonicalMachineType(machine.type, machine.conveyorSpeed);
+    return {
+      ...machine,
+      type,
+      conveyorSpeed: isConveyorMachineType(type)
+        ? conveyorSpeedForMachineType(type, normalizeConveyorSpeed(machine.conveyorSpeed))
         : undefined,
-  }));
+    };
+  });
 }
 
 function reconcileCampaignLayouts(
@@ -288,9 +296,16 @@ function isMachineState(value: unknown): value is MachineState {
   if (!isRecord(value)) return false;
   return (
     typeof value.id === 'string' &&
-    ['source', 'conveyor', 'tracked-conveyor', 'receiver', 'spring', 'turbo-spring'].includes(
-      String(value.type),
-    ) &&
+    [
+      'source',
+      'conveyor',
+      'slow-conveyor',
+      'tracked-conveyor',
+      'fast-conveyor',
+      'receiver',
+      'spring',
+      'turbo-spring',
+    ].includes(String(value.type)) &&
     Number.isFinite(value.gridX) &&
     Number.isFinite(value.gridY) &&
     Number.isFinite(value.angle) &&

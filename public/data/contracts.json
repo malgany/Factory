@@ -1,5 +1,17 @@
 {
-  "version": 3,
+  "version": 4,
+  "worlds": [
+    {
+      "world": 1,
+      "backgroundColor": "#377fbd",
+      "gridColor": "#ffffff"
+    },
+    {
+      "world": 2,
+      "backgroundColor": "#000000",
+      "gridColor": "#4f4f4f"
+    }
+  ],
   "contracts": [
     {
       "id": "assembly-line",
@@ -9,7 +21,7 @@
       "order": 1,
       "title": "1-1",
       "subtitle": "Ligue a primeira linha.",
-      "description": "Conduza as caixas até a entrada e colete a estrela no caminho.",
+      "description": "Conduza as caixas até a entrada. A estrela no caminho vale como bônus.",
       "grid": {
         "columns": 30,
         "rows": 18
@@ -74,16 +86,17 @@
       "id": "quality-curve",
       "world": 1,
       "stage": 2,
-      "revision": 9,
+      "revision": 10,
       "order": 2,
       "title": "2-1",
       "subtitle": "Desenhe uma curva suave.",
-      "description": "Alcance a entrada deslocada passando pelas duas estrelas.",
+      "description": "Alcance a entrada deslocada; as duas estrelas do percurso são bônus opcionais.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor"
       ],
       "fixedMachines": [
@@ -232,113 +245,12 @@
       }
     },
     {
-      "id": "custom-eda80377-9d7c-42b4-b24d-7ef50cef0b31",
-      "world": 1,
-      "stage": 4,
-      "revision": 3,
-      "order": 4,
-      "title": "4-1",
-      "subtitle": "Crie um novo desafio.",
-      "description": "Monte o cenário e configure as ferramentas disponíveis.",
-      "grid": {
-        "columns": 30,
-        "rows": 18
-      },
-      "availableMachines": [
-        "tracked-conveyor",
-        "spring"
-      ],
-      "fixedMachines": [
-        {
-          "id": "machine-1",
-          "type": "source",
-          "gridX": 14.5,
-          "gridY": 5.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        },
-        {
-          "id": "machine-2",
-          "type": "receiver",
-          "gridX": 14.5,
-          "gridY": 15.25,
-          "angle": 0,
-          "reversed": false,
-          "fixed": true
-        }
-      ],
-      "obstacles": [
-        {
-          "id": "obstacle-1",
-          "gridX": 11,
-          "gridY": 5,
-          "columns": 1,
-          "rows": 8,
-          "angle": 0
-        },
-        {
-          "id": "obstacle-3",
-          "gridX": 18,
-          "gridY": 5,
-          "columns": 1,
-          "rows": 8,
-          "angle": 0
-        },
-        {
-          "id": "obstacle-4",
-          "columns": 8,
-          "rows": 1,
-          "angle": 0,
-          "gridX": 11,
-          "gridY": 13
-        }
-      ],
-      "collectibles": [
-        {
-          "id": "star-1",
-          "type": "star",
-          "gridX": 12.5,
-          "gridY": 5.5
-        },
-        {
-          "id": "star-2",
-          "type": "star",
-          "gridX": 16.5,
-          "gridY": 5.5
-        }
-      ],
-      "goal": {
-        "deliveries": 5,
-        "maxLosses": 0
-      },
-      "economy": {
-        "budgetLimit": 20000,
-        "machineCosts": {
-          "tracked-conveyor": 2500,
-          "spring": 5000,
-          "turbo-spring": 7500
-        },
-        "conveyorSpeedCosts": {
-          "slow": 2000,
-          "normal": 2500,
-          "fast": 3000
-        }
-      },
-      "spawnIntervalSeconds": 1.25,
-      "initialCamera": {
-        "centerX": 769.71,
-        "centerY": 497.97,
-        "zoom": 1.2712
-      }
-    },
-    {
       "id": "calibrated-jump",
       "world": 1,
-      "stage": 5,
-      "revision": 9,
-      "order": 5,
-      "title": "5-1",
+      "stage": 4,
+      "revision": 11,
+      "order": 4,
+      "title": "4-1",
       "subtitle": "Acerte a janela.",
       "description": "Calibre o salto para atravessar a abertura sem atingir o teto nem o piso.",
       "grid": {
@@ -346,7 +258,9 @@
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor",
+        "fast-conveyor",
         "spring"
       ],
       "fixedMachines": [
@@ -442,20 +356,125 @@
       }
     },
     {
-      "id": "star-route",
+      "id": "custom-eda80377-9d7c-42b4-b24d-7ef50cef0b31",
       "world": 1,
-      "stage": 6,
-      "revision": 6,
-      "order": 6,
-      "title": "6-1",
-      "subtitle": "Complete a rota das estrelas.",
-      "description": "Conduza o fluxo pelas três estrelas antes de concluir as entregas.",
+      "stage": 5,
+      "revision": 5,
+      "order": 5,
+      "title": "5-1",
+      "subtitle": "Crie um novo desafio.",
+      "description": "Monte o cenário e configure as ferramentas disponíveis.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor",
+        "fast-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "machine-1",
+          "type": "source",
+          "gridX": 14.5,
+          "gridY": 5.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-2",
+          "type": "receiver",
+          "gridX": 14.5,
+          "gridY": 15.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        }
+      ],
+      "obstacles": [
+        {
+          "id": "obstacle-1",
+          "gridX": 11,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 8,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-3",
+          "gridX": 18,
+          "gridY": 5,
+          "columns": 1,
+          "rows": 8,
+          "angle": 0
+        },
+        {
+          "id": "obstacle-4",
+          "columns": 8,
+          "rows": 1,
+          "angle": 0,
+          "gridX": 11,
+          "gridY": 13
+        }
+      ],
+      "collectibles": [
+        {
+          "id": "star-1",
+          "type": "star",
+          "gridX": 12.5,
+          "gridY": 5.5
+        },
+        {
+          "id": "star-2",
+          "type": "star",
+          "gridX": 16.5,
+          "gridY": 5.5
+        }
+      ],
+      "goal": {
+        "deliveries": 5,
+        "maxLosses": 0
+      },
+      "economy": {
+        "budgetLimit": 20000,
+        "machineCosts": {
+          "tracked-conveyor": 2500,
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
+        }
+      },
+      "spawnIntervalSeconds": 1.25,
+      "initialCamera": {
+        "centerX": 769.71,
+        "centerY": 497.97,
+        "zoom": 1.2712
+      }
+    },
+    {
+      "id": "star-route",
+      "world": 1,
+      "stage": 6,
+      "revision": 7,
+      "order": 6,
+      "title": "6-1",
+      "subtitle": "Explore a rota das estrelas.",
+      "description": "Conduza o fluxo até a entrada e tente coletar as três estrelas como bônus.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "slow-conveyor",
+        "tracked-conveyor",
+        "fast-conveyor",
         "spring"
       ],
       "fixedMachines": [
@@ -626,7 +645,7 @@
       "id": "over-or-around",
       "world": 1,
       "stage": 7,
-      "revision": 15,
+      "revision": 16,
       "order": 7,
       "title": "7-1",
       "subtitle": "Passe por cima ou dê a volta.",
@@ -636,7 +655,9 @@
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor",
+        "fast-conveyor",
         "spring",
         "turbo-spring"
       ],
@@ -743,7 +764,7 @@
       "id": "production-rhythm",
       "world": 1,
       "stage": 8,
-      "revision": 12,
+      "revision": 13,
       "order": 8,
       "title": "8-1",
       "subtitle": "Acelere a produção.",
@@ -753,7 +774,9 @@
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor",
+        "fast-conveyor",
         "spring"
       ],
       "fixedMachines": [
@@ -911,7 +934,7 @@
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 678.23,
+        "centerX": 680,
         "centerY": 436.73,
         "zoom": 1.1275
       }
@@ -1033,7 +1056,7 @@
         },
         {
           "id": "machine-28",
-          "type": "tracked-conveyor",
+          "type": "slow-conveyor",
           "gridX": 13.604,
           "gridY": 6.656,
           "angle": 0,
@@ -1102,17 +1125,19 @@
       "id": "final-inspection",
       "world": 1,
       "stage": 10,
-      "revision": 10,
+      "revision": 11,
       "order": 10,
       "title": "10-1",
       "subtitle": "Passe pela inspeção final.",
-      "description": "Combine os dois fluxos, saltos e paredes, coletando todas as estrelas e quase sem perdas.",
+      "description": "Combine os dois fluxos, saltos e paredes; estrelas coletadas valem como bônus.",
       "grid": {
         "columns": 30,
         "rows": 18
       },
       "availableMachines": [
+        "slow-conveyor",
         "tracked-conveyor",
+        "fast-conveyor",
         "spring",
         "turbo-spring"
       ],
@@ -1222,7 +1247,80 @@
         "centerY": 392.63,
         "zoom": 1.2713
       }
+    },
+    {
+      "id": "custom-9e0eccbc-3d84-4b2e-9106-256f5922d7ce",
+      "world": 2,
+      "stage": 1,
+      "revision": 3,
+      "order": 11,
+      "title": "1-2",
+      "subtitle": "Crie um novo desafio.",
+      "description": "Monte o cenário e configure as ferramentas disponíveis.",
+      "grid": {
+        "columns": 30,
+        "rows": 18
+      },
+      "availableMachines": [
+        "tracked-conveyor",
+        "spring"
+      ],
+      "fixedMachines": [
+        {
+          "id": "machine-1",
+          "type": "source",
+          "gridX": 11.5,
+          "gridY": 0.25,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-2",
+          "type": "receiver",
+          "gridX": 11.75,
+          "gridY": 14,
+          "angle": 0,
+          "reversed": false,
+          "fixed": true
+        },
+        {
+          "id": "machine-3",
+          "type": "slow-conveyor",
+          "gridX": 11.5,
+          "gridY": 2.25,
+          "angle": 0,
+          "reversed": false,
+          "conveyorSpeed": "slow",
+          "fixed": true
+        }
+      ],
+      "obstacles": [],
+      "collectibles": [],
+      "goal": {
+        "deliveries": 10,
+        "maxLosses": 3
+      },
+      "economy": {
+        "budgetLimit": 25000,
+        "machineCosts": {
+          "tracked-conveyor": 2500,
+          "spring": 5000,
+          "turbo-spring": 7500
+        },
+        "conveyorSpeedCosts": {
+          "slow": 2000,
+          "normal": 2500,
+          "fast": 3000
+        }
+      },
+      "spawnIntervalSeconds": 1.25,
+      "initialCamera": {
+        "centerX": 720,
+        "centerY": 432,
+        "zoom": 0.6356
+      }
     }
   ],
-  "updatedAt": "2026-07-25T03:37:58.236Z"
+  "updatedAt": "2026-08-02T19:33:37.719Z"
 }

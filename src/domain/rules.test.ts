@@ -15,51 +15,35 @@ const metrics = (overrides: Partial<RunMetrics> = {}): RunMetrics => ({
 });
 
 describe('regras de execução', () => {
-  it('vence somente com entregas, todas as estrelas e gasto dentro do orçamento', () => {
+  it('vence com as entregas e o gasto dentro do orçamento, sem exigir estrelas', () => {
     const contract = getContract('assembly-line');
-    const requiredStars = contract.collectibles.length;
     const budgetLimit = contract.economy.budgetLimit;
 
     expect(
       evaluateRun(
         metrics({
           delivered: contract.goal.deliveries,
-          collectedStars: requiredStars,
+          collectedStars: 0,
           spent: budgetLimit,
         }),
         contract.goal,
-        requiredStars,
         budgetLimit,
       ),
     ).toEqual({ resolution: 'success', reason: 'deliveries' });
   });
 
-  it('não conclui enquanto faltar estrela ou o orçamento nominal estiver excedido', () => {
+  it('reprova automaticamente quando a meta é atingida acima do orçamento', () => {
     const contract = getContract('quality-curve');
-    const requiredStars = contract.collectibles.length;
     const budgetLimit = contract.economy.budgetLimit!;
     const completedDeliveries = metrics({
       delivered: contract.goal.deliveries,
-      collectedStars: requiredStars,
+      collectedStars: 0,
       spent: budgetLimit,
     });
 
     expect(
-      evaluateRun(
-        { ...completedDeliveries, collectedStars: requiredStars - 1 },
-        contract.goal,
-        requiredStars,
-        budgetLimit,
-      ).resolution,
-    ).toBeUndefined();
-    expect(
-      evaluateRun(
-        { ...completedDeliveries, spent: budgetLimit + 1 },
-        contract.goal,
-        requiredStars,
-        budgetLimit,
-      ).resolution,
-    ).toBeUndefined();
+      evaluateRun({ ...completedDeliveries, spent: budgetLimit + 1 }, contract.goal, budgetLimit),
+    ).toEqual({ resolution: 'failure', reason: 'budget' });
   });
 
   it('aceita qualquer gasto quando a fase não tem orçamento', () => {
@@ -68,11 +52,9 @@ describe('regras de execução', () => {
       evaluateRun(
         metrics({
           delivered: contract.goal.deliveries,
-          collectedStars: contract.collectibles.length,
           spent: 999_999_999,
         }),
         contract.goal,
-        contract.collectibles.length,
       ),
     ).toEqual({ resolution: 'success', reason: 'deliveries' });
   });
@@ -80,14 +62,14 @@ describe('regras de execução', () => {
   it('falha apenas ao ultrapassar perdas configuradas e ignora perdas sem limite', () => {
     const contract = getContract('assembly-line');
     expect(
-      evaluateRun(metrics({ lost: contract.goal.maxLosses }), contract.goal, 1).resolution,
+      evaluateRun(metrics({ lost: contract.goal.maxLosses }), contract.goal).resolution,
     ).toBeUndefined();
-    expect(evaluateRun(metrics({ lost: contract.goal.maxLosses! + 1 }), contract.goal, 1)).toEqual({
+    expect(evaluateRun(metrics({ lost: contract.goal.maxLosses! + 1 }), contract.goal)).toEqual({
       resolution: 'failure',
       reason: 'losses',
     });
 
-    expect(evaluateRun(metrics({ lost: 100 }), { deliveries: 8 }, 1).resolution).toBeUndefined();
+    expect(evaluateRun(metrics({ lost: 100 }), { deliveries: 8 }).resolution).toBeUndefined();
   });
 
   it('prioriza uma conclusão completa sobre perdas no mesmo tick', () => {
@@ -96,12 +78,10 @@ describe('regras de execução', () => {
       evaluateRun(
         metrics({
           delivered: contract.goal.deliveries,
-          collectedStars: contract.collectibles.length,
           spent: contract.economy.budgetLimit,
           lost: contract.goal.maxLosses! + 1,
         }),
         contract.goal,
-        contract.collectibles.length,
         contract.economy.budgetLimit,
       ),
     ).toEqual({ resolution: 'success', reason: 'deliveries' });

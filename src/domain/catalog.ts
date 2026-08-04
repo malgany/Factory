@@ -1,5 +1,10 @@
 import { orderContracts } from './contracts';
-import { DEFAULT_CONVEYOR_SPEED_COSTS } from './economy';
+import {
+  canonicalMachineType,
+  conveyorSpeedForMachineType,
+  DEFAULT_CONVEYOR_SPEED_COSTS,
+  isConveyorMachineType,
+} from './economy';
 import {
   CELL_SIZE,
   COLLECTIBLE_STAR_RADIUS,
@@ -10,9 +15,11 @@ import {
   PLAY_AREA_MIN_COLUMN,
   PLAY_AREA_MIN_ROW,
   type CollectibleDefinition,
+  type CampaignWorldDefinition,
   type ContractCatalogFile,
   type ContractDefinition,
   type ContractEconomy,
+  type ContractId,
   type ContractMachineCosts,
   type ContractStage,
   type ConveyorSpeed,
@@ -22,8 +29,10 @@ import {
   type PersistenceResult,
 } from './types';
 
-export const CONTRACT_CATALOG_VERSION = 3 as const;
-export const MIN_CONTRACT_CAMERA_ZOOM = 1;
+export const CONTRACT_CATALOG_VERSION = 4 as const;
+export const DEFAULT_WORLD_BACKGROUND_COLOR = '#377fbd';
+export const DEFAULT_WORLD_GRID_COLOR = '#ffffff';
+export const MIN_CONTRACT_CAMERA_ZOOM = 0.5;
 export const MAX_CONTRACT_CAMERA_ZOOM = 2;
 export const MIN_SPAWN_INTERVAL_SECONDS = 0.8;
 export const MAX_SPAWN_INTERVAL_SECONDS = 10;
@@ -37,7 +46,9 @@ export const DEFAULT_MACHINE_COSTS: Readonly<ContractMachineCosts> = {
 const MACHINE_TYPES: readonly MachineType[] = [
   'source',
   'conveyor',
+  'slow-conveyor',
   'tracked-conveyor',
+  'fast-conveyor',
   'receiver',
   'spring',
   'turbo-spring',
@@ -83,6 +94,7 @@ export type NewContractDefinition = Omit<ContractDefinition, 'id' | 'order'> & {
 export function createDefaultContractCatalog(): ContractCatalogFile {
   return {
     version: CONTRACT_CATALOG_VERSION,
+    worlds: [createDefaultWorld(1)],
     contracts: [],
     updatedAt: EMPTY_UPDATED_AT,
   };
@@ -109,6 +121,7 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
   if (
     candidate.version !== 1 &&
     candidate.version !== 2 &&
+    candidate.version !== 3 &&
     candidate.version !== CONTRACT_CATALOG_VERSION
   ) {
     return catalogFailure('A versão do catálogo de fases não é compatível.');
@@ -145,10 +158,23 @@ export function readContractCatalogFile(input: unknown): PersistenceResult<Contr
     contracts.push(contract);
   }
 
+  const worlds =
+    candidate.version === CONTRACT_CATALOG_VERSION
+      ? readCampaignWorlds(candidate.worlds)
+      : legacyCampaignWorlds(contracts);
+  if (!worlds) {
+    return catalogFailure('As configurações dos mundos são inválidas ou estão incompletas.');
+  }
+  const knownWorlds = new Set(worlds.map(({ world }) => world));
+  if (contracts.some((contract) => !knownWorlds.has(contract.world))) {
+    return catalogFailure('O catálogo contém uma fase vinculada a um mundo não cadastrado.');
+  }
+
   return {
     ok: true,
     value: normalizeContractCatalog({
       version: CONTRACT_CATALOG_VERSION,
+      worlds,
       contracts,
       updatedAt: candidate.updatedAt,
     }),
@@ -171,9 +197,81 @@ export function normalizeContractCatalog(catalog: ContractCatalogFile): Contract
   const contracts = orderContracts(catalog.contracts).map(normalizeContract);
   return {
     version: CONTRACT_CATALOG_VERSION,
+    worlds: [...catalog.worlds]
+      .sort((left, right) => left.world - right.world)
+      .map(normalizeCampaignWorld),
     contracts,
     updatedAt: catalog.updatedAt,
   };
+}
+
+export function appendCampaignWorld(
+  catalog: ContractCatalogFile,
+  colors: Pick<CampaignWorldDefinition, 'backgroundColor' | 'gridColor'>,
+  updatedAt = new Date().toISOString(),
+): { catalog: ContractCatalogFile; world: CampaignWorldDefinition } {
+  const next = normalizeContractCatalog(catalog);
+  const worldNumber = (next.worlds.at(-1)?.world ?? 0) + 1;
+  const world = normalizeCampaignWorld({ world: worldNumber, ...colors });
+  if (!isHexColor(world.backgroundColor) || !isHexColor(world.gridColor)) {
+    throw new Error('Escolha cores válidas para o fundo e para a grade.');
+  }
+  next.worlds.push(world);
+  next.updatedAt = updatedAt;
+  return { catalog: normalizeContractCatalog(next), world: { ...world } };
+}
+
+export function updateCampaignWorld(
+  catalog: ContractCatalogFile,
+  worldNumber: number,
+  colors: Pick<CampaignWorldDefinition, 'backgroundColor' | 'gridColor'>,
+  updatedAt = new Date().toISOString(),
+): ContractCatalogFile {
+  const next = normalizeContractCatalog(catalog);
+  const index = next.worlds.findIndex(({ world }) => world === worldNumber);
+  if (index < 0) {
+    throw new Error(`O Mundo ${worldNumber} não está cadastrado.`);
+  }
+  const world = normalizeCampaignWorld({ world: worldNumber, ...colors });
+  if (!isHexColor(world.backgroundColor) || !isHexColor(world.gridColor)) {
+    throw new Error('Escolha cores válidas para o fundo e para a grade.');
+  }
+  next.worlds[index] = world;
+  next.updatedAt = updatedAt;
+  return normalizeContractCatalog(next);
+}
+
+export function deleteCampaignWorld(
+  catalog: ContractCatalogFile,
+  worldNumber: number,
+  updatedAt = new Date().toISOString(),
+): ContractCatalogFile {
+  const next = normalizeContractCatalog(catalog);
+  if (!next.worlds.some(({ world }) => world === worldNumber)) {
+    throw new Error(`O Mundo ${worldNumber} não está cadastrado.`);
+  }
+  if (next.worlds.length === 1) {
+    throw new Error('É necessário manter pelo menos um mundo cadastrado.');
+  }
+  if (next.contracts.some(({ world }) => world === worldNumber)) {
+    throw new Error(`O Mundo ${worldNumber} ainda possui fases cadastradas.`);
+  }
+
+  next.worlds = next.worlds
+    .filter(({ world }) => world !== worldNumber)
+    .map((world, index) => ({ ...world, world: index + 1 }));
+  next.contracts = next.contracts.map((contract) => {
+    if (contract.world < worldNumber) return contract;
+    const world = contract.world - 1;
+    return cloneContract({
+      ...contract,
+      world,
+      order: contractOrder(world, contract.stage),
+      title: getContractSlotLabel({ world, stage: contract.stage }),
+    });
+  });
+  next.updatedAt = updatedAt;
+  return normalizeContractCatalog(next);
 }
 
 export function saveContractToCatalog(
@@ -187,6 +285,9 @@ export function saveContractToCatalog(
   }
 
   const next = normalizeContractCatalog(catalog);
+  if (!next.worlds.some(({ world }) => world === contract.world)) {
+    throw new Error(`O Mundo ${contract.world} ainda não está cadastrado.`);
+  }
   const index = next.contracts.findIndex((candidate) => candidate.id === contract.id);
   const duplicateSlot = next.contracts.find(
     (candidate) =>
@@ -206,6 +307,52 @@ export function saveContractToCatalog(
   } else {
     next.contracts.push(cloneContract({ ...contract, revision: Math.max(1, contract.revision) }));
   }
+  next.updatedAt = updatedAt;
+  return normalizeContractCatalog(next);
+}
+
+export function swapContractSlots(
+  catalog: ContractCatalogFile,
+  contract: ContractDefinition,
+  conflictingContractId: ContractId,
+  updatedAt = new Date().toISOString(),
+): ContractCatalogFile {
+  const validation = validateContractDefinition(contract);
+  if (!validation.valid) {
+    throw new Error(validation.issues[0]?.message ?? 'A fase é inválida.');
+  }
+
+  const next = normalizeContractCatalog(catalog);
+  const currentIndex = next.contracts.findIndex((candidate) => candidate.id === contract.id);
+  if (currentIndex < 0) {
+    throw new Error('A fase atual ainda não possui uma posição para trocar.');
+  }
+
+  const conflictingIndex = next.contracts.findIndex(
+    (candidate) => candidate.id === conflictingContractId,
+  );
+  if (conflictingIndex < 0 || conflictingIndex === currentIndex) {
+    throw new Error('A fase que ocupava a nova posição não foi encontrada.');
+  }
+
+  const previous = next.contracts[currentIndex]!;
+  const conflicting = next.contracts[conflictingIndex]!;
+  if (conflicting.world !== contract.world || conflicting.stage !== contract.stage) {
+    throw new Error(`O slot ${contract.stage}-${contract.world} não está mais ocupado pela fase esperada.`);
+  }
+
+  next.contracts[currentIndex] = cloneContract({
+    ...contract,
+    revision: Math.max(contract.revision, previous.revision + 1),
+  });
+  next.contracts[conflictingIndex] = cloneContract({
+    ...conflicting,
+    world: previous.world,
+    stage: previous.stage,
+    order: contractOrder(previous.world, previous.stage),
+    title: getContractSlotLabel(previous),
+    revision: conflicting.revision + 1,
+  });
   next.updatedAt = updatedAt;
   return normalizeContractCatalog(next);
 }
@@ -259,24 +406,28 @@ export function createCustomContractId(randomUuid: () => string = defaultRandomU
 
 export function createEmptyContractDraft(
   catalog: ContractCatalogFile,
+  world = 1,
   id = createCustomContractId(),
 ): ContractDefinition {
+  if (!catalog.worlds.some((candidate) => candidate.world === world)) {
+    throw new Error(`O Mundo ${world} ainda não está cadastrado.`);
+  }
   const usedStages = new Set(
-    catalog.contracts.filter(({ world }) => world === 1).map(({ stage }) => stage),
+    catalog.contracts.filter((contract) => contract.world === world).map(({ stage }) => stage),
   );
   const stage = ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as ContractStage[]).find(
     (candidate) => !usedStages.has(candidate),
   );
   if (!stage) {
-    throw new Error('O Mundo 1 já possui as dez fases cadastradas.');
+    throw new Error(`O Mundo ${world} já possui as dez fases cadastradas.`);
   }
   return {
     id,
-    world: 1,
+    world,
     stage,
     revision: 1,
-    order: contractOrder(1, stage),
-    title: `${stage}-1`,
+    order: contractOrder(world, stage),
+    title: `${stage}-${world}`,
     subtitle: 'Crie um novo desafio.',
     description: 'Monte o cenário e configure as ferramentas disponíveis.',
     grid: { columns: GRID_COLUMNS, rows: GRID_ROWS },
@@ -531,16 +682,19 @@ function normalizeContract(contract: ContractDefinition): ContractDefinition {
   const normalized = cloneContract(contract);
   normalized.order = contractOrder(normalized.world, normalized.stage);
   normalized.title = getContractSlotLabel(normalized);
-  normalized.fixedMachines = normalized.fixedMachines.map((machine) => ({
-    ...machine,
-    gridX: roundForCatalog(machine.gridX, 4),
-    gridY: roundForCatalog(machine.gridY, 4),
-    angle: roundForCatalog(machine.angle, 4),
-    conveyorSpeed:
-      machine.type === 'conveyor' || machine.type === 'tracked-conveyor'
-        ? normalizeConveyorSpeed(machine.conveyorSpeed)
+  normalized.fixedMachines = normalized.fixedMachines.map((machine) => {
+    const type = canonicalMachineType(machine.type, machine.conveyorSpeed);
+    return {
+      ...machine,
+      type,
+      gridX: roundForCatalog(machine.gridX, 4),
+      gridY: roundForCatalog(machine.gridY, 4),
+      angle: roundForCatalog(machine.angle, 4),
+      conveyorSpeed: isConveyorMachineType(type)
+        ? conveyorSpeedForMachineType(type, normalizeConveyorSpeed(machine.conveyorSpeed))
         : undefined,
-  }));
+    };
+  });
   normalized.obstacles = normalized.obstacles.map((obstacle) => ({
     ...obstacle,
     gridX: roundForCatalog(obstacle.gridX, 4),
@@ -617,10 +771,10 @@ function cloneContractFields(
 
 function readContractDefinition(
   value: unknown,
-  catalogVersion: 1 | 2 | 3,
+  catalogVersion: 1 | 2 | 3 | 4,
 ): ContractDefinition | undefined {
   const legacyVersionOne = catalogVersion === 1;
-  const legacyEconomy = catalogVersion < CONTRACT_CATALOG_VERSION;
+  const legacyEconomy = catalogVersion < 3;
   if (
     !isRecord(value) ||
     !isRecord(value.grid) ||
@@ -707,7 +861,7 @@ function readContractDefinition(
     if (type === 'turbo-spring') {
       return Math.max(highestCost, DEFAULT_MACHINE_COSTS['turbo-spring']!);
     }
-    if (type === 'tracked-conveyor' || type === 'conveyor') {
+    if (isConveyorMachineType(type)) {
       return Math.max(highestCost, DEFAULT_MACHINE_COSTS['tracked-conveyor']);
     }
     return highestCost;
@@ -813,6 +967,58 @@ function isContractStage(value: unknown): value is ContractStage {
   return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 10;
 }
 
+function createDefaultWorld(world: number): CampaignWorldDefinition {
+  return {
+    world,
+    backgroundColor: DEFAULT_WORLD_BACKGROUND_COLOR,
+    gridColor: DEFAULT_WORLD_GRID_COLOR,
+  };
+}
+
+function normalizeCampaignWorld(world: CampaignWorldDefinition): CampaignWorldDefinition {
+  return {
+    world: Math.round(world.world),
+    backgroundColor: world.backgroundColor.toLowerCase(),
+    gridColor: world.gridColor.toLowerCase(),
+  };
+}
+
+function legacyCampaignWorlds(
+  contracts: readonly ContractDefinition[],
+): CampaignWorldDefinition[] {
+  const highestWorld = Math.max(1, ...contracts.map(({ world }) => world));
+  return Array.from({ length: highestWorld }, (_, index) => createDefaultWorld(index + 1));
+}
+
+function readCampaignWorlds(value: unknown): CampaignWorldDefinition[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const worlds: CampaignWorldDefinition[] = [];
+  for (const [index, candidate] of value.entries()) {
+    if (
+      !isRecord(candidate) ||
+      candidate.world !== index + 1 ||
+      typeof candidate.backgroundColor !== 'string' ||
+      typeof candidate.gridColor !== 'string' ||
+      !isHexColor(candidate.backgroundColor) ||
+      !isHexColor(candidate.gridColor)
+    ) {
+      return undefined;
+    }
+    worlds.push(
+      normalizeCampaignWorld({
+        world: candidate.world,
+        backgroundColor: candidate.backgroundColor,
+        gridColor: candidate.gridColor,
+      }),
+    );
+  }
+  return worlds;
+}
+
+function isHexColor(value: string): boolean {
+  return /^#[0-9a-f]{6}$/i.test(value);
+}
+
 function isMachineType(value: unknown): value is MachineType {
   return MACHINE_TYPES.includes(value as MachineType);
 }
@@ -885,7 +1091,9 @@ interface Point {
 const MACHINE_SIZE_IN_CELLS: Record<MachineType, { width: number; height: number }> = {
   source: { width: 68 / 48, height: 68 / 48 },
   conveyor: { width: 85 / 48, height: 21 / 48 },
+  'slow-conveyor': { width: 85 / 48, height: 21 / 48 },
   'tracked-conveyor': { width: 85 / 48, height: 21 / 48 },
+  'fast-conveyor': { width: 85 / 48, height: 21 / 48 },
   receiver: { width: 76 / 48, height: 76 / 48 },
   spring: { width: 2, height: 1 },
   'turbo-spring': { width: 2, height: 1 },
@@ -893,7 +1101,7 @@ const MACHINE_SIZE_IN_CELLS: Record<MachineType, { width: number; height: number
 
 function machinePolygon(machine: MachineState): Point[] {
   const size = MACHINE_SIZE_IN_CELLS[machine.type];
-  if (machine.type === 'conveyor' || machine.type === 'tracked-conveyor') {
+  if (isConveyorMachineType(machine.type)) {
     return capsulePolygon(
       { x: machine.gridX + 0.5, y: machine.gridY + 0.5 },
       size.width,
