@@ -1896,6 +1896,13 @@ test('pause preserva a simulação e retoma sem substituir o stop', async ({ pag
   );
   expect(stillPausedAt - pausedAt).toBeLessThan(0.03);
 
+  await page.locator('[data-action="pause-menu"]').click();
+  await expect(page.locator('#pause-modal')).toBeVisible();
+  await page.locator('#pause-modal [data-action="close-pause-menu"]').click();
+  await expect(page.locator('#pause-modal')).toBeHidden();
+  await expect.poll(async () => (await debugState(page)).status).toBe('paused');
+  await expect(pauseControl).toHaveAttribute('aria-label', 'Retomar simulação');
+
   await pauseControl.click();
   await expect.poll(async () => (await debugState(page)).status).toBe('running');
   await expect(pauseControl).toHaveAttribute('aria-label', 'Pausar simulação');

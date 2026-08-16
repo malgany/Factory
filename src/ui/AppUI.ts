@@ -196,6 +196,7 @@ export class AppUI {
   private menuDemo?: MenuDemoController;
   private menuTransitionCleanup?: () => void;
   private optionsOpenedFromPause = false;
+  private resumeAfterPauseMenu = false;
 
   constructor(options: AppUIOptions) {
     this.root = options.root;
@@ -329,7 +330,7 @@ export class AppUI {
     menu.classList.remove('is-hidden');
     menu.removeAttribute('inert');
     this.element('#result-modal').classList.add('is-hidden');
-    this.closePauseMenu();
+    this.closePauseMenu(false);
     this.setMenuView(view);
     this.root.classList.add('is-menu-open');
     this.updateGameUiAvailability();
@@ -1352,8 +1353,10 @@ export class AppUI {
     }
   }
 
-  private openPauseMenu(): void {
-    if (this.snapshot?.status === 'running') appEvents.emit('ui:pause', undefined);
+  private openPauseMenu(preserveResumeState = false): void {
+    const running = this.snapshot?.status === 'running';
+    if (!preserveResumeState) this.resumeAfterPauseMenu = running;
+    if (running) appEvents.emit('ui:pause', undefined);
     this.element('#pause-modal').classList.remove('is-hidden');
     window.requestAnimationFrame(() =>
       this.root
@@ -1362,9 +1365,12 @@ export class AppUI {
     );
   }
 
-  private closePauseMenu(): void {
+  private closePauseMenu(resumeSimulation = true): void {
     this.element('#pause-modal').classList.add('is-hidden');
-    if (this.snapshot?.status === 'paused') appEvents.emit('ui:run', undefined);
+    const shouldResume =
+      resumeSimulation && this.resumeAfterPauseMenu && this.snapshot?.status === 'paused';
+    this.resumeAfterPauseMenu = false;
+    if (shouldResume) appEvents.emit('ui:run', undefined);
   }
 
   private openPauseOptions(): void {
@@ -1397,7 +1403,7 @@ export class AppUI {
     this.hideMenu();
     menu.dataset.menuView = 'home';
     this.updateMenuPanels('home', false);
-    this.openPauseMenu();
+    this.openPauseMenu(true);
     window.requestAnimationFrame(() => menu.classList.remove('is-pause-options-direct'));
   }
 
@@ -2395,7 +2401,7 @@ export class AppUI {
         !nextContract ||
         !this.progress.unlockedContracts.includes(nextContract.id),
     );
-    this.closePauseMenu();
+    this.closePauseMenu(false);
     this.element('#result-modal').classList.remove('is-hidden');
     this.updateGameUiAvailability();
     window.requestAnimationFrame(() =>
