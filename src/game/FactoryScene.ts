@@ -5399,8 +5399,8 @@ export class FactoryScene extends Phaser.Scene {
         ...collectible,
         id,
         type: 'star',
-        gridX: this.snapEditorPosition(collectible.gridX),
-        gridY: this.snapEditorPosition(collectible.gridY),
+        gridX: collectible.gridX,
+        gridY: collectible.gridY,
       };
       return this.isCollectiblePlacementValid(normalized) ? [normalized] : [];
     });
@@ -5420,8 +5420,8 @@ export class FactoryScene extends Phaser.Scene {
       return {
         ...obstacle,
         id,
-        gridX: this.snapEditorPosition(obstacle.gridX),
-        gridY: this.snapEditorPosition(obstacle.gridY),
+        gridX: obstacle.gridX,
+        gridY: obstacle.gridY,
         columns: Math.max(1, Math.round(obstacle.columns)),
         rows: Math.max(1, Math.round(obstacle.rows)),
         angle: normalizeAngle(obstacle.angle ?? 0),

@@ -287,6 +287,83 @@ test('editor keeps authored scenario fixed and restores it after a disposable pr
   });
 });
 
+test('editor preserva posições livres ao abrir e testar uma fase', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
+  await expect(page.locator('.factory-app')).toHaveAttribute('aria-busy', 'false');
+
+  const positions = await page.evaluate(() => {
+    const debug = window.__FACTORY_DEBUG__;
+    if (!debug) throw new Error('Factory debug API was not installed');
+    debug.startEditor({
+      id: 'free-position-test',
+      order: 1,
+      title: 'Free position test',
+      subtitle: 'Draft',
+      description: 'Checks that loading does not snap authored positions.',
+      grid: { columns: 30, rows: 18 },
+      availableMachines: ['tracked-conveyor'],
+      fixedMachines: [
+        {
+          id: 'source-test',
+          type: 'source',
+          gridX: 2.5,
+          gridY: 2.5,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+        {
+          id: 'receiver-test',
+          type: 'receiver',
+          gridX: 24.5,
+          gridY: 14.5,
+          angle: 0,
+          reversed: false,
+          fixed: true,
+        },
+      ],
+      obstacles: [
+        {
+          id: 'free-obstacle',
+          gridX: 10.123,
+          gridY: 8.456,
+          columns: 1,
+          rows: 1,
+          angle: 0,
+        },
+      ],
+      collectibles: [{ id: 'free-star', type: 'star', gridX: 13.123, gridY: 9.456 }],
+      goal: { deliveries: 1, maxLosses: 1 },
+      economy: {
+        budgetLimit: 15_000,
+        machineCosts: { 'tracked-conveyor': 2_500, spring: 5_000 },
+      },
+      spawnIntervalSeconds: 1,
+      initialCamera: { centerX: 720, centerY: 432, zoom: 1 },
+    });
+
+    const opened = debug.getEditorDraft();
+    debug.beginEditorPreview();
+    const preview = {
+      obstacle: debug.getObstacles()[0],
+      collectible: debug.getCollectibles()[0],
+    };
+    debug.returnToEditor();
+    const restored = debug.getEditorDraft();
+    return {
+      opened: { obstacle: opened.obstacles[0], collectible: opened.collectibles[0] },
+      preview,
+      restored: { obstacle: restored.obstacles[0], collectible: restored.collectibles[0] },
+    };
+  });
+
+  for (const state of [positions.opened, positions.preview, positions.restored]) {
+    expect(state.obstacle).toMatchObject({ gridX: 10.123, gridY: 8.456 });
+    expect(state.collectible).toMatchObject({ gridX: 13.123, gridY: 9.456 });
+  }
+});
+
 test('editor copia e exclui seleção mista de máquina e bloqueador', async ({ page }) => {
   await page.goto('/');
   await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
