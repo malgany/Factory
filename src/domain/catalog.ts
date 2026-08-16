@@ -5,6 +5,7 @@ import {
   DEFAULT_CONVEYOR_SPEED_COSTS,
   isConveyorMachineType,
 } from './economy';
+import { MACHINE_PLACEMENT_SIZE_IN_CELLS } from './machineGeometry';
 import {
   CELL_SIZE,
   COLLECTIBLE_STAR_RADIUS,
@@ -1088,19 +1089,8 @@ interface Point {
   y: number;
 }
 
-const MACHINE_SIZE_IN_CELLS: Record<MachineType, { width: number; height: number }> = {
-  source: { width: 68 / 48, height: 68 / 48 },
-  conveyor: { width: 85 / 48, height: 21 / 48 },
-  'slow-conveyor': { width: 85 / 48, height: 21 / 48 },
-  'tracked-conveyor': { width: 85 / 48, height: 21 / 48 },
-  'fast-conveyor': { width: 85 / 48, height: 21 / 48 },
-  receiver: { width: 76 / 48, height: 76 / 48 },
-  spring: { width: 2, height: 1 },
-  'turbo-spring': { width: 2, height: 1 },
-};
-
 function machinePolygon(machine: MachineState): Point[] {
-  const size = MACHINE_SIZE_IN_CELLS[machine.type];
+  const size = MACHINE_PLACEMENT_SIZE_IN_CELLS[machine.type];
   if (isConveyorMachineType(machine.type)) {
     return capsulePolygon(
       { x: machine.gridX + 0.5, y: machine.gridY + 0.5 },

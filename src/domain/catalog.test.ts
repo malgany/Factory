@@ -460,6 +460,45 @@ describe('catálogo JSON de contratos', () => {
     });
   });
 
+  it('valida trampolins com a mesma área de posicionamento do editor', () => {
+    const contract = structuredClone(CONTRACTS[0]!);
+    contract.fixedMachines = [
+      {
+        id: 'source-proof',
+        type: 'source',
+        gridX: 2.5,
+        gridY: 2.5,
+        angle: 0,
+        reversed: false,
+        fixed: true,
+      },
+      {
+        id: 'receiver-proof',
+        type: 'receiver',
+        gridX: 22.5,
+        gridY: 12.5,
+        angle: 0,
+        reversed: false,
+        fixed: true,
+      },
+      {
+        id: 'spring-proof',
+        type: 'spring',
+        gridX: 3.75,
+        gridY: 5,
+        angle: 0,
+        reversed: false,
+        fixed: true,
+      },
+    ];
+    contract.obstacles = [
+      { id: 'obstacle-proof', gridX: 5, gridY: 5, columns: 1, rows: 1, angle: 0 },
+    ];
+    contract.collectibles = [];
+
+    expect(validateContractDefinition(contract)).toEqual({ valid: true, issues: [] });
+  });
+
   it('valida estrelas nos limites sem tratá-las como colisão', () => {
     const contract = structuredClone(CONTRACTS[0]!);
     const source = contract.fixedMachines[0]!;

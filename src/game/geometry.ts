@@ -1,5 +1,6 @@
 import { CELL_SIZE, type GridPoint, type MachineState, type MachineType } from '../domain/types';
 import { isConveyorMachineType } from '../domain/economy';
+import { MACHINE_PLACEMENT_SIZE_IN_CELLS } from '../domain/machineGeometry';
 
 export interface Point {
   x: number;
@@ -43,8 +44,8 @@ export const MACHINE_PHYSICS_DIMENSIONS: Record<MachineType, MachineDimensions> 
  * module footprint. This lets angled conveyor tips meet without an invisible gap.
  */
 export const CONVEYOR_PLACEMENT_DIMENSIONS: MachineDimensions = {
-  width: 85,
-  height: 21,
+  width: MACHINE_PLACEMENT_SIZE_IN_CELLS.conveyor.width * CELL_SIZE,
+  height: MACHINE_PLACEMENT_SIZE_IN_CELLS.conveyor.height * CELL_SIZE,
 };
 
 export function gridToWorld(point: GridPoint): Point {
@@ -150,11 +151,11 @@ export function machinePolygon(machine: MachineState): Point[] {
       machine.angle,
     );
   }
-  const dimensions = MACHINE_DIMENSIONS[machine.type];
+  const size = MACHINE_PLACEMENT_SIZE_IN_CELLS[machine.type];
   return rectangleCorners(
     machineCenter(machine),
-    dimensions.width,
-    dimensions.height,
+    size.width * CELL_SIZE,
+    size.height * CELL_SIZE,
     machine.angle,
   );
 }
