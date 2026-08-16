@@ -139,6 +139,60 @@ async function startSandbox(page: Page): Promise<void> {
   await expect.poll(async () => (await debugState(page)).mode).toBe('sandbox');
 }
 
+test('preserva o progresso quando o catálogo falha temporariamente', async ({ page }) => {
+  const savedProgress = {
+    version: 5,
+    unlockedContracts: ['assembly-line', 'quality-curve'],
+    completedContracts: { 'assembly-line': 4 },
+    settings: { muted: false, volume: 0.65 },
+    sandbox: { machines: [], updatedAt: '2026-01-01T00:00:00.000Z' },
+    campaignLayouts: {
+      'assembly-line': {
+        revision: 4,
+        machines: [
+          {
+            id: 'saved-piece',
+            type: 'tracked-conveyor',
+            gridX: 7,
+            gridY: 7,
+            angle: 0,
+            reversed: false,
+            fixed: false,
+          },
+        ],
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    },
+  };
+  await page.addInitScript(
+    ({ key, progress }) => window.localStorage.setItem(key, JSON.stringify(progress)),
+    { key: STORAGE_KEY, progress: savedProgress },
+  );
+  await page.route('**/data/contracts.json*', async (route) => {
+    if (route.request().resourceType() !== 'fetch') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'temporary failure' }),
+    });
+  });
+
+  await openApp(page);
+
+  const persisted = await page.evaluate(
+    (key) => JSON.parse(window.localStorage.getItem(key)!),
+    STORAGE_KEY,
+  );
+  expect(persisted.unlockedContracts).toEqual(savedProgress.unlockedContracts);
+  expect(persisted.completedContracts).toEqual(savedProgress.completedContracts);
+  expect(persisted.campaignLayouts['assembly-line']).toMatchObject(
+    savedProgress.campaignLayouts['assembly-line'],
+  );
+});
+
 async function placeAtCanvasCenter(
   page: Page,
   tool: MachineDebugState['type'],

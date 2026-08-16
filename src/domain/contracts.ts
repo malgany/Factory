@@ -3,6 +3,7 @@ import contractCatalogJson from '../../public/data/contracts.json';
 import {
   GRID_COLUMNS,
   GRID_ROWS,
+  type ContractCatalogFile,
   type ContractDefinition,
   type ContractId,
   type GridSize,
@@ -17,9 +18,13 @@ const DEFAULT_GRID: GridSize = {
 
 // This export is primarily a deterministic default for domain helpers and tests.
 // Runtime startup validates and loads the same file through BrowserPlatformService.
+export const CONTRACT_CATALOG: ContractCatalogFile = structuredClone(
+  contractCatalogJson,
+) as ContractCatalogFile;
+
 export const CONTRACTS: readonly ContractDefinition[] = structuredClone(
-  contractCatalogJson.contracts,
-) as ContractDefinition[];
+  CONTRACT_CATALOG.contracts,
+);
 
 export interface SandboxDefinition {
   readonly title: string;

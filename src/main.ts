@@ -18,6 +18,7 @@ import {
   reconcileProgress,
   removeContractProgress,
 } from './domain/progress';
+import { CONTRACT_CATALOG } from './domain/contracts';
 import type {
   ContractCatalogFile,
   ContractDefinition,
@@ -37,7 +38,9 @@ if (!root) {
 
 const platform = new BrowserPlatformService();
 const catalogLoad = await platform.loadContractCatalog();
-let catalog: ContractCatalogFile = catalogLoad.value;
+let catalog: ContractCatalogFile = catalogLoad.ok
+  ? catalogLoad.value
+  : structuredClone(CONTRACT_CATALOG);
 let contracts: ContractDefinition[] = mergeContractCatalog(catalog);
 let progress: ProgressSave = reconcileProgress(platform.loadProgress(contracts), contracts);
 const initialProgressSave = platform.saveProgress(progress);
