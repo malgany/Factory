@@ -5073,7 +5073,7 @@ export class FactoryScene extends Phaser.Scene {
             : event.key === 'ArrowDown'
               ? { x: 0, y: 1 }
               : undefined;
-    if (!direction || this.shouldIgnoreGameplayShortcut(event)) return;
+    if (!direction || event.defaultPrevented || this.shouldIgnoreGameplayShortcut(event)) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
 
     event.preventDefault();

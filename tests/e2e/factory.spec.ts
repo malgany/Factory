@@ -855,12 +855,13 @@ test('menu inicial navega entre jogar, opções e sair', async ({ page }) => {
     (page.viewportSize()?.width ?? 0) / 2,
     1,
   );
-  const routeOverlay = playPanel.locator('.campaign-route-overlay');
-  const stageMarkers = playPanel.locator('.campaign-stage-marker');
+  const activeCampaignWorld = playPanel.locator('.campaign-world-page.is-active');
+  const routeOverlay = activeCampaignWorld.locator('.campaign-route-overlay');
+  const stageMarkers = activeCampaignWorld.locator('.campaign-stage-marker');
   await expect(routeOverlay).toBeVisible();
   await expect(stageMarkers).toHaveCount(10);
-  await expect(playPanel.locator('.campaign-stage-marker.is-locked')).toHaveCount(9);
-  await expect(playPanel.locator('.campaign-stage-marker.is-locked svg')).toHaveCount(9);
+  await expect(activeCampaignWorld.locator('.campaign-stage-marker.is-locked')).toHaveCount(9);
+  await expect(activeCampaignWorld.locator('.campaign-stage-marker.is-locked svg')).toHaveCount(9);
   await expect(routeOverlay.locator('.campaign-route-link.is-locked')).toHaveCount(9);
   await expect(stageMarkers.locator('strong')).toHaveText(['1-1']);
   await expect(playPanel.locator('.campaign-legacy-content')).toBeHidden();

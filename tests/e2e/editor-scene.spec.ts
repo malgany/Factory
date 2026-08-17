@@ -107,7 +107,7 @@ test('editor posiciona ferramentas somente ao arrastá-las da paleta', async ({ 
     )
     .toBe(!editorConveyorId.reversed);
 
-  await dragToolTo('[data-editor-tool="obstacle"]', 0.5, 0.44);
+  await dragToolTo('[data-editor-tool="obstacle"]', 0.5, 0.25);
   await expectContextOutsideSelection();
   const obstacleBeforeKeys = await page.evaluate(() => {
     const obstacle = window.__FACTORY_DEBUG__!.getObstacles().at(-1);
