@@ -4,16 +4,17 @@ const CONTRACT_IDS = [
   'assembly-line',
   'quality-curve',
   'first-jump',
-  'over-or-around',
   'calibrated-jump',
+  'custom-eda80377-9d7c-42b4-b24d-7ef50cef0b31',
   'star-route',
-  'meeting-lines',
+  'over-or-around',
   'production-rhythm',
   'industrial-corridors',
   'final-inspection',
+  'custom-9e0eccbc-3d84-4b2e-9106-256f5922d7ce',
 ] as const;
 
-test('a câmera inicial enquadra os elementos das dez fases', async ({ page }) => {
+test('a câmera inicial enquadra os elementos das fases publicadas', async ({ page }) => {
   await page.goto('/');
   await page.waitForFunction(() => Boolean(window.__FACTORY_DEBUG__));
 

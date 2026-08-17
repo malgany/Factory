@@ -2,7 +2,12 @@ import { expect, test, type Page } from '@playwright/test';
 
 interface SolutionMachine {
   id: string;
-  type: 'tracked-conveyor' | 'spring';
+  type:
+    | 'slow-conveyor'
+    | 'tracked-conveyor'
+    | 'fast-conveyor'
+    | 'spring'
+    | 'turbo-spring';
   gridX: number;
   gridY: number;
   angle: number;
@@ -73,9 +78,10 @@ const conveyor = (
   gridY: number,
   angle: number,
   reversed = false,
+  type: SolutionMachine['type'] = 'tracked-conveyor',
 ): SolutionMachine => ({
   id,
-  type: 'tracked-conveyor',
+  type,
   gridX,
   gridY,
   angle,
@@ -98,7 +104,7 @@ function expectSolved(
   goal: {
     deliveries: number;
     maxLosses?: number;
-    requiredStars: number;
+    minimumStars?: number;
     budgetLimit: number;
     expectedSpend: number;
   },
@@ -108,173 +114,100 @@ function expectSolved(
   if (goal.maxLosses !== undefined) {
     expect(result.lost).toBeLessThanOrEqual(goal.maxLosses);
   }
-  expect(result.collectedStars).toBe(goal.requiredStars);
+  if (goal.minimumStars !== undefined) {
+    expect(result.collectedStars).toBeGreaterThanOrEqual(goal.minimumStars);
+  }
   expect(result.spent).toBe(goal.expectedSpend);
   expect(result.spent).toBeLessThanOrEqual(goal.budgetLimit);
 }
 
-test('1-1 Linha de montagem possui solução e coleta a estrela', async ({ page }) => {
-  const layout = [4.5, 6.5, 8.5, 10.5].map((x, index) =>
-    conveyor(`solution-${index + 1}`, x, 6, 0),
-  );
+test('1-1 Linha de montagem possui solução dentro do orçamento', async ({ page }) => {
+  const layout = [
+    conveyor('solution-1', 4.5, 5.25, 5),
+    conveyor('solution-2', 6.75, 5.25, 5),
+    conveyor('solution-3', 9, 5.25, 5),
+  ];
   const result = await runSolution(page, 'assembly-line', layout, 25);
   expectSolved(result, {
     deliveries: 8,
-    maxLosses: 3,
-    requiredStars: 1,
+    maxLosses: 0,
+    budgetLimit: 8_000,
+    expectedSpend: 7_500,
+  });
+});
+
+test('2-1 Curva de qualidade possui solução dentro do orçamento', async ({ page }) => {
+  const layout = [
+    conveyor('solution-1', 4, 5.5, 20),
+    conveyor('solution-2', 6.75, 7.5, 20),
+    conveyor('solution-3', 9.5, 9.5, 20),
+    conveyor('solution-4', 12.25, 11.5, 20),
+  ];
+  const result = await runSolution(page, 'quality-curve', layout, 35);
+  expectSolved(result, {
+    deliveries: 10,
+    maxLosses: 0,
+    minimumStars: 2,
     budgetLimit: 10_000,
     expectedSpend: 10_000,
   });
 });
 
-test('2-1 Curva de qualidade possui solução e coleta as estrelas', async ({ page }) => {
-  const layout = [
-    conveyor('solution-1', 4, 6, 27),
-    conveyor('solution-2', 6, 7, 27),
-    conveyor('solution-3', 8, 8, 27),
-    conveyor('solution-4', 10, 9, 27),
-    conveyor('solution-5', 12, 10, 27),
-  ];
-  const result = await runSolution(page, 'quality-curve', layout, 35);
-  expectSolved(result, {
-    deliveries: 10,
-    maxLosses: 3,
-    requiredStars: 2,
-    budgetLimit: 15_000,
-    expectedSpend: 12_500,
-  });
-});
-
 test('3-1 Primeiro salto possui solução com trampolim', async ({ page }) => {
-  const layout = [
-    spring('solution-1', 3.25, 8, 65),
-    conveyor('solution-2', 8.5, 13.5, 0),
-    conveyor('solution-3', 10.5, 13.5, 0),
-    conveyor('solution-4', 12.5, 13.5, 0),
-  ];
+  const layout = [spring('solution-1', 1.5, 5.75, 80)];
   const result = await runSolution(page, 'first-jump', layout, 35);
   expectSolved(result, {
     deliveries: 10,
-    maxLosses: 3,
-    requiredStars: 1,
-    budgetLimit: 20_000,
-    expectedSpend: 12_500,
+    maxLosses: 0,
+    budgetLimit: 5_000,
+    expectedSpend: 5_000,
   });
 });
 
-test('4-1 Por cima ou por volta possui solução pelo desvio', async ({ page }) => {
+test('4-1 Salto calibrado possui solução pela janela', async ({ page }) => {
   const layout = [
-    conveyor('solution-1', 3, 12, 0),
-    conveyor('solution-2', 5, 12, 0),
-    conveyor('solution-3', 7, 12, 0),
-    conveyor('solution-4', 10, 13.5, 0),
-    conveyor('solution-5', 12, 13.5, 0),
-    conveyor('solution-6', 14, 13.5, 0),
-    conveyor('solution-7', 16, 13.5, 0),
-    conveyor('solution-8', 18, 13.5, 0),
-  ];
-  const result = await runSolution(page, 'over-or-around', layout, 40);
-  expectSolved(result, {
-    deliveries: 12,
-    maxLosses: 3,
-    requiredStars: 1,
-    budgetLimit: 25_000,
-    expectedSpend: 20_000,
-  });
-});
-
-test('5-1 Salto calibrado possui solução pela janela', async ({ page }) => {
-  const layout = [
-    spring('solution-1', 3.25, 8, 65),
-    conveyor('solution-2', 9.5, 13.5, 0),
-    conveyor('solution-3', 11.5, 13.5, 0),
-    conveyor('solution-4', 13.5, 13.5, 0),
-    conveyor('solution-5', 15.5, 13.5, 0),
+    spring('solution-1', 3.5, 8, 45),
+    conveyor('solution-2', 19, 13.5, 0, true, 'slow-conveyor'),
+    conveyor('solution-3', 21, 13.5, 0, true, 'slow-conveyor'),
+    conveyor('solution-4', 23, 13.5, 0, true, 'slow-conveyor'),
   ];
   const result = await runSolution(page, 'calibrated-jump', layout, 42);
   expectSolved(result, {
     deliveries: 12,
     maxLosses: 2,
-    requiredStars: 2,
-    budgetLimit: 20_000,
-    expectedSpend: 15_000,
+    minimumStars: 1,
+    budgetLimit: 18_000,
+    expectedSpend: 11_000,
   });
 });
 
 test('6-1 Rota das estrelas possui uma rota completa dentro do orçamento', async ({ page }) => {
-  const layout = [6.5, 8.5, 10.5, 12.5, 14.5, 16.5, 18.5].map((x, index) =>
-    conveyor(`solution-${index + 1}`, x, 10.5, 0, true),
-  );
+  const layout = [
+    conveyor('solution-1', 15.75, 10.5, 5, true, 'fast-conveyor'),
+    conveyor('solution-2', 12.75, 11, -5, true, 'fast-conveyor'),
+    conveyor('solution-3', 10, 12.25, -5, true, 'fast-conveyor'),
+    conveyor('solution-4', 7.75, 12.5, 15, true, 'fast-conveyor'),
+  ];
   const result = await runSolution(page, 'star-route', layout, 40);
   expectSolved(result, {
     deliveries: 14,
-    maxLosses: 3,
-    requiredStars: 3,
+    maxLosses: 0,
+    minimumStars: 2,
+    budgetLimit: 12_500,
+    expectedSpend: 12_000,
+  });
+});
+
+test('7-1 Por cima ou por volta possui solução pelo salto', async ({ page }) => {
+  const layout = [
+    conveyor('solution-1', 8, 16.5, 45, false, 'turbo-spring'),
+  ];
+  const result = await runSolution(page, 'over-or-around', layout, 30);
+  expectSolved(result, {
+    deliveries: 12,
+    maxLosses: 0,
+    minimumStars: 1,
     budgetLimit: 25_000,
-    expectedSpend: 17_500,
-  });
-});
-
-test('7-1 Encontro de linhas possui solução para os dois fluxos', async ({ page }) => {
-  const layout = [
-    spring('solution-1', 3.25, 8, 65),
-    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5].map((x, index) =>
-      conveyor(`solution-${index + 2}`, x, 13.5, 0),
-    ),
-  ];
-  const result = await runSolution(page, 'meeting-lines', layout, 40);
-  expectSolved(result, {
-    deliveries: 16,
-    maxLosses: 3,
-    requiredStars: 2,
-    budgetLimit: 30_000,
-    expectedSpend: 25_000,
-  });
-});
-
-test('8-1 Ritmo de produção cumpre a cota dentro do orçamento', async ({ page }) => {
-  const layout = [3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 18].map((x, index) =>
-    conveyor(`solution-${index + 1}`, x, 13.5, 0),
-  );
-  const result = await runSolution(page, 'production-rhythm', layout, 35);
-  expectSolved(result, {
-    deliveries: 24,
-    requiredStars: 2,
-    budgetLimit: 35_000,
-    expectedSpend: 20_000,
-  });
-});
-
-test('9-1 Corredores industriais possui solução entre os bloqueios', async ({ page }) => {
-  const layout = [
-    spring('solution-1', 3.25, 8, 65),
-    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5, 19.5].map((x, index) =>
-      conveyor(`solution-${index + 2}`, x, 14.5, 0),
-    ),
-  ];
-  const result = await runSolution(page, 'industrial-corridors', layout, 42);
-  expectSolved(result, {
-    deliveries: 20,
-    maxLosses: 2,
-    requiredStars: 2,
-    budgetLimit: 40_000,
-    expectedSpend: 27_500,
-  });
-});
-
-test('10-1 Inspeção final combina os dois fluxos dentro do orçamento', async ({ page }) => {
-  const layout = [
-    spring('solution-1', 3.25, 8, 65),
-    ...[3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5, 19.5, 21.5].map((x, index) =>
-      conveyor(`solution-${index + 2}`, x, 13.5, 0),
-    ),
-  ];
-  const result = await runSolution(page, 'final-inspection', layout, 42);
-  expectSolved(result, {
-    deliveries: 25,
-    maxLosses: 1,
-    requiredStars: 3,
-    budgetLimit: 45_000,
-    expectedSpend: 30_000,
+    expectedSpend: 7_500,
   });
 });

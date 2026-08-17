@@ -1131,7 +1131,7 @@ test('sandbox permite colocar, girar, inverter e desfazer/refazer', async ({ pag
   await openApp(page);
   await startSandbox(page);
 
-  await expect(page.locator('[data-tool]')).toHaveCount(5);
+  await expect(page.locator('[data-tool]')).toHaveCount(7);
   await expect(page.locator('[data-tool]').first().locator('.tool-glyph')).toHaveCSS(
     'background-color',
     'rgba(0, 0, 0, 0)',
@@ -2577,7 +2577,7 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
 
   await page.locator('[data-action="result-menu"]').click();
   await openPlayMenu(page);
-  await expect(page.locator('#campaign-progress')).toContainText('3 de 10');
+  await expect(page.locator('#campaign-progress')).toContainText('3 de 11');
   await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(4);
 
   const stored = await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
@@ -2599,7 +2599,7 @@ test('conclui os três primeiros contratos e restaura o progresso v4', async ({ 
   await page.reload();
   await expect(page.locator('#menu-title')).toBeVisible();
   await openPlayMenu(page);
-  await expect(page.locator('#campaign-progress')).toContainText('3 de 10');
+  await expect(page.locator('#campaign-progress')).toContainText('3 de 11');
   await expect(page.locator('#contract-list .contract-card:enabled')).toHaveCount(4);
   await expect(page.locator('#contract-list .contract-card.is-complete')).toHaveCount(3);
   await expect(page.locator('.campaign-stage-marker.is-complete')).toHaveCount(3);
