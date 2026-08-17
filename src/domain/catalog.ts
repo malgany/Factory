@@ -33,7 +33,7 @@ import {
 export const CONTRACT_CATALOG_VERSION = 4 as const;
 export const DEFAULT_WORLD_BACKGROUND_COLOR = '#377fbd';
 export const DEFAULT_WORLD_GRID_COLOR = '#ffffff';
-export const MIN_CONTRACT_CAMERA_ZOOM = 0.5;
+export const MIN_CONTRACT_CAMERA_ZOOM = 0.45;
 export const MAX_CONTRACT_CAMERA_ZOOM = 2;
 export const MIN_SPAWN_INTERVAL_SECONDS = 0.8;
 export const MAX_SPAWN_INTERVAL_SECONDS = 10;

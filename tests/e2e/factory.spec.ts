@@ -2450,7 +2450,7 @@ test('play limpa a seleção após arrastar uma máquina da hotbar', async ({ pa
   await expect(page.locator('.build-palette')).toBeVisible();
 });
 
-test('câmera faz pan e limita o zoom entre 50% e 200%', async ({ page }) => {
+test('câmera faz pan e limita o zoom entre 45% e 200%', async ({ page }) => {
   await openApp(page);
   await startSandbox(page);
 
@@ -2476,13 +2476,13 @@ test('câmera faz pan e limita o zoom entre 50% e 200%', async ({ page }) => {
 
   await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
   for (let index = 0; index < 20; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.45, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, -900);
   await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(2, 2);
 
   for (let index = 0; index < 30; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.45, 2);
 
   const beforeResize = (await debugState(page)).camera;
   await page.setViewportSize({ width: 1920, height: 1080 });
@@ -2500,7 +2500,7 @@ test('câmera faz pan e limita o zoom entre 50% e 200%', async ({ page }) => {
     .toBeLessThan(0.05);
   await page.mouse.move(960, 540);
   for (let index = 0; index < 20; index += 1) await page.mouse.wheel(0, 900);
-  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.5, 2);
+  await expect.poll(async () => (await debugState(page)).camera.zoom).toBeCloseTo(0.45, 2);
 });
 
 test('repetir retorna à construção sem iniciar outra simulação', async ({ page }) => {

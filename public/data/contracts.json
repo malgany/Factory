@@ -153,9 +153,9 @@
       },
       "spawnIntervalSeconds": 1.2,
       "initialCamera": {
-        "centerX": 559.8,
-        "centerY": 438.37,
-        "zoom": 1.4333
+        "centerX": 492,
+        "centerY": 420,
+        "zoom": 1.3151
       }
     },
     {
@@ -239,9 +239,9 @@
       },
       "spawnIntervalSeconds": 1.15,
       "initialCamera": {
-        "centerX": 338.37,
-        "centerY": 396.85,
-        "zoom": 1.08
+        "centerX": 318,
+        "centerY": 408,
+        "zoom": 0.9694
       }
     },
     {
@@ -350,9 +350,9 @@
       },
       "spawnIntervalSeconds": 1.05,
       "initialCamera": {
-        "centerX": 587.05,
-        "centerY": 425.1,
-        "zoom": 1.1275
+        "centerX": 563,
+        "centerY": 539,
+        "zoom": 0.6985
       }
     },
     {
@@ -453,9 +453,9 @@
       },
       "spawnIntervalSeconds": 1.25,
       "initialCamera": {
-        "centerX": 769.71,
-        "centerY": 497.97,
-        "zoom": 1.2712
+        "centerX": 720,
+        "centerY": 516,
+        "zoom": 1.088
       }
     },
     {
@@ -636,9 +636,9 @@
       },
       "spawnIntervalSeconds": 1,
       "initialCamera": {
-        "centerX": 630.51,
-        "centerY": 392.96,
-        "zoom": 1.2712
+        "centerX": 576,
+        "centerY": 419,
+        "zoom": 1.1955
       }
     },
     {
@@ -755,9 +755,9 @@
       },
       "spawnIntervalSeconds": 1.1,
       "initialCamera": {
-        "centerX": 579.27,
-        "centerY": 620.93,
-        "zoom": 1.0976
+        "centerX": 546,
+        "centerY": 696,
+        "zoom": 0.4501
       }
     },
     {
@@ -934,9 +934,9 @@
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 680,
-        "centerY": 436.73,
-        "zoom": 1.1275
+        "centerX": 655,
+        "centerY": 420,
+        "zoom": 0.8355
       }
     },
     {
@@ -1116,9 +1116,9 @@
       },
       "spawnIntervalSeconds": 1.5,
       "initialCamera": {
-        "centerX": 581.68,
-        "centerY": 532.96,
-        "zoom": 1.2376
+        "centerX": 639.74,
+        "centerY": 524.5,
+        "zoom": 1.1223
       }
     },
     {
@@ -1243,9 +1243,9 @@
       },
       "spawnIntervalSeconds": 0.8,
       "initialCamera": {
-        "centerX": 635.86,
-        "centerY": 392.63,
-        "zoom": 1.2713
+        "centerX": 611,
+        "centerY": 407,
+        "zoom": 1.1414
       }
     },
     {
